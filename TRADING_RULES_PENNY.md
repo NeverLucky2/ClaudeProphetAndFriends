@@ -153,6 +153,31 @@ Flag-gated rollout: enforcement defaults off; the failure mode above only fires 
 
 ---
 
+## Regime Gate
+
+Before opening any new penny entry, call `get_regime_gate_status`. The response carries a tier (GREEN / NORMAL / DEFENSIVE / RED / UNKNOWN), a `sizing_multiplier`, and a `block_new_entries` flag.
+
+| Tier | Score | Sizing × | New entries |
+|---|---|---|---|
+| GREEN | 70–100 | 1.0× | Yes |
+| NORMAL | 40–69 | 0.8× | Yes |
+| DEFENSIVE | 20–39 | 0.5× | Yes |
+| RED | 0–19 | 0.0× | **Blocked** |
+| UNKNOWN | (no data) | fail-closed | **Blocked** |
+
+Application:
+- The multiplier scales the **base sizing tier** from the table above. With composite ≥ 80 (5–7% base) and tier=DEFENSIVE (0.5×), you size 2.5–3.5%. With composite 60–79 (2–3% base) and tier=NORMAL (0.8×), you size 1.6–2.4%. Apply before the 8% per-position hard cap, not after — the multiplier reduces planned size, the hard cap clips the worst case.
+- If `block_new_entries=true`, do not open new positions. Bracket exits, trailing stops, and any in-flight order management continue as normal.
+- Treat `tier=UNKNOWN` or a response containing `error` as block-equivalent (fail closed — penny names move fast and sizing without regime context is the kind of decision the operator wrote rules to avoid).
+
+Penny sizing already has a `< 60` no-trade band; regime DEFENSIVE/NORMAL does not change that. The multiplier compounds with the score tier, it does not replace it.
+
+Stale data: `is_stale=true` continues with the last good read; the operator gets the signal, you keep trading on the most recent regime view.
+
+Flag-gated rollout: enforcement defaults off (`ENABLE_REGIME_GATE=false`). While off, the status payload still surfaces the underlying tier for observation but the multiplier is 1.0× and the block flag is false.
+
+---
+
 ## Glossary
 
   Composite score:        Sum of effective signal scores; max 100

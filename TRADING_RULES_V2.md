@@ -341,6 +341,36 @@ Flag-gated rollout: enforcement defaults off (`ENABLE_SECTOR_AGGREGATION=false`)
 
 ---
 
+## Regime Gate
+
+**Rule:** Before opening any new entry, call `get_regime_gate_status` and respect the result.
+
+The gate consolidates four daily skills (breadth, macro regime, market top, bubble) into a single 0–100 environment score and derives a tier:
+
+| Tier | Score | Sizing × | New entries |
+|---|---|---|---|
+| GREEN | 70–100 | 1.0× | Yes |
+| NORMAL | 40–69 | 0.8× | Yes |
+| DEFENSIVE | 20–39 | 0.5× | Yes |
+| RED | 0–19 | 0.0× | **Blocked** (exits only) |
+| UNKNOWN | (no data) | fail-closed | **Blocked** |
+
+How to apply each field:
+- `sizing_multiplier`: multiply the dollar amount you would otherwise size for the trade. Round down to the nearest whole-share quantity. The multiplier is the gate's quantitative throttle; the tier name is the qualitative label.
+- `block_new_entries`: if `true`, **do not open any new position this beat.** Exit logic still runs. Treat `tier=UNKNOWN` or any response with an `error` field as block-equivalent (fail closed — if you cannot read the gate, you do not trade new entries).
+
+Examples:
+- NORMAL tier (0.8×): a setup you would normally size at $5,000 → size $4,000
+- DEFENSIVE tier (0.5×): a $5,000 setup → size $2,500. Continue to apply the same setup-quality bar; the multiplier is a sizing reduction, not a quality gate.
+- RED tier: skip new entries entirely. Manage open positions per their existing exit rules.
+- UNKNOWN tier: skip new entries (regime data missing — fail closed). Operator should investigate the daily compute job.
+
+Stale data: if `is_stale=true` (more than 29 hours since the last compute), the tier and multiplier from the last good read are still used. The operator gets a separate signal — you keep trading on the most recent regime view rather than switching to UNKNOWN.
+
+Flag-gated rollout: enforcement defaults off (`ENABLE_REGIME_GATE=false`). While off, `get_regime_gate_status` still returns the underlying score and tier for observation, but `sizing_multiplier=1.0` and `block_new_entries=false`. When the flag is flipped on, the multiplier and block fields begin to bite without any change to this rule.
+
+---
+
 ## Portfolio Construction
 
 **Rule:** Maintain 50-70% cash at all times
