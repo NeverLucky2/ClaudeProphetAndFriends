@@ -268,6 +268,30 @@ Flag-gated rollout: enforcement defaults off; the failure mode above only fires 
 
 ---
 
+## Regime Gate
+
+Before opening a new trend entry, call `get_regime_gate_status`. The gate returns a tier, a `sizing_multiplier`, and a `block_new_entries` flag derived from the four daily regime skills.
+
+| Tier | Score | Sizing × | New entries |
+|---|---|---|---|
+| GREEN | 70–100 | 1.0× | Yes |
+| NORMAL | 40–69 | 0.8× | Yes |
+| DEFENSIVE | 20–39 | 0.5× | Yes |
+| RED | 0–19 | 0.0× | **Blocked** |
+| UNKNOWN | (no data) | fail-closed | **Blocked** |
+
+Application to the Position Sizing routine above:
+- The multiplier applies to `position_dollars` **after** the ATR-volatility calc but **before** the 4% hard cap clip. So step 6 becomes: `position_dollars = min(position_dollars × sizing_multiplier, portfolio_value × 0.04)`. This preserves the 4% cap as the worst-case ceiling and lets the multiplier reduce trend exposure cleanly through softer regimes.
+- The 0.5% risk-per-trade target in step 5 is **not** scaled — the multiplier reduces gross exposure, not the risk-per-trade calibration that drives the stop distance.
+- If `block_new_entries=true`, skip the entry. Open trend positions continue to be managed by the existing exit rules (Donchian-20 trail, time stop).
+- Treat `tier=UNKNOWN` or a response with `error` as block-equivalent. The macro-trend universe is the most regime-sensitive of the four agents; missing regime data is exactly when you should not be opening fresh positions.
+
+Stale data: `is_stale=true` keeps the last good tier/multiplier in force; operator gets the staleness signal separately.
+
+Flag-gated rollout: `ENABLE_REGIME_GATE=false` by default. While off, the status payload reports the underlying tier for observation but always returns `sizing_multiplier=1.0` and `block_new_entries=false`.
+
+---
+
 ## Heartbeat Schedule
 
 TrendProphet runs **once per trading day**, at **5:00 PM ET** (1 hour after market close).

@@ -142,6 +142,18 @@ evaluated={list of underlyings checked}, actions={list of opens/closes this beat
 
 ---
 
+## Regime Gate
+
+Before opening any new condor, call `get_regime_gate_status`. Harvest consumes **only** the `block_new_entries` flag — the `sizing_multiplier` is ignored, because condor sizing is already small per trade and the strategy's risk gate is already the IVR / IV–RV / BP-cap stack, not regime tier.
+
+- If `block_new_entries=true` (tier=RED, score < 20): do not open new condors this beat. Open condors continue to be managed by the existing exit rules (50% profit target, 21 DTE rolldown, 200% loss stop).
+- If `tier=UNKNOWN` or the response contains `error`: treat as block-equivalent (fail closed). Condor entries during a missing-regime window are exactly the asymmetric exposure the operator wrote rules to avoid.
+- All other tiers (GREEN / NORMAL / DEFENSIVE): no effect on condor entry sizing. Continue applying the existing IVR ≥ 30, IV > RV, and 12% BP-cap rules.
+
+Flag-gated rollout: `ENABLE_REGIME_GATE=false` by default; while off, the status payload reports the underlying tier for observation but always returns `block_new_entries=false`.
+
+---
+
 ## Hard Stops (override everything)
 
 Cease all activity and log "HARD STOP: {reason}" if:
