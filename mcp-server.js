@@ -399,6 +399,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                 type: 'string',
               },
             },
+            dominant_signal: {
+              type: 'string',
+              enum: ['social', 'regulatory', 'technical'],
+              description: 'For PennyProphet entries: dominant signal classification. Drives the 20-minute backend-managed time exit when set to "social". Pass through from get_penny_signal_detail.dominant_signal.',
+            },
           },
           required: ['symbol', 'side', 'allocation_dollars'],
         },
