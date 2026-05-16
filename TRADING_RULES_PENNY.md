@@ -1,12 +1,5 @@
 # Penny Stock Trading Rules — Spark
 
-> **Note:** The authoritative copy of these rules now lives inline in
-> `data/agent-config.json` under `strategies[].id == "penny-momentum"`,
-> field `customRules`. This file is a human-readable mirror only — the
-> agent does NOT read it at runtime. Edit the JSON (or use the
-> `adapt-strategy-penny` skill) to change agent behavior. Updates here
-> will not take effect.
-
 **Updated:** 2026-05-02
 **Style:** High-risk, high-reward penny stock momentum trading
 
@@ -254,32 +247,30 @@ Read `dominant_signal` from `get_penny_signal_detail` to determine the exit rule
 ### `dominant_signal = "social"` (Reddit/StockTwits momentum)
 
 ENTRY:
-  - Use place_managed_position with stop and target
+  - Call `place_managed_position` with `dominant_signal: "social"` so the
+    backend knows to fire the time exit. Omitting this field means the
+    timer will NOT fire and the position will run on the bracket alone.
   - Stop: −8% from entry
   - Target: +15% (50% scale) then +20% (remaining)
 
-TIME-BASED EXIT (overrides bracket if not yet filled):
+TIME-BASED EXIT (backend-managed):
+  The 20-minute (or 15-min-before-close, whichever first) cancel-and-
+  market-sell flow is executed by `PositionManager.executeSocialTimeExit`
+  in the Go backend. You do NOT need to track time-since-entry, cancel
+  brackets, or place market sells manually. As long as you passed
+  `dominant_signal: "social"` at entry, the backend will:
 
-  At 20 minutes post-entry (or 15 minutes before market close, whichever first):
+  1. Cancel the bracket's stop and take-profit legs.
+  2. Re-check each leg's status — if either filled at the broker during
+     the cancel window, skip the market sell (the bracket closed the
+     position).
+  3. Otherwise place a market sell for the remaining quantity, tagged
+     with the penny-momentum strategy so attribution stays correct.
 
-  1. Cancel the active bracket order via cancel_order
-  2. Confirm cancellation succeeded:
-     - If cancel succeeded → proceed to step 3
-     - If cancel failed because bracket already filled → log and stop (the
-       position is already closed by the bracket)
-     - If cancel failed for any other reason → halt agent, log
-       "social-exit cancel failure, operator review required"
-  3. Place market sell order for full position size
-  4. Confirm fill within 60 seconds:
-     - If filled → log exit, mark position closed
-     - If not filled within 60 seconds → halt agent, log
-       "social-exit market order stalled, operator review required"
-
-RACE CONDITION HANDLING:
-
-  If the bracket's stop or target leg fires before the cancel completes, the
-  position is closed by the bracket — this is fine. Always confirm final
-  position state via get_positions after the protocol completes.
+RACE CONDITION HANDLING (backend):
+  If a bracket leg fires before the cancel completes, the backend detects
+  the fill via the post-cancel order-status check and does not place a
+  duplicate sell. The bracket-monitor's next tick reconciles to CLOSED.
 
 ENTRY GATING:
   - Do not enter social positions < 30 minutes before market close
