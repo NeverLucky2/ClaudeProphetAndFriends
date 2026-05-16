@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"prophet-trader/interfaces"
 	"prophet-trader/models"
 )
 
@@ -133,5 +134,90 @@ func TestExitMonitor_LossStopWinsOverProfitTarget(t *testing.T) {
 	}
 	if closer.calls[0].CloseReason != "time_exit" {
 		t.Errorf("DTE<=21 must take priority, got %q", closer.calls[0].CloseReason)
+	}
+}
+
+// fakeOrderTracker is the in-test order-state source. statuses is a
+// CondorID-agnostic orderID->status map; the monitor only ever looks up
+// CloseOrderID strings so callers seed those directly.
+type fakeOrderTracker struct {
+	statuses map[string]string // orderID -> status
+	cancels  []string
+}
+
+func (f *fakeOrderTracker) GetOrder(_ context.Context, id string) (*interfaces.Order, error) {
+	return &interfaces.Order{ID: id, Status: f.statuses[id]}, nil
+}
+
+func (f *fakeOrderTracker) CancelOrder(_ context.Context, id string) error {
+	f.cancels = append(f.cancels, id)
+	return nil
+}
+
+func TestExitMonitor_EscalatesLossStopFromLimitToMarket(t *testing.T) {
+	// Simulate: a previous tick already placed the tier-0 marketable limit
+	// (cost+$0.20) at t0; the order has not filled by t0+3min. The 2-min
+	// loss_stop escalation window has elapsed, so the monitor must cancel
+	// the existing limit and re-place as market with AllowReplaceClosing.
+	t0 := time.Date(2026, 5, 16, 14, 0, 0, 0, time.UTC)
+	c := mkCondor("c1", "SPY", 1, 1.0, 30, t0)
+	c.CloseOrderID = "ord-1"
+	c.Status = "CLOSING"
+	store := &fakeListStore{condors: []*models.DBHarvestCondor{c}}
+	pricer := &fakeCostPricer{costs: map[string]float64{"c1": 2.20}}
+	closer := &fakeCloser{}
+	tracker := &fakeOrderTracker{statuses: map[string]string{"ord-1": "open"}}
+	m := NewHarvestExitMonitor(store, pricer, closer)
+	m.SetOrderTracker(tracker)
+	m.RecordTierAttempt("c1", "loss_stop", t0)
+
+	m.EvaluateTick(context.Background(), t0.Add(3*time.Minute))
+
+	if len(tracker.cancels) != 1 || tracker.cancels[0] != "ord-1" {
+		t.Fatalf("expected cancels=[ord-1], got %v", tracker.cancels)
+	}
+	if len(closer.calls) != 1 {
+		t.Fatalf("expected 1 close call, got %d", len(closer.calls))
+	}
+	got := closer.calls[0]
+	if got.OrderType != "market" {
+		t.Errorf("OrderType: got %q, want market", got.OrderType)
+	}
+	if got.LimitPrice != 0 {
+		t.Errorf("LimitPrice: got %v, want 0 (market orders zero the limit)", got.LimitPrice)
+	}
+	if !got.AllowReplaceClosing {
+		t.Errorf("AllowReplaceClosing: got false, want true (closer must accept CLOSING row)")
+	}
+	if got.FinalizeImmediately {
+		t.Errorf("FinalizeImmediately: got true, want false (still monitor-mode)")
+	}
+	if got.CloseReason != "loss_stop" {
+		t.Errorf("CloseReason: got %q, want loss_stop (reason must be preserved across tiers)", got.CloseReason)
+	}
+}
+
+func TestExitMonitor_NoEscalationBeforeWindow(t *testing.T) {
+	// Same setup as the escalation test but only 1 minute elapsed — below
+	// the 2-minute loss_stop window. No cancel, no re-place.
+	t0 := time.Date(2026, 5, 16, 14, 0, 0, 0, time.UTC)
+	c := mkCondor("c1", "SPY", 1, 1.0, 30, t0)
+	c.CloseOrderID = "ord-1"
+	c.Status = "CLOSING"
+	store := &fakeListStore{condors: []*models.DBHarvestCondor{c}}
+	pricer := &fakeCostPricer{costs: map[string]float64{"c1": 2.20}}
+	closer := &fakeCloser{}
+	tracker := &fakeOrderTracker{statuses: map[string]string{"ord-1": "open"}}
+	m := NewHarvestExitMonitor(store, pricer, closer)
+	m.SetOrderTracker(tracker)
+	m.RecordTierAttempt("c1", "loss_stop", t0)
+
+	m.EvaluateTick(context.Background(), t0.Add(1*time.Minute))
+
+	if len(tracker.cancels) != 0 {
+		t.Fatalf("expected no cancels before window, got %v", tracker.cancels)
+	}
+	if len(closer.calls) != 0 {
+		t.Fatalf("expected no close calls before window, got %d", len(closer.calls))
 	}
 }
