@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -305,6 +306,21 @@ func main() {
 	segmentPnLController := controllers.NewSegmentPnLController(segmentPnLSvc)
 	logger.Debug("Segment P&L service initialized")
 
+	// Beat-context aggregator endpoint. Bundles account, positions, econ
+	// blackout, regime gate, and segment P&L into a single response so the
+	// harness can inject one read-only block per beat instead of the LLM
+	// making 4-5 separate MCP tool calls. Soft-fails on any downstream
+	// error (200 with errors[]); the agent's per-tool fail-closed policy
+	// (TRADING_RULES_*.md) takes over from there.
+	beatCtxController := controllers.NewBeatContextController(
+		&accountFetcherAdapter{orderController: orderController},
+		&positionsFetcherAdapter{orderController: orderController},
+		&blackoutFetcherAdapter{econCalendarSvc: econCalendarService},
+		&regimeFetcherAdapter{regimeGate: regimeGate},
+		&segmentPnLFetcherAdapter{svc: segmentPnLSvc},
+	)
+	logger.Debug("Beat-context controller initialized")
+
 	// Generic IV-rank controller (shared by Harvest and Prophet via /api/v1/iv/:symbol).
 	// rvSvc enriches the response with realized_vol_20d + iv_minus_rv.
 	ivController := controllers.NewIVController(harvestIVRSvc, realizedVolSvc)
@@ -317,7 +333,7 @@ func main() {
 	logger.Debug("Intraday signal service initialized")
 
 	// Setup HTTP server
-	router := setupRouter(orderController, newsController, intelligenceController, positionController, activityController, economicFeedsController, pennyController, guardController, harvestController, trendController, segmentPnLController, ivController, intradayController, regimeGateController)
+	router := setupRouter(orderController, newsController, intelligenceController, positionController, activityController, economicFeedsController, pennyController, guardController, harvestController, trendController, segmentPnLController, ivController, intradayController, regimeGateController, beatCtxController)
 
 	// Start data cleanup routine
 	go startDataCleanup(ctx, storageService, cfg.DataRetentionDays, logger)
@@ -347,7 +363,7 @@ func main() {
 	}
 }
 
-func setupRouter(orderController *controllers.OrderController, newsController *controllers.NewsController, intelligenceController *controllers.IntelligenceController, positionController *controllers.PositionManagementController, activityController *controllers.ActivityController, economicFeedsController *controllers.EconomicFeedsController, pennyController *controllers.PennyController, guardController *controllers.GuardController, harvestController *controllers.HarvestController, trendController *controllers.TrendController, segmentPnLController *controllers.SegmentPnLController, ivController *controllers.IVController, intradayController *controllers.IntradayController, regimeGateController *controllers.RegimeGateController) *gin.Engine {
+func setupRouter(orderController *controllers.OrderController, newsController *controllers.NewsController, intelligenceController *controllers.IntelligenceController, positionController *controllers.PositionManagementController, activityController *controllers.ActivityController, economicFeedsController *controllers.EconomicFeedsController, pennyController *controllers.PennyController, guardController *controllers.GuardController, harvestController *controllers.HarvestController, trendController *controllers.TrendController, segmentPnLController *controllers.SegmentPnLController, ivController *controllers.IVController, intradayController *controllers.IntradayController, regimeGateController *controllers.RegimeGateController, beatCtxController *controllers.BeatContextController) *gin.Engine {
 	router := gin.Default()
 	router.SetTrustedProxies([]string{"127.0.0.1"})
 
@@ -476,6 +492,11 @@ func setupRouter(orderController *controllers.OrderController, newsController *c
 		}
 
 		api.GET("/segment-pnl/:strategy", segmentPnLController.HandleGetSegmentPnL)
+
+		// Beat-context aggregator. The harness calls this once per beat
+		// (when BEAT_CONTEXT_ENABLED=true) and injects the response as a
+		// single read-only block, replacing 4-5 separate MCP tool calls.
+		api.GET("/beat-context", beatCtxController.HandleGet)
 	}
 
 	// Serve dashboard
@@ -593,4 +614,94 @@ func startPositionMonitor(ctx context.Context, orderController *controllers.Orde
 			}
 		}
 	}
+}
+
+// ── Beat-context adapters ───────────────────────────────────────────
+//
+// These thin wrappers bridge the existing concrete services / controllers
+// to the narrow interfaces declared in controllers/beat_context_controller.go.
+// Keeping them in main.go (rather than in the controllers package) avoids a
+// dependency cycle and keeps the controller test stub-able.
+
+type accountFetcherAdapter struct {
+	orderController *controllers.OrderController
+}
+
+func (a *accountFetcherAdapter) GetAccount() (controllers.Account, error) {
+	acct, err := a.orderController.GetAccount()
+	if err != nil {
+		return controllers.Account{}, err
+	}
+	return controllers.Account{
+		PortfolioValue: acct.PortfolioValue,
+		Cash:           acct.Cash,
+		BuyingPower:    acct.BuyingPower,
+	}, nil
+}
+
+type positionsFetcherAdapter struct {
+	orderController *controllers.OrderController
+}
+
+func (a *positionsFetcherAdapter) GetPositionsByStrategy(strategy string) ([]controllers.PositionSummary, error) {
+	positions, err := a.orderController.GetPositionsByStrategy(strategy)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]controllers.PositionSummary, 0, len(positions))
+	for _, p := range positions {
+		if p == nil {
+			continue
+		}
+		out = append(out, controllers.PositionSummary{
+			Symbol:           p.Symbol,
+			Qty:              p.Qty,
+			UnrealizedPnL:    p.UnrealizedPL,
+			UnrealizedPnLPct: p.UnrealizedPLPC,
+		})
+	}
+	return out, nil
+}
+
+// blackoutFetcherAdapter wraps the econ calendar service directly rather than
+// going through the HTTP controller. When FMP_API_KEY is unset the service
+// pointer is nil (see main.go FMP_API_KEY check); we surface that as a soft
+// error so the beat-context endpoint reports it via errors[] rather than
+// pretending blackout is false.
+type blackoutFetcherAdapter struct {
+	econCalendarSvc *services.EconCalendarService
+}
+
+func (a *blackoutFetcherAdapter) EconBlackoutStatus() (bool, string, error) {
+	if a.econCalendarSvc == nil {
+		return false, "", errors.New("econ calendar not configured")
+	}
+	status := a.econCalendarSvc.GetBlackoutStatus(context.Background(), time.Now().UTC())
+	if status == nil {
+		return false, "", errors.New("econ calendar returned nil status")
+	}
+	if status.Error != "" {
+		return status.IsBlackout, status.Reason, errors.New(status.Error)
+	}
+	return status.IsBlackout, status.Reason, nil
+}
+
+// regimeFetcherAdapter wraps the regime gate service. The service's GetStatus
+// never errors (it fails open internally to a neutral status), so the adapter
+// always returns nil error; the interface admits an error slot to keep the
+// controller signature uniform across deps.
+type regimeFetcherAdapter struct {
+	regimeGate *services.RegimeGateService
+}
+
+func (a *regimeFetcherAdapter) GetStatus() (services.RegimeGateStatus, error) {
+	return a.regimeGate.GetStatus(), nil
+}
+
+type segmentPnLFetcherAdapter struct {
+	svc *services.SegmentPnLService
+}
+
+func (a *segmentPnLFetcherAdapter) GetSegmentPnL(ctx context.Context, strategy string) (*services.SegmentPnL, error) {
+	return a.svc.GetSegmentPnL(ctx, strategy)
 }
