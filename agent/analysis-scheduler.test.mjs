@@ -12,6 +12,7 @@ import {
   buildBreadthSkillAppendix,
   buildMarketTopSkillAppendix,
   buildBubbleSkillAppendix,
+  shouldTriggerWeeklyScreenerOnStartup,
   AnalysisScheduler,
 } from './analysis-scheduler.js';
 
@@ -167,4 +168,54 @@ test('_getLockKey produces stable dateslug-suffixed keys for each new job', () =
   assert.equal(scheduler._getLockKey('breadth_skill', '2026-05-15'),      'breadth_skill_20260515');
   assert.equal(scheduler._getLockKey('market_top_skill', '2026-05-15'),   'market_top_skill_20260515');
   assert.equal(scheduler._getLockKey('bubble_skill', '2026-05-15'),       'bubble_skill_20260515');
+});
+
+test('shouldTriggerWeeklyScreenerOnStartup: true on Sunday when not yet run today', () => {
+  assert.equal(
+    shouldTriggerWeeklyScreenerOnStartup({
+      dayOfWeek: 0,
+      isoDate: '2026-05-17',
+      lastWeeklyScreenDate: '2026-05-10',
+    }),
+    true,
+  );
+});
+
+test('shouldTriggerWeeklyScreenerOnStartup: true on Sunday when state is null (fresh install)', () => {
+  // Cold start with no persisted state must still trigger.
+  assert.equal(
+    shouldTriggerWeeklyScreenerOnStartup({
+      dayOfWeek: 0,
+      isoDate: '2026-05-17',
+      lastWeeklyScreenDate: null,
+    }),
+    true,
+  );
+});
+
+test('shouldTriggerWeeklyScreenerOnStartup: false on Sunday when already run today', () => {
+  // Idempotency guard — running twice on the same Sunday would double-fire.
+  assert.equal(
+    shouldTriggerWeeklyScreenerOnStartup({
+      dayOfWeek: 0,
+      isoDate: '2026-05-17',
+      lastWeeklyScreenDate: '2026-05-17',
+    }),
+    false,
+  );
+});
+
+test('shouldTriggerWeeklyScreenerOnStartup: false on non-Sunday regardless of state', () => {
+  // Verify the day gate dominates: even with stale state, weekdays/Saturday skip.
+  for (const dayOfWeek of [1, 2, 3, 4, 5, 6]) {
+    assert.equal(
+      shouldTriggerWeeklyScreenerOnStartup({
+        dayOfWeek,
+        isoDate: '2026-05-16',
+        lastWeeklyScreenDate: '2026-05-10',
+      }),
+      false,
+      `dayOfWeek=${dayOfWeek} must not trigger`,
+    );
+  }
 });

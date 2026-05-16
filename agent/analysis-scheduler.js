@@ -139,6 +139,15 @@ export function buildBubbleSkillAppendix(date) {
 6. Do NOT prompt for user confirmation. Do NOT write any other files.`;
 }
 
+// Pure gate for the Sunday weekly_screeners startup catch-up. Returns true
+// when the bot is starting up on a Sunday and weekly_screeners hasn't run yet
+// that Sunday. No hour cap — Sunday 18:00 is the primary trigger; this catch-up
+// must fire at any hour on Sunday if the primary was missed (including after
+// 18:00, when the bot came back online late).
+export function shouldTriggerWeeklyScreenerOnStartup({ dayOfWeek, isoDate, lastWeeklyScreenDate }) {
+  return dayOfWeek === 0 && lastWeeklyScreenDate !== isoDate;
+}
+
 export class AnalysisScheduler extends EventEmitter {
   constructor(options = {}) {
     super();
@@ -405,6 +414,19 @@ export class AnalysisScheduler extends EventEmitter {
       } else {
         this._log('No regime gate compute for today — triggering now...', 'info');
         await this.triggerJob('regime_gate_compute').catch(() => {});
+      }
+    }
+
+    // 1.6 Weekly screeners catch-up (state-based, Sunday-only) — catches the
+    // case where the bot was offline at the Sunday 18:00 ET tick-trigger. No
+    // hour cap on purpose: fires at any time on Sunday if it hasn't run yet,
+    // including after 18:00 (a late restart that missed the primary trigger).
+    if (shouldTriggerWeeklyScreenerOnStartup({ dayOfWeek, isoDate, lastWeeklyScreenDate: this._lastWeeklyScreenDate })) {
+      if (await this._isLocked(this._getLockKey('weekly_screeners', isoDate))) {
+        this._log('Weekly screeners already running in another process — skipping startup trigger.', 'info');
+      } else {
+        this._log('No weekly_screeners for today — triggering now...', 'info');
+        await this.triggerJob('weekly_screeners').catch(() => {});
       }
     }
 
