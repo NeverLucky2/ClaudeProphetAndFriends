@@ -379,8 +379,13 @@ async function harvestPreflight(runtime, agentConfig) {
   const fomc = fomcResp.data;
   const openCondors = state.open_condors;
 
-  // Open condors require exit-rule evaluation each beat.
-  if (openCondors > 0) {
+  // Open condors require exit-rule evaluation each beat — UNLESS the
+  // HarvestExitMonitor Go service is running (HARVEST_EXIT_MONITOR_ENABLED=true,
+  // surfaced via state.monitor_enabled). When that's the case, exits run
+  // out-of-band; the LLM beat only needs to wake for new entries, which
+  // means the entries-gating below (FOMC blackout, regime, chain probe,
+  // IV-RV edge) is the only thing keeping the beat alive.
+  if (openCondors > 0 && state.monitor_enabled !== true) {
     return { skip: false, reason: `${openCondors} open condor(s) to evaluate` };
   }
 
