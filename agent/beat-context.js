@@ -1,0 +1,53 @@
+// Renders the beat-context block injected into every heartbeat prompt.
+// Output is read-only context, NOT a checklist — agents are told to call
+// the underlying MCP tools only when they need fresher data than the snapshot.
+export function renderBeatContextBlock(ctx) {
+  if (!ctx || typeof ctx !== 'object') return '';
+  const lines = [];
+  if (ctx.account && typeof ctx.account.portfolio_value === 'number') {
+    const a = ctx.account;
+    lines.push(`Portfolio: $${a.portfolio_value.toLocaleString()} | Cash: $${(a.cash ?? 0).toLocaleString()} | Buying Power: $${(a.buying_power ?? 0).toLocaleString()}`);
+  }
+  if (Array.isArray(ctx.positions) && ctx.positions.length > 0) {
+    lines.push('Positions:');
+    for (const p of ctx.positions) {
+      const sign = p.unrealized_pnl_pct >= 0 ? '+' : '';
+      lines.push(`  - ${p.symbol}: ${p.qty} sh, P&L ${sign}${(p.unrealized_pnl_pct ?? 0).toFixed(1)}% ($${(p.unrealized_pnl ?? 0).toFixed(2)})`);
+    }
+  } else if (Array.isArray(ctx.positions)) {
+    lines.push('Positions: none');
+  }
+  if (ctx.econ_blackout) {
+    lines.push(`Econ Blackout: ${ctx.econ_blackout.is_blackout ? 'YES — ' + (ctx.econ_blackout.reason || 'unspecified') : 'no'}`);
+  }
+  if (ctx.regime_gate) {
+    const rg = ctx.regime_gate;
+    lines.push(`Regime: ${rg.tier} (score ${rg.score}, size ${rg.sizing_multiplier}×, block=${rg.block_new_entries})`);
+  }
+  if (ctx.segment_pnl) {
+    const sp = ctx.segment_pnl;
+    lines.push(`Segment ${sp.strategy}: P&L ${sp.unrealized_pnl_percent.toFixed(2)}%, deployed ${sp.deployed_percent.toFixed(1)}%`);
+  }
+  if (Array.isArray(ctx.errors) && ctx.errors.length > 0) {
+    lines.push(`errors: ${ctx.errors.join('; ')}`);
+  }
+  if (lines.length === 0) return '';
+  return '## Beat Context (read-only snapshot)\n' + lines.join('\n');
+}
+
+// fetchBeatContext returns the parsed payload or null on any error / timeout.
+// The 800ms timeout matches agent/harness.js:826-845's intraday-blob fetch
+// pattern — same soft-fail philosophy: a missing block does not block the
+// beat, the LLM can fetch fresh via the underlying MCP tools.
+export async function fetchBeatContext(goAxios, strategyId) {
+  if (!goAxios) return null;
+  try {
+    const url = strategyId
+      ? `/api/v1/beat-context?strategy=${encodeURIComponent(strategyId)}`
+      : '/api/v1/beat-context';
+    const resp = await goAxios.get(url, { timeout: 800 });
+    return resp?.data ?? null;
+  } catch (_err) {
+    return null;
+  }
+}

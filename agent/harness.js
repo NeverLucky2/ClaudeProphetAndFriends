@@ -9,6 +9,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { resolvePreflight } from './preflight.js';
 import { renderIntradayBlock, shouldInjectIntraday } from './intraday-prompt.js';
+import { fetchBeatContext, renderBeatContextBlock } from './beat-context.js';
 
 // Prophet's auto-pushed intraday watchlist. Symbols outside this set are
 // still reachable via the get_intraday_signals MCP tool on demand.
@@ -819,13 +820,19 @@ ${userBlock}`;
       ? `\n\n[EMERGENCY ALERT] The mid-session market scanner detected a breaking development that requires your immediate attention:\n${this._emergencyReason}\n\nReview this alert and assess whether it requires immediate position action before your routine duties.`
       : '';
 
+    // Hoist the runtime lookup so both the intraday and beat-context blocks
+    // share a single resolution. Each block still guards runtime?.goAxios
+    // independently because the runtime can legitimately be null in tests
+    // and during early-boot beats.
+    const runtime = this.getRuntime ? this.getRuntime(this.sandboxId) : null;
+
     // Optional intraday context blob — Prophet only, market-hours phases only.
     // Soft-fails: if the fetch errors or doesn't complete in 800ms, the beat
     // proceeds without the blob and a single-line log entry is emitted. The
     // LLM can still pull the data on-demand via get_intraday_signals.
     let intradayPrefix = '';
+    let beatContextPrefix = '';
     if (shouldInjectIntraday(this._agentConfig?.strategyId, phase)) {
-      const runtime = this.getRuntime ? this.getRuntime(this.sandboxId) : null;
       if (runtime?.goAxios) {
         try {
           const symbols = PROPHET_INTRADAY_WATCHLIST.join(',');
@@ -844,7 +851,31 @@ ${userBlock}`;
       }
     }
 
-    const prompt = `[HEARTBEAT #${beatNum}] Phase: ${PHASE_DEFAULTS[phase].label}. Time: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })} ET. Current heartbeat interval: ${this.state.heartbeatSeconds}s.${emergencyPrefix}${intradayPrefix}\n\nPerform your duties for this phase.`;
+    // Beat-context bundle — fetched for every agent regardless of strategy/phase
+    // when BEAT_CONTEXT_ENABLED is not explicitly disabled. Default-on with an
+    // opt-out env var so operators can kill the injection without redeploying
+    // the harness. Soft-fails on error: the LLM can still call the underlying
+    // MCP tools when the block is absent.
+    if (process.env.BEAT_CONTEXT_ENABLED !== 'false') {
+      if (runtime?.goAxios) {
+        try {
+          const ctx = await fetchBeatContext(runtime.goAxios, this._agentConfig?.strategyId);
+          const block = renderBeatContextBlock(ctx);
+          if (block) beatContextPrefix = `\n\n${block}`;
+        } catch (err) {
+          this.state.emit('agent_log', {
+            message: `Beat #${beatNum}: beat-context render failed (${err.message}); proceeding without it`,
+            level: 'warn',
+          });
+        }
+      }
+    }
+
+    // Prefix order: emergency → beat-context (universal) → intraday (Prophet-only). The
+    // beat-context block lands first because every agent reads it; the intraday blob
+    // is Prophet+market-hours only and would otherwise push beat-context further from the
+    // phase directive.
+    const prompt = `[HEARTBEAT #${beatNum}] Phase: ${PHASE_DEFAULTS[phase].label}. Time: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })} ET. Current heartbeat interval: ${this.state.heartbeatSeconds}s.${emergencyPrefix}${beatContextPrefix}${intradayPrefix}\n\nPerform your duties for this phase.`;
 
     try {
       const result = await this._runClaude(prompt, model);
