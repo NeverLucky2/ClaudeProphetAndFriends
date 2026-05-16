@@ -61,6 +61,10 @@ type ManagedPosition struct {
 	ClosedAt          *time.Time             `json:"closed_at,omitempty"`
 	Notes             string                 `json:"notes,omitempty"`
 	Tags              []string               `json:"tags,omitempty"`
+	// DominantSignal classifies penny entries by signal type. Drives
+	// the social-signal 20-minute time exit in checkPositions. Empty
+	// for non-penny managed positions.
+	DominantSignal    string                 `json:"dominant_signal,omitempty"`
 }
 
 // PartialExitConfig defines partial profit taking strategy
@@ -100,6 +104,7 @@ type PlaceManagedPositionRequest struct {
 	// Metadata
 	Notes             string              `json:"notes,omitempty"`
 	Tags              []string            `json:"tags,omitempty"`
+	DominantSignal    string              `json:"dominant_signal,omitempty"`
 }
 
 // PositionManager handles automated position management
@@ -228,6 +233,7 @@ func (pm *PositionManager) PlaceManagedPosition(ctx context.Context, req *PlaceM
 		UpdatedAt:         time.Now(),
 		Notes:             req.Notes,
 		Tags:              tags,
+		DominantSignal:    req.DominantSignal,
 	}
 
 	// Place entry order
@@ -937,6 +943,7 @@ func (pm *PositionManager) managedPositionToDB(pos *ManagedPosition) *models.DBM
 		Tags:              string(tagsJSON),
 		PartialExitOrders: string(partialExitOrdersJSON),
 		ClosedAt:          pos.ClosedAt,
+		DominantSignal:    pos.DominantSignal,
 	}
 
 	if pos.PartialExit != nil {
@@ -993,6 +1000,7 @@ func (pm *PositionManager) dbToManagedPosition(dbPos *models.DBManagedPosition) 
 		CreatedAt:         dbPos.CreatedAt,
 		UpdatedAt:         dbPos.UpdatedAt,
 		ClosedAt:          dbPos.ClosedAt,
+		DominantSignal:    dbPos.DominantSignal,
 	}
 
 	if dbPos.PartialExitEnabled {

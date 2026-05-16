@@ -138,6 +138,11 @@ type DBManagedPosition struct {
 	// positions to the right agent. Empty for rows written before this column
 	// existed; readers must fall back to DBOrder attribution in that case.
 	AgentStrategy     string `gorm:"index"`
+	// DominantSignal classifies penny entries by signal type so the
+	// PositionManager can fire the 20-minute social-exit timer.
+	// Empty for non-penny positions and for rows written before this
+	// column existed.
+	DominantSignal    string `gorm:"index"`
 
 	// Entry details
 	Quantity          float64
