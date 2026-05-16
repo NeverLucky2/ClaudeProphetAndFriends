@@ -82,6 +82,23 @@ func TestEvaluateSocialTimeExit_NoFireWhenClosed(t *testing.T) {
 	}
 }
 
+func TestEvaluateSocialTimeExit_NoFireForEmptySignal(t *testing.T) {
+	// Pre-existing positions opened before this feature shipped have
+	// DominantSignal="" and must NOT trigger the timer — they continue
+	// under their bracket / LLM management as before.
+	pos := &ManagedPosition{
+		Status:         "ACTIVE",
+		DominantSignal: "",
+		CreatedAt:      time.Date(2026, 5, 16, 14, 0, 0, 0, time.UTC),
+	}
+	now := time.Date(2026, 5, 16, 15, 0, 0, 0, time.UTC)
+	marketClose := time.Date(2026, 5, 16, 20, 0, 0, 0, time.UTC)
+
+	if shouldFireSocialTimeExit(pos, now, marketClose) {
+		t.Errorf("expected no fire for empty dominant_signal (legacy position), got true")
+	}
+}
+
 func TestTodayMarketClose_WeekdayEDTReturns20UTC(t *testing.T) {
 	pm := &PositionManager{}
 	// 2026-05-15 is a Friday in EDT (UTC-4). 16:00 ET = 20:00 UTC.
