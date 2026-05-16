@@ -360,6 +360,18 @@ func (pm *PositionManager) checkPositions(ctx context.Context) {
 			continue
 		}
 
+		// Social-signal time exit (penny only). Fires before bracket
+		// management so the cancel-and-sell flow takes precedence over
+		// any pending stop/target placement on the same tick.
+		now := time.Now().UTC()
+		marketClose := pm.todayMarketClose(now)
+		if shouldFireSocialTimeExit(position, now, marketClose) {
+			if err := pm.executeSocialTimeExit(ctx, position); err != nil {
+				pm.logger.WithError(err).WithField("position_id", position.ID).Warn("social time exit failed")
+			}
+			continue
+		}
+
 		// Check if we need to place/update risk orders
 		if position.Status == "ACTIVE" {
 			pm.manageRiskOrders(ctx, position)
@@ -954,6 +966,137 @@ func (pm *PositionManager) managedPositionToDB(pos *ManagedPosition) *models.DBM
 	}
 
 	return dbPos
+}
+
+// shouldFireSocialTimeExit returns true when pos is a social-signal penny
+// position that has either (a) been open >= 20 min OR (b) entered the
+// last-15-min-of-session window — whichever comes first. Mirrors the rule
+// in TRADING_RULES_PENNY.md lines 261-263.
+//
+// Returns false for positions whose Status is not ACTIVE or PARTIAL — the
+// bracket monitor has already taken care of STOPPED_OUT/CLOSED/FAILED, and
+// PENDING positions don't have a bracket to cancel yet.
+func shouldFireSocialTimeExit(pos *ManagedPosition, now, marketClose time.Time) bool {
+	if pos == nil || pos.DominantSignal != "social" {
+		return false
+	}
+	if pos.Status != "ACTIVE" && pos.Status != "PARTIAL" {
+		return false
+	}
+	if now.Sub(pos.CreatedAt) >= 20*time.Minute {
+		return true
+	}
+	if !marketClose.IsZero() && marketClose.Sub(now) <= 15*time.Minute {
+		return true
+	}
+	return false
+}
+
+// todayMarketClose returns regular-session close in UTC for the date of `now`.
+// Weekends return a zero time — the "15 min before close" branch then never
+// fires on a weekend, which is correct: penny social positions should be flat
+// by Friday close per the rules.
+func (pm *PositionManager) todayMarketClose(now time.Time) time.Time {
+	et, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		return time.Time{}
+	}
+	local := now.In(et)
+	wd := local.Weekday()
+	if wd == time.Saturday || wd == time.Sunday {
+		return time.Time{}
+	}
+	close := time.Date(local.Year(), local.Month(), local.Day(), 16, 0, 0, 0, et)
+	return close.UTC()
+}
+
+// executeSocialTimeExit implements the cancel-bracket then market-sell flow
+// from TRADING_RULES_PENNY.md:261-282.
+//
+//  1. Cancel both stop-loss and take-profit orders if present. Failures here
+//     are non-fatal (the order may have already filled — the bracket monitor
+//     will detect it).
+//  2. Re-fetch position state to see if a bracket leg fired during cancellation;
+//     if so, skip the market order.
+//  3. Place a market sell for RemainingQty, tagged with the owning agent's
+//     strategy so /api/v1/positions?strategy=X attribution stays correct.
+func (pm *PositionManager) executeSocialTimeExit(ctx context.Context, pos *ManagedPosition) error {
+	pm.logger.WithFields(logrus.Fields{
+		"position_id": pos.ID,
+		"symbol":      pos.Symbol,
+		"age":         time.Since(pos.CreatedAt).String(),
+	}).Info("social-signal time exit firing")
+
+	// Cancel bracket legs; track whether either leg actually filled at the
+	// broker (cancel returns an error, but the order's terminal status will
+	// be "filled" not "canceled"). If a leg filled, the bracket closed the
+	// position for us — skip the market sell to avoid duplicating.
+	bracketFilled := false
+	for _, orderID := range []string{pos.StopLossOrderID, pos.TakeProfitOrderID} {
+		if orderID == "" {
+			continue
+		}
+		if err := pm.tradingService.CancelOrder(ctx, orderID); err != nil {
+			pm.logger.WithError(err).WithField("order_id", orderID).Debug("cancel returned error (checking final order status)")
+		}
+		// Always re-read the order's status — cancel result alone doesn't
+		// distinguish "canceled cleanly" from "filled while we were cancelling".
+		ord, err := pm.tradingService.GetOrder(ctx, orderID)
+		if err != nil {
+			pm.logger.WithError(err).WithField("order_id", orderID).Warn("could not fetch order status after cancel")
+			continue
+		}
+		if ord.Status == "filled" || ord.Status == "partially_filled" {
+			pm.logger.WithFields(logrus.Fields{
+				"order_id": orderID,
+				"status":   ord.Status,
+			}).Info("bracket leg filled during cancel; bracket closed the position")
+			bracketFilled = true
+		}
+	}
+
+	if bracketFilled {
+		// The bracket monitor's next tick will reconcile the position to CLOSED
+		// when it sees the fill — we don't need to do anything else here.
+		return nil
+	}
+
+	pm.mu.RLock()
+	live, ok := pm.positions[pos.ID]
+	pm.mu.RUnlock()
+	if !ok || live == nil || live.Status == "CLOSED" || live.RemainingQty == 0 {
+		return nil
+	}
+
+	exitSide := "sell"
+	if live.Side == "sell" {
+		exitSide = "buy"
+	}
+	// Attribution: prefer the owning agent's strategy tag; fall back to
+	// "penny-momentum" if the position pre-dates the AgentStrategy column
+	// so /api/v1/positions?strategy=X and segment-PnL still see this order.
+	strategyTag := pos.AgentStrategy
+	if strategyTag == "" {
+		strategyTag = "penny-momentum"
+	}
+	_, err := pm.tradingService.PlaceOrder(ctx, &interfaces.Order{
+		Symbol:      pos.Symbol,
+		Qty:         live.RemainingQty,
+		Side:        exitSide,
+		Type:        "market",
+		TimeInForce: "day",
+		Strategy:    strategyTag,
+	})
+	if err != nil {
+		return fmt.Errorf("place social-exit market order: %w", err)
+	}
+
+	pm.mu.Lock()
+	live.Status = "CLOSED"
+	closedAt := time.Now()
+	live.ClosedAt = &closedAt
+	pm.mu.Unlock()
+	return nil
 }
 
 // dbToManagedPosition converts DBManagedPosition to ManagedPosition
