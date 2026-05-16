@@ -271,6 +271,12 @@ func main() {
 		return tradingService.PlaceMultiLegOrder(ctx, order)
 	})
 
+	// HarvestCloser is the shared close-orchestration service used by both
+	// the HTTP /close endpoint (via HarvestController) and, when enabled,
+	// the HarvestExitMonitor goroutine. Wiring it once here keeps a single
+	// place-and-update path.
+	harvestCloser := services.NewHarvestCloser(storageService, placeMLegFn)
+
 	// Realized-vol service used to compute the IV–RV spread that gates
 	// Harvest condor entries. Wired into both HarvestController (legacy
 	// harvest/ivr route) and IVController (generic iv/:symbol route).
@@ -283,6 +289,7 @@ func main() {
 		storageService,
 		placeMLegFn,
 		getPortfolioValue,
+		harvestCloser,
 	)
 
 	// Start daily IV collection goroutine for Harvest
