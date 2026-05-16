@@ -1055,6 +1055,19 @@ func (pm *PositionManager) executeSocialTimeExit(ctx context.Context, pos *Manag
 		}
 	}
 
+	// Cancel any unfilled partial-exit limit orders so they don't compete
+	// with the market sell. Mirrors the cleanup pattern in closePosition.
+	// Errors are non-fatal (the orders may already be filled or cancelled);
+	// the re-fetch below picks up any quantity changes via live.RemainingQty.
+	for _, orderID := range pos.PartialExitOrders {
+		if orderID == "" {
+			continue
+		}
+		if err := pm.tradingService.CancelOrder(ctx, orderID); err != nil {
+			pm.logger.WithError(err).WithField("order_id", orderID).Debug("cancel of partial-exit order returned error")
+		}
+	}
+
 	if bracketFilled {
 		// The bracket monitor's next tick will reconcile the position to CLOSED
 		// when it sees the fill — we don't need to do anything else here.
