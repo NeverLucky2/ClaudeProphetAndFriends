@@ -34,7 +34,7 @@ type CloseCondorRequest struct {
 	CondorID            string  `json:"-"`
 	OrderType           string  `json:"order_type" binding:"required"`
 	LimitPrice          float64 `json:"limit_price"`
-	CloseReason         string  `json:"close_reason" binding:"required"`
+	CloseReason         string  `json:"close_reason"`
 	CostPerContract     float64 `json:"cost_per_contract"`
 	FinalizeImmediately bool    `json:"-"` // controller=true, monitor=false
 	AllowReplaceClosing bool    `json:"-"` // controller=false, monitor escalation=true

@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -87,6 +88,9 @@ func TestHarvestCloser_PlacesOrderAndUpdatesRow(t *testing.T) {
 	if res.Status != "CLOSED" {
 		t.Errorf("got result status %q, want CLOSED", res.Status)
 	}
+	if store.lastCondorID != "c1" {
+		t.Errorf("expected update to land on c1, got %q", store.lastCondorID)
+	}
 }
 
 func TestHarvestCloser_RejectsNonOpenCondor(t *testing.T) {
@@ -126,7 +130,6 @@ func TestHarvestCloser_MarketOrderForcesZeroLimit(t *testing.T) {
 	if lp != 0 {
 		t.Errorf("market order should zero limit price, got %v", lp)
 	}
-	_ = time.Now
 }
 
 // TestHarvestCloser_FinalizeImmediatelyTrueWritesClosedAndClosedAt verifies
@@ -248,5 +251,74 @@ func TestHarvestCloser_AllowReplaceClosingFalseRejectsClosingRow(t *testing.T) {
 	})
 	if !errors.Is(err, ErrCondorNotOpen) {
 		t.Errorf("got err %v, want ErrCondorNotOpen", err)
+	}
+}
+
+func TestHarvestCloser_DBUpdateFailureReturnsOrderIDInError(t *testing.T) {
+	store := &fakeCondorStore{
+		condor: &models.DBHarvestCondor{
+			CondorID:          "c1",
+			Underlying:        "SPY",
+			Status:            "OPEN",
+			Contracts:         1,
+			CreditPerContract: 1.0,
+			ShortPutSymbol:    "x", LongPutSymbol: "y",
+			ShortCallSymbol: "z", LongCallSymbol: "w",
+		},
+		updateErr: errors.New("db down"),
+	}
+	placeFn := PlaceMultiLegOrderFn(func(_ context.Context, _ MultiLegOrder) (string, error) {
+		return "ord-orphaned-99", nil
+	})
+	closer := NewHarvestCloser(store, placeFn)
+	_, err := closer.CloseCondor(context.Background(), CloseCondorRequest{
+		CondorID:            "c1",
+		OrderType:           "limit",
+		LimitPrice:          0.5,
+		CostPerContract:     0.5,
+		CloseReason:         "profit_target",
+		FinalizeImmediately: true,
+	})
+	if err == nil {
+		t.Fatal("expected error when DB update fails after order placement")
+	}
+	if !strings.Contains(err.Error(), "ord-orphaned-99") {
+		t.Errorf("error must surface the close order ID so operators can recover the orphaned broker order; got: %v", err)
+	}
+}
+
+func TestHarvestCloser_ClosedAtUsesInjectedClock(t *testing.T) {
+	fixed := time.Date(2026, 5, 16, 21, 30, 0, 0, time.UTC)
+	store := &fakeCondorStore{
+		condor: &models.DBHarvestCondor{
+			CondorID:          "c1",
+			Underlying:        "SPY",
+			Status:            "OPEN",
+			Contracts:         1,
+			CreditPerContract: 1.0,
+			ShortPutSymbol:    "x", LongPutSymbol: "y",
+			ShortCallSymbol: "z", LongCallSymbol: "w",
+		},
+	}
+	placeFn := PlaceMultiLegOrderFn(func(_ context.Context, _ MultiLegOrder) (string, error) {
+		return "ord", nil
+	})
+	closer := NewHarvestCloser(store, placeFn)
+	closer.nowFn = func() time.Time { return fixed }
+
+	_, err := closer.CloseCondor(context.Background(), CloseCondorRequest{
+		CondorID: "c1", OrderType: "limit", LimitPrice: 0.5,
+		CostPerContract: 0.5, CloseReason: "profit_target",
+		FinalizeImmediately: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := store.lastUpdates["closed_at"].(*time.Time)
+	if !ok || got == nil {
+		t.Fatalf("expected closed_at to be *time.Time, got %T (%v)", store.lastUpdates["closed_at"], store.lastUpdates["closed_at"])
+	}
+	if !got.Equal(fixed) {
+		t.Errorf("expected closed_at == %v, got %v", fixed, *got)
 	}
 }

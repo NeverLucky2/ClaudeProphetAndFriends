@@ -244,10 +244,7 @@ func (hc *HarvestController) HandleCloseCondor(c *gin.Context) {
 	req.FinalizeImmediately = true
 	req.AllowReplaceClosing = false
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
-	defer cancel()
-
-	res, err := hc.closer.CloseCondor(ctx, req)
+	res, err := hc.closer.CloseCondor(c.Request.Context(), req)
 	if err != nil {
 		if errors.Is(err, services.ErrCondorNotOpen) {
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
