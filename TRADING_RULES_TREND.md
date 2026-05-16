@@ -40,6 +40,21 @@ If a situation arises that your rules do not cover, your only valid action is:
 
 ---
 
+## Beat Context Block
+
+Each heartbeat begins with a `## Beat Context (read-only snapshot)` block
+containing the live account snapshot, your strategy-tagged positions, econ
+blackout flag, regime-gate tier/multiplier/block-flag, and (when applicable)
+segment P&L. Use these values directly — do not call `get_account`,
+`get_positions`, `get_econ_blackout_status`, `get_regime_gate_status`, or
+`get_segment_pnl` redundantly unless you need a refreshed read mid-beat.
+
+If the block is missing or contains an `errors:` line for a particular field,
+fall back to the corresponding tool call (the rule's existing fail-closed
+policy still applies on tool error).
+
+---
+
 ## Universe
 
 Six ETFs, one per asset bucket:
