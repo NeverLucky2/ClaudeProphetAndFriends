@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"prophet-trader/interfaces"
 	"prophet-trader/services"
@@ -254,6 +255,33 @@ func (oc *OrderController) GetPositions() ([]*interfaces.Position, error) {
 	return oc.tradingService.GetPositions(ctx)
 }
 
+// GetPositionsByStrategy returns broker positions, optionally filtered by the
+// strategy tag attached to each symbol's most recent buy order. An empty
+// strategy returns all positions unchanged.
+//
+// Shared by HandleGetPositions (the /api/v1/positions endpoint) and the
+// beat-context aggregator so the two stay in lock-step.
+func (oc *OrderController) GetPositionsByStrategy(strategy string) ([]*interfaces.Position, error) {
+	positions, err := oc.GetPositions()
+	if err != nil {
+		return nil, err
+	}
+	if strategy == "" {
+		return positions, nil
+	}
+	attribution, err := oc.storageService.GetSymbolStrategyAttribution()
+	if err != nil {
+		return nil, fmt.Errorf("failed to build strategy attribution: %w", err)
+	}
+	filtered := make([]*interfaces.Position, 0)
+	for _, pos := range positions {
+		if attribution[pos.Symbol] == strategy {
+			filtered = append(filtered, pos)
+		}
+	}
+	return filtered, nil
+}
+
 // GetAccount retrieves account information
 func (oc *OrderController) GetAccount() (*interfaces.Account, error) {
 	ctx := context.Background()
@@ -322,36 +350,18 @@ func (oc *OrderController) HandleCancelOrder(c *gin.Context) {
 // the entry order), so they are attributable here as long as the entry
 // order's DBOrder row has a non-empty StrategyName.
 func (oc *OrderController) HandleGetPositions(c *gin.Context) {
-	positions, err := oc.GetPositions()
+	strategyFilter := c.Query("strategy")
+	positions, err := oc.GetPositionsByStrategy(strategyFilter)
 	if err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
 
-	strategyFilter := c.Query("strategy")
-	if strategyFilter == "" {
-		c.JSON(200, positions)
-		return
-	}
-
-	attribution, err := oc.storageService.GetSymbolStrategyAttribution()
-	if err != nil {
-		c.JSON(500, gin.H{"error": "failed to build strategy attribution: " + err.Error()})
-		return
-	}
-
-	filtered := make([]*interfaces.Position, 0)
-	for _, pos := range positions {
-		if attribution[pos.Symbol] == strategyFilter {
-			filtered = append(filtered, pos)
-		}
-	}
-
-	// Same shape as the unfiltered branch (line 333) — a plain array. Wrapping
-	// it in {strategy, count, positions} would break callers that consume
-	// /positions uniformly across filter modes (e.g. agent/preflight.js's
-	// Array.isArray check fails the preflight open on a wrapped object).
-	c.JSON(200, filtered)
+	// Same shape across filter modes — a plain array. Wrapping it in
+	// {strategy, count, positions} would break callers that consume
+	// /positions uniformly (e.g. agent/preflight.js's Array.isArray check
+	// fails the preflight open on a wrapped object).
+	c.JSON(200, positions)
 }
 
 // HandleGetAccount handles HTTP get account requests
