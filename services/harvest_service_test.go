@@ -115,6 +115,27 @@ func TestGetState_ZeroPortfolioValue_NoCircuitBreaker(t *testing.T) {
 	}
 }
 
+func TestGetState_MonitorEnabledRoundTrip(t *testing.T) {
+	// Default: monitor flag is false (boot did not opt in).
+	svc := NewHarvestService(&stubHarvestStore{})
+	state, err := svc.GetState(100000.0)
+	if err != nil {
+		t.Fatalf("GetState failed: %v", err)
+	}
+	if state.MonitorEnabled {
+		t.Errorf("expected MonitorEnabled=false by default, got true")
+	}
+	// After SetMonitorEnabled(true), the response reflects the new value.
+	svc.SetMonitorEnabled(true)
+	state, err = svc.GetState(100000.0)
+	if err != nil {
+		t.Fatalf("GetState failed: %v", err)
+	}
+	if !state.MonitorEnabled {
+		t.Errorf("expected MonitorEnabled=true after SetMonitorEnabled(true)")
+	}
+}
+
 // ── Harvest state aggregation tests ────────────────────────────────
 
 type stubHarvestStore struct {

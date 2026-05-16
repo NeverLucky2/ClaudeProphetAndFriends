@@ -36,6 +36,12 @@ type orderTracker interface {
 	CancelOrder(ctx context.Context, orderID string) error
 }
 
+// condorUpdater is implemented by *LocalStorage in production. The monitor
+// uses it to flip CLOSING -> CLOSED once the broker confirms a fill.
+type condorUpdater interface {
+	UpdateHarvestCondor(condorID string, updates map[string]interface{}) error
+}
+
 // tierAttempt remembers the most recent close placement for a condor so the
 // monitor knows when to escalate. Reset on each new attempt (same reason
 // increments tier; different reason resets to 0). All in memory: if the bot
@@ -71,6 +77,7 @@ type HarvestExitMonitor struct {
 	pricer   monitorPricer
 	closer   monitorCloser
 	tracker  orderTracker
+	updater  condorUpdater
 	attempts map[string]tierAttempt
 }
 
@@ -87,6 +94,12 @@ func NewHarvestExitMonitor(store monitorStore, pricer monitorPricer, closer moni
 // close orders for fills/escalation. Optional: if unset, CLOSING rows are
 // skipped (the monitor only places fresh orders on OPEN rows).
 func (m *HarvestExitMonitor) SetOrderTracker(t orderTracker) { m.tracker = t }
+
+// SetUpdater wires the storage handle used to finalize CLOSING -> CLOSED on
+// fill confirmation. Optional: if unset, the monitor still polls broker order
+// status but leaves the DB row in CLOSING (a future tick — once SetUpdater is
+// wired — will pick it up).
+func (m *HarvestExitMonitor) SetUpdater(u condorUpdater) { m.updater = u }
 
 // RecordTierAttempt is called immediately after a close order is placed so
 // the monitor knows when the next escalation window opens. Used by
@@ -220,7 +233,18 @@ func (m *HarvestExitMonitor) evaluateClosing(ctx context.Context, c *models.DBHa
 		return
 	}
 	if ord.Status == "filled" {
-		// TODO(Task 5): flip status to CLOSED and clean up attempts state.
+		if m.updater != nil {
+			closedAt := now
+			if err := m.updater.UpdateHarvestCondor(c.CondorID, map[string]interface{}{
+				"status":    "CLOSED",
+				"closed_at": &closedAt,
+			}); err != nil {
+				fmt.Printf("[harvest-exit-monitor] %s finalize update failed: %v\n", c.CondorID, err)
+				// Don't clear attempts state — next tick will retry the finalize.
+				return
+			}
+		}
+		delete(m.attempts, c.CondorID)
 		return
 	}
 	attempt, ok := m.attempts[c.CondorID]
@@ -237,6 +261,11 @@ func (m *HarvestExitMonitor) evaluateClosing(ctx context.Context, c *models.DBHa
 		fmt.Printf("[harvest-exit-monitor] %s cancel failed: %v\n", c.CondorID, err)
 		return
 	}
+	// Refresh placedAt so a pricer failure here doesn't wedge: next tick will
+	// wait the full new escalation window before re-attempting cancel-and-replace.
+	// We don't bump tier yet — the place hasn't happened. If the pricer call
+	// below succeeds we'll overwrite this entry with the new {nextTier, now}.
+	m.attempts[c.CondorID] = tierAttempt{reason: attempt.reason, tier: attempt.tier, placedAt: now}
 	cost, err := m.pricer.CostToClosePerContract(ctx, c)
 	if err != nil {
 		fmt.Printf("[harvest-exit-monitor] %s pricer failed on escalation: %v\n", c.CondorID, err)
@@ -276,4 +305,26 @@ func (m *HarvestExitMonitor) classify(c *models.DBHarvestCondor, dte int, cost f
 		return "profit_target"
 	}
 	return ""
+}
+
+// Start runs the monitor's tick loop. Ticks every `interval` while
+// marketIsOpen() reports true, sleeps `idleInterval` otherwise. Returns
+// when ctx is canceled. Designed to be invoked as `go monitor.Start(...)`
+// from main.go after construction + Set* wiring.
+func (m *HarvestExitMonitor) Start(ctx context.Context, interval, idleInterval time.Duration, marketIsOpen func() bool) {
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			if marketIsOpen() {
+				m.EvaluateTick(ctx, time.Now().UTC())
+				timer.Reset(interval)
+			} else {
+				timer.Reset(idleInterval)
+			}
+		}
+	}
 }

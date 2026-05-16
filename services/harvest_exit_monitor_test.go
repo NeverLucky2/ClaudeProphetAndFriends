@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -19,9 +20,13 @@ func (f *fakeListStore) ListOpenHarvestCondors() ([]*models.DBHarvestCondor, err
 
 type fakeCostPricer struct {
 	costs map[string]float64
+	errs  map[string]error
 }
 
 func (f *fakeCostPricer) CostToClosePerContract(_ context.Context, c *models.DBHarvestCondor) (float64, error) {
+	if e, ok := f.errs[c.CondorID]; ok && e != nil {
+		return 0, e
+	}
 	return f.costs[c.CondorID], nil
 }
 
@@ -219,5 +224,104 @@ func TestExitMonitor_NoEscalationBeforeWindow(t *testing.T) {
 	}
 	if len(closer.calls) != 0 {
 		t.Fatalf("expected no close calls before window, got %d", len(closer.calls))
+	}
+}
+
+// fakeUpdater records the most recent partial update applied via
+// UpdateHarvestCondor. Used to assert that the monitor flips CLOSING -> CLOSED
+// when the broker confirms a fill.
+type fakeUpdater struct {
+	lastCondorID string
+	lastUpdates  map[string]interface{}
+}
+
+func (f *fakeUpdater) UpdateHarvestCondor(id string, u map[string]interface{}) error {
+	f.lastCondorID = id
+	f.lastUpdates = u
+	return nil
+}
+
+func TestExitMonitor_FinalizeOnFillFlipsStatusToClosed(t *testing.T) {
+	t0 := time.Date(2026, 5, 16, 14, 0, 0, 0, time.UTC)
+	c := mkCondor("c1", "SPY", 1, 1.0, 30, t0)
+	c.CloseOrderID = "ord-1"
+	c.Status = "CLOSING"
+	store := &fakeListStore{condors: []*models.DBHarvestCondor{c}}
+	closer := &fakeCloser{}
+	tracker := &fakeOrderTracker{statuses: map[string]string{"ord-1": "filled"}}
+	updater := &fakeUpdater{}
+
+	m := NewHarvestExitMonitor(store, &fakeCostPricer{costs: map[string]float64{}}, closer)
+	m.SetOrderTracker(tracker)
+	m.SetUpdater(updater)
+	m.RecordTierAttempt("c1", "loss_stop", t0) // pre-seeded so we can verify cleanup
+	m.EvaluateTick(context.Background(), t0.Add(5*time.Minute))
+
+	if updater.lastCondorID != "c1" {
+		t.Errorf("expected update on c1, got %q", updater.lastCondorID)
+	}
+	if updater.lastUpdates["status"] != "CLOSED" {
+		t.Errorf("expected status CLOSED, got %v", updater.lastUpdates["status"])
+	}
+	closedAt, ok := updater.lastUpdates["closed_at"].(*time.Time)
+	if !ok || closedAt == nil {
+		t.Errorf("expected closed_at *time.Time, got %T (%v)", updater.lastUpdates["closed_at"], updater.lastUpdates["closed_at"])
+	}
+	// Verify the attempts entry was cleaned up post-fill.
+	if _, stillPresent := m.attempts["c1"]; stillPresent {
+		t.Error("expected m.attempts to be cleaned up after fill")
+	}
+	// No close-call should have been placed: row is already filled, escalation
+	// path must not fire.
+	if len(closer.calls) != 0 {
+		t.Errorf("expected 0 close calls on fill, got %d", len(closer.calls))
+	}
+}
+
+func TestExitMonitor_PricerErrorAfterCancelRefreshesPlacedAt(t *testing.T) {
+	// Repro of the Task-4-review concern: if the pricer fails immediately after
+	// a successful cancel, the monitor must NOT leave attempts.placedAt at the
+	// original timestamp — otherwise the next tick re-enters the cancel branch
+	// (window already elapsed) and a flapping pricer can wedge a row by
+	// repeatedly calling CancelOrder on an already-canceled order.
+	//
+	// Expected behavior: cancel runs, no close-call is placed, and
+	// attempts.placedAt is bumped to `now` so the next tick waits the full
+	// escalation window before retrying. Tier is unchanged because the
+	// replacement order never went out.
+	t0 := time.Date(2026, 5, 16, 14, 0, 0, 0, time.UTC)
+	c := mkCondor("c1", "SPY", 1, 1.0, 30, t0)
+	c.CloseOrderID = "ord-1"
+	c.Status = "CLOSING"
+	store := &fakeListStore{condors: []*models.DBHarvestCondor{c}}
+	pricer := &fakeCostPricer{
+		costs: map[string]float64{},
+		errs:  map[string]error{"c1": errors.New("pricer down")},
+	}
+	closer := &fakeCloser{}
+	tracker := &fakeOrderTracker{statuses: map[string]string{"ord-1": "open"}}
+
+	m := NewHarvestExitMonitor(store, pricer, closer)
+	m.SetOrderTracker(tracker)
+	m.RecordTierAttempt("c1", "loss_stop", t0)
+
+	m.EvaluateTick(context.Background(), t0.Add(3*time.Minute))
+
+	if len(tracker.cancels) != 1 {
+		t.Errorf("expected cancel, got %v", tracker.cancels)
+	}
+	if len(closer.calls) != 0 {
+		t.Errorf("expected no close call on pricer error, got %d", len(closer.calls))
+	}
+	got := m.attempts["c1"]
+	want := t0.Add(3 * time.Minute)
+	if !got.placedAt.Equal(want) {
+		t.Errorf("expected placedAt refreshed to %v, got %v", want, got.placedAt)
+	}
+	if got.tier != 0 { // unchanged from RecordTierAttempt above
+		t.Errorf("expected tier unchanged at 0, got %d", got.tier)
+	}
+	if got.reason != "loss_stop" {
+		t.Errorf("expected reason unchanged at loss_stop, got %q", got.reason)
 	}
 }
