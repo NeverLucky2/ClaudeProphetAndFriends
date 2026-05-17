@@ -1,6 +1,7 @@
 package database
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -49,6 +50,8 @@ func NewLocalStorage(dbPath string) (*LocalStorage, error) {
 		&models.DBHarvestCondor{},
 		&models.DBHarvestIVSnapshot{},
 		&models.DBSegmentPnL{},
+		&models.DBTrendLedgerEntry{},
+		&models.DBTurtleSession{},
 	); err != nil {
 		return nil, fmt.Errorf("failed to migrate database: %w", err)
 	}
@@ -483,6 +486,56 @@ func (s *LocalStorage) GetHarvestIVSnapshots(underlying string, start, end time.
 		Order("date ASC").
 		Find(&snaps).Error
 	return snaps, err
+}
+
+// ── Trend ledger storage ───────────────────────────────────────────
+
+func (s *LocalStorage) SaveTrendLedgerEntry(e *models.DBTrendLedgerEntry) error {
+	return s.db.Save(e).Error
+}
+
+// ListOpenTrendLedgerEntries returns rows with Status in {"pending_fill","open"}.
+// Closed rows are retained for audit but excluded here.
+func (s *LocalStorage) ListOpenTrendLedgerEntries() ([]*models.DBTrendLedgerEntry, error) {
+	var rows []*models.DBTrendLedgerEntry
+	err := s.db.Where("status IN ?", []string{"pending_fill", "open"}).Find(&rows).Error
+	return rows, err
+}
+
+func (s *LocalStorage) GetTrendLedgerEntryByID(id uint) (*models.DBTrendLedgerEntry, error) {
+	var e models.DBTrendLedgerEntry
+	if err := s.db.First(&e, id).Error; err != nil {
+		return nil, err
+	}
+	return &e, nil
+}
+
+// ── Turtle session storage ─────────────────────────────────────────
+
+// GetTurtleSession returns the singleton session row (SessionID="singleton").
+// **First-run contract:** if no row exists, returns (nil, nil) — NOT an error.
+// The caller (TurtleExecutor) treats nil as "create a new session on first save".
+// Other errors (DB unavailable, schema mismatch) propagate normally.
+func (s *LocalStorage) GetTurtleSession() (*models.DBTurtleSession, error) {
+	var sess models.DBTurtleSession
+	err := s.db.Where("session_id = ?", "singleton").First(&sess).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &sess, nil
+}
+
+// SaveTurtleSession upserts the singleton row. Callers MUST set
+// SessionID = "singleton" before invoking; on first save the GORM auto-id
+// is assigned and the row is persisted.
+func (s *LocalStorage) SaveTurtleSession(sess *models.DBTurtleSession) error {
+	if sess.SessionID == "" {
+		sess.SessionID = "singleton"
+	}
+	return s.db.Save(sess).Error
 }
 
 // Close closes the database connection
