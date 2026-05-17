@@ -31,6 +31,7 @@ type HarvestController struct {
 	storage      harvestStorage
 	placeMLeg    services.PlaceMultiLegOrderFn
 	getPortfolio func() (float64, error)
+	closer       *services.HarvestCloser
 }
 
 // NewHarvestController creates the controller.
@@ -38,6 +39,8 @@ type HarvestController struct {
 // getPortfolio returns the current total account equity.
 // rvSvc may be nil; when present, /api/v1/harvest/ivr/:symbol responses
 // include RealizedVol20d and IVMinusRV used by the premium-edge gate.
+// closer is the shared HarvestCloser service used by HandleCloseCondor
+// (and, later, the HarvestExitMonitor) to actually place close orders.
 func NewHarvestController(
 	harvestSvc *services.HarvestService,
 	ivrSvc *services.HarvestIVRService,
@@ -45,6 +48,7 @@ func NewHarvestController(
 	storage harvestStorage,
 	placeMLeg services.PlaceMultiLegOrderFn,
 	getPortfolio func() (float64, error),
+	closer *services.HarvestCloser,
 ) *HarvestController {
 	return &HarvestController{
 		harvestSvc:   harvestSvc,
@@ -53,6 +57,7 @@ func NewHarvestController(
 		storage:      storage,
 		placeMLeg:    placeMLeg,
 		getPortfolio: getPortfolio,
+		closer:       closer,
 	}
 }
 
@@ -217,87 +222,47 @@ func (hc *HarvestController) HandleOpenCondor(c *gin.Context) {
 	})
 }
 
-// CloseCondorRequest is the body for POST /api/v1/harvest/condors/:id/close
-type CloseCondorRequest struct {
-	OrderType       string  `json:"order_type" binding:"required"` // "limit" | "market" | "marketable_limit"
-	LimitPrice      float64 `json:"limit_price"`
-	CloseReason     string  `json:"close_reason"` // "profit_target" | "loss_stop" | "time_exit" | "manual"
-	CostPerContract float64 `json:"cost_per_contract"` // current cost-to-close per contract
-}
-
-// HandleCloseCondor handles POST /api/v1/harvest/condors/:id/close
+// HandleCloseCondor handles POST /api/v1/harvest/condors/:id/close.
+//
+// This endpoint is a thin shim over services.HarvestCloser — the same close
+// path the HarvestExitMonitor uses. The controller always sets
+// FinalizeImmediately=true and AllowReplaceClosing=false (both hardcoded
+// after binding to defend against future schema changes), which preserves
+// the pre-monitor behavior: status flips straight to CLOSED with closed_at
+// stamped on order placement, and any non-OPEN row is rejected with HTTP 409.
 func (hc *HarvestController) HandleCloseCondor(c *gin.Context) {
 	condorID := c.Param("id")
-	var req CloseCondorRequest
+	var req services.CloseCondorRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	req.CondorID = condorID
+	// Defense in depth: the JSON tags are "-" so binding cannot set these,
+	// but pin them explicitly so a future schema change can't silently
+	// flip semantics.
+	req.FinalizeImmediately = true
+	req.AllowReplaceClosing = false
 
-	condor, err := hc.storage.GetHarvestCondorByID(condorID)
+	res, err := hc.closer.CloseCondor(c.Request.Context(), req)
 	if err != nil {
+		if errors.Is(err, services.ErrCondorNotOpen) {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "condor not found: " + condorID})
-		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "db error fetching condor: " + err.Error()})
+			return
 		}
-		return
-	}
-	if condor.Status != "OPEN" {
-		c.JSON(http.StatusConflict, gin.H{"error": fmt.Sprintf("condor %s is not OPEN (status=%s)", condorID, condor.Status)})
-		return
-	}
-
-	limitPrice := req.LimitPrice
-	if req.OrderType == "market" {
-		limitPrice = 0
-	}
-
-	closeOrder := services.MultiLegOrder{
-		Underlying:  condor.Underlying,
-		Contracts:   condor.Contracts,
-		LimitPrice:  limitPrice,
-		TimeInForce: "day",
-		Strategy:    "harvest",
-		Legs: []services.MultiLegOrderLeg{
-			{Symbol: condor.ShortPutSymbol, Side: "buy", PositionIntent: "buy_to_close"},
-			{Symbol: condor.LongPutSymbol, Side: "sell", PositionIntent: "sell_to_close"},
-			{Symbol: condor.ShortCallSymbol, Side: "buy", PositionIntent: "buy_to_close"},
-			{Symbol: condor.LongCallSymbol, Side: "sell", PositionIntent: "sell_to_close"},
-		},
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	closeOrderID, err := hc.placeMLeg(ctx, closeOrder)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to place close order: " + err.Error()})
-		return
-	}
-
-	costPerContract := req.CostPerContract
-	realizedPnL := (condor.CreditPerContract - costPerContract) * float64(condor.Contracts) * 100.0
-
-	now := time.Now()
-	updates := map[string]interface{}{
-		"status":                  "CLOSED",
-		"close_order_id":          closeOrderID,
-		"close_reason":            req.CloseReason,
-		"close_cost_per_contract": costPerContract,
-		"realized_pnl":            realizedPnL,
-		"closed_at":               &now,
-	}
-	if err := hc.storage.UpdateHarvestCondor(condorID, updates); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "close order placed but failed to update record: " + err.Error(), "close_order_id": closeOrderID})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"condor_id":      condorID,
-		"close_order_id": closeOrderID,
-		"realized_pnl":   realizedPnL,
-		"status":         "CLOSED",
+		"condor_id":      res.CondorID,
+		"close_order_id": res.CloseOrderID,
+		"realized_pnl":   res.RealizedPnL,
+		"status":         res.Status,
 	})
 }
 

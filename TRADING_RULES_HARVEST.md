@@ -66,6 +66,8 @@ Call `get_econ_blackout_status` (once per beat). If `is_blackout` is true OR the
 
 ### Step 2: Exit checks (for each open condor in `get_harvest_state` response)
 
+> **Backend automation:** When `HARVEST_EXIT_MONITOR_ENABLED=true` (operator env flag), the rules below are executed by the `HarvestExitMonitor` Go service on a ~60s tick. In that mode the LLM beat is skipped via the preflight gate (`open_condors > 0` no longer keeps the beat alive — see `agent/preflight.js` `harvestPreflight`). The exact behavior the service implements matches this section verbatim; it's kept here for auditability. Step 3 (entries) remains LLM-driven regardless of this flag.
+
 For each condor in `open_condors_detail`:
 
 **Priority 1 — Time exit (DTE ≤ 21):**

@@ -41,6 +41,12 @@ type HarvestStateResponse struct {
 	Trailing30dPnLPct      float64                   `json:"trailing_30d_pnl_pct"`
 	CircuitBreakerActive   bool                      `json:"circuit_breaker_active"`
 	PortfolioValue         float64                   `json:"portfolio_value"`
+	// MonitorEnabled reports whether the Go-side HarvestExitMonitor goroutine
+	// is running (HARVEST_EXIT_MONITOR_ENABLED=true at boot). When true the
+	// LLM heartbeat hands off Step-2 exit management to the monitor and
+	// should only own Step-3 entries; consumed by agent/preflight.js (Task 6)
+	// to relax the "no open condors" gate.
+	MonitorEnabled bool `json:"monitor_enabled"`
 }
 
 // FOMCStatusResponse is what the API returns for GET /harvest/fomc.
@@ -72,7 +78,14 @@ type HarvestService struct {
 	store              harvestStateStore
 	fomcDates          []time.Time
 	shortPutDeltaProxy float64
+	monitorEnabled     bool
 }
+
+// SetMonitorEnabled records whether the HarvestExitMonitor goroutine was
+// started at boot. Surfaced on HarvestStateResponse.MonitorEnabled so the
+// LLM preflight can decide whether Step-2 exit management is its job
+// (monitor disabled) or the Go goroutine's (monitor enabled).
+func (s *HarvestService) SetMonitorEnabled(b bool) { s.monitorEnabled = b }
 
 // NewHarvestService creates a new HarvestService.
 func NewHarvestService(store harvestStateStore) *HarvestService {
@@ -161,6 +174,7 @@ func (s *HarvestService) GetState(portfolioValue float64) (*HarvestStateResponse
 		Trailing30dPnLPct:      pnl30dPct,
 		CircuitBreakerActive:   circuitBreaker,
 		PortfolioValue:         portfolioValue,
+		MonitorEnabled:         s.monitorEnabled,
 	}, nil
 }
 

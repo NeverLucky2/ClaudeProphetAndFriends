@@ -271,6 +271,12 @@ func main() {
 		return tradingService.PlaceMultiLegOrder(ctx, order)
 	})
 
+	// HarvestCloser is the shared close-orchestration service used by both
+	// the HTTP /close endpoint (via HarvestController) and, when enabled,
+	// the HarvestExitMonitor goroutine. Wiring it once here keeps a single
+	// place-and-update path.
+	harvestCloser := services.NewHarvestCloser(storageService, placeMLegFn)
+
 	// Realized-vol service used to compute the IV–RV spread that gates
 	// Harvest condor entries. Wired into both HarvestController (legacy
 	// harvest/ivr route) and IVController (generic iv/:symbol route).
@@ -283,7 +289,30 @@ func main() {
 		storageService,
 		placeMLegFn,
 		getPortfolioValue,
+		harvestCloser,
 	)
+
+	// Harvest exit monitor (default OFF; operator opts in via env flag).
+	// When enabled, Step 2 of TRADING_RULES_HARVEST.md (exit management) is
+	// handled by this Go goroutine instead of the LLM heartbeat. The LLM
+	// continues to own Step 3 (entries) — preflight relaxation in Task 6.
+	harvestMonitorEnabled := os.Getenv("HARVEST_EXIT_MONITOR_ENABLED") == "true"
+	harvestSvc.SetMonitorEnabled(harvestMonitorEnabled)
+	if harvestMonitorEnabled {
+		optionsDataService := services.NewAlpacaOptionsDataService(cfg.AlpacaAPIKey, cfg.AlpacaSecretKey)
+		harvestPricer := services.NewHarvestPricer(optionsDataService)
+		harvestMonitor := services.NewHarvestExitMonitor(storageService, harvestPricer, harvestCloser)
+		harvestMonitor.SetUpdater(storageService)
+		harvestMonitor.SetOrderTracker(tradingService)
+		nyLoc, _ := time.LoadLocation("America/New_York") // re-derive locally; do not depend on services.nyLoc
+		marketIsOpen := func() bool {
+			return services.StaticMarketPhase(time.Now().UTC(), nyLoc) == "open"
+		}
+		go harvestMonitor.Start(ctx, 1*time.Minute, 5*time.Minute, marketIsOpen)
+		logger.Info("Harvest exit monitor started (HARVEST_EXIT_MONITOR_ENABLED=true)")
+	} else {
+		logger.Info("Harvest exit monitor disabled (HARVEST_EXIT_MONITOR_ENABLED!=true)")
+	}
 
 	// Start daily IV collection goroutine for Harvest
 	go startHarvestIVCollection(ctx, harvestIVRSvc, tradingService, logger)

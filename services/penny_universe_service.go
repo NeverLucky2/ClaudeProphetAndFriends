@@ -79,6 +79,15 @@ func parseTimeOnCalDate(layout, timeStr string, calDate time.Time, loc *time.Loc
 	return t
 }
 
+// StaticMarketPhase is the exported wrapper around staticMarketPhase used by
+// callers outside the services package (e.g. the HarvestExitMonitor wiring in
+// cmd/bot/main.go that needs an "is market open?" predicate). Adding a wrapper
+// instead of renaming the long-standing helper keeps internal call sites and
+// their tests untouched.
+func StaticMarketPhase(now time.Time, loc *time.Location) string {
+	return staticMarketPhase(now, loc)
+}
+
 func staticMarketPhase(now time.Time, loc *time.Location) string {
 	nowET := now.In(loc)
 	wd := nowET.Weekday()

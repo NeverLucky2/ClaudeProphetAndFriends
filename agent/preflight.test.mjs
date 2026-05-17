@@ -41,8 +41,12 @@ const blackoutOn = (reason = 'CPI release at 2026-05-13 12:30 UTC') => ({
   data: { is_blackout: true, reason },
 });
 const blackoutOff = () => ({ data: { is_blackout: false } });
-const harvestState = (openCondors, deployedPct = 0) => ({
-  data: { open_condors: openCondors, deployed_buying_power_pct: deployedPct },
+const harvestState = (openCondors, deployedPct = 0, monitorEnabled = false) => ({
+  data: {
+    open_condors: openCondors,
+    deployed_buying_power_pct: deployedPct,
+    monitor_enabled: monitorEnabled,
+  },
 });
 const fomcStatus = (isBlackout) => ({ data: { is_blackout: isBlackout } });
 
@@ -395,6 +399,43 @@ test('harvest: open condor + IV ≤ RV → run (exits must happen)', async () =>
     ['/api/v1/harvest/fomc', () => fomcStatus(false)],
     // IV endpoint should not even be hit because open condors > 0 returns
     // before the gate runs. Leave it unmocked to assert it isn't called.
+  ]);
+  const r = await resolvePreflight('harvest', rt, {});
+  assert.equal(r.skip, false);
+});
+
+// ── monitor_enabled: Go exit monitor handles exits, LLM only entries ──
+//
+// When the HarvestExitMonitor Go service is running, state.monitor_enabled is
+// true. In that mode, open condors no longer keep the LLM beat alive — the
+// downstream entry gates (FOMC, regime, econ, chain probe, IV-RV) decide.
+
+test('harvest: monitor_enabled + open condors but otherwise no entries → skip', async () => {
+  // With the monitor on, exits run in Go. The LLM beat is only needed
+  // for entries — and if entries are not gate-passing (e.g. chain probe
+  // returns empty), the beat should skip even with open condors.
+  const rt = makeRuntime([
+    ['/api/v1/harvest/state', () => harvestState(2, 5.0, /*monitorEnabled=*/ true)],
+    ['/api/v1/harvest/fomc', () => fomcStatus(false)],
+    ['/api/v1/regime-gate/status', () => regimeAllow()],
+    ['/api/v1/econ/blackout', () => blackoutOff()],
+    ['/api/v1/harvest/expirations/SPY', () => ({ data: { expiration_date: null } })],
+  ]);
+  const r = await resolvePreflight('harvest', rt, {});
+  assert.equal(r.skip, true);
+});
+
+test('harvest: monitor_enabled + open condors + entries available → run (entries)', async () => {
+  // Monitor handles exits, but entries can fire — chain present, IVR OK.
+  // The beat should NOT skip in this case, because the LLM owns Step 3.
+  const rt = makeRuntime([
+    ['/api/v1/harvest/state', () => harvestState(2, 5.0, /*monitorEnabled=*/ true)],
+    ['/api/v1/harvest/fomc', () => fomcStatus(false)],
+    ['/api/v1/regime-gate/status', () => regimeAllow()],
+    ['/api/v1/econ/blackout', () => blackoutOff()],
+    ['/api/v1/harvest/expirations/SPY', () => harvestExpiration()],
+    [/^\/api\/v1\/options\/chain\/SPY/, () => chainNonEmpty()],
+    ['/api/v1/iv/SPY', () => ivSpread(0.15, 0.04)], // positive premium edge
   ]);
   const r = await resolvePreflight('harvest', rt, {});
   assert.equal(r.skip, false);
