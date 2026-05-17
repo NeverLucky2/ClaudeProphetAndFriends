@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"io"
 	"time"
 
 	"prophet-trader/interfaces"
@@ -16,6 +17,12 @@ import (
 // If these ever drift, both must be updated together; consider promoting to
 // a shared models package as a follow-up.
 var turtleUniverse = []string{"TLT", "GLD", "USO", "DBC", "UUP", "EEM"}
+
+// nyLoc (the America/New_York timezone) is declared once at package scope
+// in penny_universe_service.go and reused here. tzdata is bundled into the
+// Go binary since 1.15, so the error path is effectively dead — a nil
+// location would cause a clear nil-deref at the first call site rather than
+// silent UTC fallback.
 
 const (
 	turtleWindowStartMin  = 16*60 + 55 // 16:55 ET
@@ -89,7 +96,10 @@ type TurtleExecutor struct {
 	logger     *logrus.Logger
 }
 
-// NewTurtleExecutor wires the executor with all live deps.
+// NewTurtleExecutor wires the executor with all live deps. A nil logger is
+// replaced with a discarding logrus instance so production code paths never
+// nil-deref on e.logger and so tests that don't care about log output stay
+// clean.
 func NewTurtleExecutor(
 	ledger *TurtleLedger,
 	signals signalFetcher,
@@ -100,6 +110,10 @@ func NewTurtleExecutor(
 	guard turtleGuard,
 	logger *logrus.Logger,
 ) *TurtleExecutor {
+	if logger == nil {
+		logger = logrus.New()
+		logger.SetOutput(io.Discard)
+	}
 	return &TurtleExecutor{
 		ledger:     ledger,
 		signals:    signals,
@@ -136,8 +150,7 @@ func wouldExceedAggregateRiskCap(open []*models.DBTrendLedgerEntry, proposedATR 
 // duplicate-heartbeat cases short-circuit the whole beat; regime/circuit/
 // deployed checks merely set SkipEntries (handled inside RunHeartbeat).
 func (e *TurtleExecutor) preloopCheck(now time.Time, session *models.DBTurtleSession) string {
-	et, _ := time.LoadLocation("America/New_York")
-	local := now.In(et)
+	local := now.In(nyLoc)
 	mins := local.Hour()*60 + local.Minute()
 	if mins < turtleWindowStartMin || mins > turtleWindowEndMin {
 		return fmt.Sprintf("out-of-window: %02d:%02d ET (runs 16:55-17:05)", local.Hour(), local.Minute())
@@ -151,8 +164,7 @@ func (e *TurtleExecutor) preloopCheck(now time.Time, session *models.DBTurtleSes
 
 // todayET returns the ET-localized YYYY-MM-DD date for now.
 func todayET(now time.Time) string {
-	et, _ := time.LoadLocation("America/New_York")
-	return now.In(et).Format("2006-01-02")
+	return now.In(nyLoc).Format("2006-01-02")
 }
 
 // RunHeartbeat runs the full per-day heartbeat sequence from
@@ -171,6 +183,7 @@ func (e *TurtleExecutor) RunHeartbeat(ctx context.Context, now time.Time) (*Hear
 	// Load session up front so preloop can check duplicate-heartbeat.
 	session, err := e.ledger.Session()
 	if err != nil {
+		e.logger.WithFields(logrus.Fields{"stage": "load_session"}).WithError(err).Error("turtle: load session failed")
 		res.Errors = append(res.Errors, fmt.Sprintf("load session: %v", err))
 		return res, nil
 	}
@@ -191,6 +204,7 @@ func (e *TurtleExecutor) RunHeartbeat(ctx context.Context, now time.Time) (*Hear
 	// Snapshot the open ledger once; pass to all loops.
 	openRows, err := e.ledger.ListOpen()
 	if err != nil {
+		e.logger.WithFields(logrus.Fields{"stage": "list_open"}).WithError(err).Error("turtle: list open ledger failed")
 		res.Errors = append(res.Errors, fmt.Sprintf("list open: %v", err))
 		return res, nil
 	}
@@ -242,6 +256,7 @@ func (e *TurtleExecutor) RunHeartbeat(ctx context.Context, now time.Time) (*Hear
 		session.CircuitBreakerTrippedDate = todayET(now)
 	}
 	if err := e.ledger.SaveSession(session); err != nil {
+		e.logger.WithFields(logrus.Fields{"stage": "save_session"}).WithError(err).Error("turtle: save session failed")
 		res.Errors = append(res.Errors, fmt.Sprintf("save session: %v", err))
 	}
 
@@ -259,17 +274,20 @@ func (e *TurtleExecutor) RunHeartbeat(ctx context.Context, now time.Time) (*Hear
 func (e *TurtleExecutor) reconcilePendingFills(ctx context.Context, rows []*models.DBTrendLedgerEntry, now time.Time, res *HeartbeatResult) {
 	for _, row := range rows {
 		if row.EntryOrderID == "" {
+			e.logger.WithFields(logrus.Fields{"ticker": row.Ticker, "stage": "reconcile"}).Error("turtle reconcile: empty EntryOrderID")
 			res.Errors = append(res.Errors, fmt.Sprintf("reconcile %s: empty EntryOrderID", row.Ticker))
 			continue
 		}
 		ord, err := e.trader.GetOrder(ctx, row.EntryOrderID)
 		if err != nil {
+			e.logger.WithFields(logrus.Fields{"ticker": row.Ticker, "stage": "reconcile_get_order", "order_id": row.EntryOrderID}).WithError(err).Error("turtle reconcile: GetOrder failed")
 			res.Errors = append(res.Errors, fmt.Sprintf("reconcile %s: GetOrder(%s): %v", row.Ticker, row.EntryOrderID, err))
 			continue
 		}
 		switch ord.Status {
 		case "filled", "partially_filled":
 			if ord.FilledAvgPrice == nil {
+				e.logger.WithFields(logrus.Fields{"ticker": row.Ticker, "stage": "reconcile_fill", "order_status": ord.Status}).Error("turtle reconcile: filled status with nil FilledAvgPrice")
 				res.Errors = append(res.Errors, fmt.Sprintf("reconcile %s: %s status with nil FilledAvgPrice — leaving as pending_fill", row.Ticker, ord.Status))
 				continue
 			}
@@ -278,6 +296,7 @@ func (e *TurtleExecutor) reconcilePendingFills(ctx context.Context, rows []*mode
 			row.Shares = int(ord.FilledQty)
 			row.InitialStop = row.EntryPrice - 2.0*row.ATRAtEntry
 			if err := e.ledger.Save(row); err != nil {
+				e.logger.WithFields(logrus.Fields{"ticker": row.Ticker, "stage": "reconcile_save_open"}).WithError(err).Error("turtle reconcile: save (open transition) failed")
 				res.Errors = append(res.Errors, fmt.Sprintf("reconcile %s: save: %v", row.Ticker, err))
 			}
 		case "canceled", "expired":
@@ -286,6 +305,7 @@ func (e *TurtleExecutor) reconcilePendingFills(ctx context.Context, rows []*mode
 			t := now
 			row.ExitDate = &t
 			if err := e.ledger.Save(row); err != nil {
+				e.logger.WithFields(logrus.Fields{"ticker": row.Ticker, "stage": "reconcile_save_canceled"}).WithError(err).Error("turtle reconcile: save (canceled transition) failed")
 				res.Errors = append(res.Errors, fmt.Sprintf("reconcile %s: save: %v", row.Ticker, err))
 			}
 		default:
@@ -320,6 +340,7 @@ func (e *TurtleExecutor) applyGates(ctx context.Context, session *models.DBTurtl
 	}
 	seg, err := e.segmentPnL.GetSegmentPnL(ctx, "trend")
 	if err != nil {
+		e.logger.WithFields(logrus.Fields{"stage": "segment_pnl"}).WithError(err).Error("turtle: segment PnL fetch failed — failing closed (skip entries)")
 		res.Errors = append(res.Errors, fmt.Sprintf("segment pnl: %v", err))
 		res.SkipEntries = true
 		return
@@ -343,11 +364,13 @@ func (e *TurtleExecutor) runExits(ctx context.Context, rows []*models.DBTrendLed
 	for _, row := range rows {
 		sig, err := e.signals.GetSignal(ctx, row.Ticker)
 		if err != nil {
+			e.logger.WithFields(logrus.Fields{"ticker": row.Ticker, "stage": "exit_signal"}).WithError(err).Error("turtle exit: signal fetch failed")
 			res.Errors = append(res.Errors, fmt.Sprintf("exit %s: signal: %v", row.Ticker, err))
 			continue
 		}
 		bar, err := e.bars.GetLatestBar(ctx, row.Ticker)
 		if err != nil {
+			e.logger.WithFields(logrus.Fields{"ticker": row.Ticker, "stage": "exit_bar"}).WithError(err).Error("turtle exit: bar fetch failed")
 			res.Errors = append(res.Errors, fmt.Sprintf("exit %s: bar: %v", row.Ticker, err))
 			continue
 		}
@@ -365,6 +388,7 @@ func (e *TurtleExecutor) runExits(ctx context.Context, rows []*models.DBTrendLed
 			Strategy:    "trend",
 		})
 		if err != nil {
+			e.logger.WithFields(logrus.Fields{"ticker": row.Ticker, "stage": "exit_market_sell", "reason": ev.Reason}).WithError(err).Error("turtle exit: market sell failed")
 			res.Errors = append(res.Errors, fmt.Sprintf("exit %s: place sell: %v", row.Ticker, err))
 			continue
 		}
@@ -374,6 +398,7 @@ func (e *TurtleExecutor) runExits(ctx context.Context, rows []*models.DBTrendLed
 		exitT := now
 		row.ExitDate = &exitT
 		if err := e.ledger.Save(row); err != nil {
+			e.logger.WithFields(logrus.Fields{"ticker": row.Ticker, "stage": "exit_save", "order_id": ord.OrderID}).WithError(err).Error("turtle exit: save (closed transition) failed")
 			res.Errors = append(res.Errors, fmt.Sprintf("exit %s: save: %v", row.Ticker, err))
 			continue
 		}
@@ -406,6 +431,7 @@ func (e *TurtleExecutor) runEntries(ctx context.Context, openRows []*models.DBTr
 		}
 		sig, err := e.signals.GetSignal(ctx, ticker)
 		if err != nil {
+			e.logger.WithFields(logrus.Fields{"ticker": ticker, "stage": "entry_signal"}).WithError(err).Error("turtle entry: signal fetch failed")
 			res.Errors = append(res.Errors, fmt.Sprintf("entry %s: signal: %v", ticker, err))
 			continue
 		}
@@ -416,6 +442,7 @@ func (e *TurtleExecutor) runEntries(ctx context.Context, openRows []*models.DBTr
 		}
 		acct, err := e.trader.GetAccount(ctx)
 		if err != nil {
+			e.logger.WithFields(logrus.Fields{"ticker": ticker, "stage": "entry_account"}).WithError(err).Error("turtle entry: account fetch failed")
 			res.Errors = append(res.Errors, fmt.Sprintf("entry %s: account: %v", ticker, err))
 			continue
 		}
@@ -454,6 +481,7 @@ func (e *TurtleExecutor) runEntries(ctx context.Context, openRows []*models.DBTr
 			Strategy:    "trend",
 		})
 		if err != nil {
+			e.logger.WithFields(logrus.Fields{"ticker": ticker, "stage": "entry_limit_buy", "shares": proposedShares, "limit_price": limitPrice}).WithError(err).Error("turtle entry: limit buy failed")
 			res.Errors = append(res.Errors, fmt.Sprintf("entry %s: place buy: %v", ticker, err))
 			continue
 		}
@@ -470,6 +498,7 @@ func (e *TurtleExecutor) runEntries(ctx context.Context, openRows []*models.DBTr
 			EntryOrderID:           ord.OrderID,
 		}
 		if err := e.ledger.Save(entry); err != nil {
+			e.logger.WithFields(logrus.Fields{"ticker": ticker, "stage": "entry_save", "order_id": ord.OrderID}).WithError(err).Error("turtle entry: save (pending_fill row) failed")
 			res.Errors = append(res.Errors, fmt.Sprintf("entry %s: save: %v", ticker, err))
 			continue
 		}
@@ -571,9 +600,9 @@ func computePositionDollars(portfolio, lastClose, atr20, sizingMultiplier float6
 	riskBudget := portfolio * 0.005
 	raw := riskBudget / (stopDistance / lastClose)
 	raw *= sizingMultiplier
-	cap := portfolio * 0.04
-	if raw > cap {
-		return cap
+	notionalCap := portfolio * 0.04
+	if raw > notionalCap {
+		return notionalCap
 	}
 	return raw
 }
