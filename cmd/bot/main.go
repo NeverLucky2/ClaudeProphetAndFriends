@@ -335,6 +335,37 @@ func main() {
 	segmentPnLController := controllers.NewSegmentPnLController(segmentPnLSvc)
 	logger.Debug("Segment P&L service initialized")
 
+	// Turtle Go scheduler (TURTLE_SCHEDULER_ENABLED=false by default).
+	// When enabled, the daily 17:00 ET TRADING_RULES_TREND.md heartbeat
+	// sequence runs in this Go service instead of the LLM. The trend agent's
+	// preflight then skips every beat — the LLM is retained only for the
+	// quarterly trend_parameter_review skill (operator-triggered).
+	//
+	// Dark-launch lifecycle: when the env flag is unset/false, no scheduler
+	// is constructed and no /api/v1/turtle/status endpoint is registered.
+	// agent/preflight.js's kill-switch check then 404s and falls through to
+	// the existing trendPreflight behavior.
+	var turtleController *controllers.TurtleController
+	if os.Getenv("TURTLE_SCHEDULER_ENABLED") == "true" && tradingService != nil {
+		turtleLedger := services.NewTurtleLedger(storageService)
+		turtleExecutor := services.NewTurtleExecutor(
+			turtleLedger,
+			trendSignalSvc,
+			dataService,
+			tradingService,
+			segmentPnLSvc,
+			regimeGate,
+			tradeGuard,
+			logger,
+		)
+		turtleScheduler := services.NewTurtleScheduler(turtleExecutor, logger)
+		turtleController = controllers.NewTurtleController(turtleScheduler)
+		go turtleScheduler.Start(ctx)
+		logger.Info("Turtle Go scheduler started (TURTLE_SCHEDULER_ENABLED=true)")
+	} else if os.Getenv("TURTLE_SCHEDULER_ENABLED") == "true" {
+		logger.Warn("Turtle Go scheduler requested but trading service unavailable — scheduler not started")
+	}
+
 	// Beat-context aggregator endpoint. Bundles account, positions, econ
 	// blackout, regime gate, and segment P&L into a single response so the
 	// harness can inject one read-only block per beat instead of the LLM
@@ -362,7 +393,24 @@ func main() {
 	logger.Debug("Intraday signal service initialized")
 
 	// Setup HTTP server
-	router := setupRouter(orderController, newsController, intelligenceController, positionController, activityController, economicFeedsController, pennyController, guardController, harvestController, trendController, segmentPnLController, ivController, intradayController, regimeGateController, beatCtxController)
+	router := setupRouter(
+		orderController,
+		newsController,
+		intelligenceController,
+		positionController,
+		activityController,
+		economicFeedsController,
+		pennyController,
+		guardController,
+		harvestController,
+		trendController,
+		segmentPnLController,
+		ivController,
+		intradayController,
+		regimeGateController,
+		beatCtxController,
+		turtleController,
+	)
 
 	// Start data cleanup routine
 	go startDataCleanup(ctx, storageService, cfg.DataRetentionDays, logger)
@@ -392,7 +440,24 @@ func main() {
 	}
 }
 
-func setupRouter(orderController *controllers.OrderController, newsController *controllers.NewsController, intelligenceController *controllers.IntelligenceController, positionController *controllers.PositionManagementController, activityController *controllers.ActivityController, economicFeedsController *controllers.EconomicFeedsController, pennyController *controllers.PennyController, guardController *controllers.GuardController, harvestController *controllers.HarvestController, trendController *controllers.TrendController, segmentPnLController *controllers.SegmentPnLController, ivController *controllers.IVController, intradayController *controllers.IntradayController, regimeGateController *controllers.RegimeGateController, beatCtxController *controllers.BeatContextController) *gin.Engine {
+func setupRouter(
+	orderController *controllers.OrderController,
+	newsController *controllers.NewsController,
+	intelligenceController *controllers.IntelligenceController,
+	positionController *controllers.PositionManagementController,
+	activityController *controllers.ActivityController,
+	economicFeedsController *controllers.EconomicFeedsController,
+	pennyController *controllers.PennyController,
+	guardController *controllers.GuardController,
+	harvestController *controllers.HarvestController,
+	trendController *controllers.TrendController,
+	segmentPnLController *controllers.SegmentPnLController,
+	ivController *controllers.IVController,
+	intradayController *controllers.IntradayController,
+	regimeGateController *controllers.RegimeGateController,
+	beatCtxController *controllers.BeatContextController,
+	turtleController *controllers.TurtleController,
+) *gin.Engine {
 	router := gin.Default()
 	router.SetTrustedProxies([]string{"127.0.0.1"})
 
@@ -518,6 +583,13 @@ func setupRouter(orderController *controllers.OrderController, newsController *c
 		trend := api.Group("/trend")
 		{
 			trend.GET("/signal/:symbol", trendController.HandleGetSignal)
+		}
+
+		// Turtle scheduler status endpoint — only registered when the env flag
+		// enabled construction in main(). When nil, the route is absent and
+		// preflight.js correctly 404s and falls through to the LLM-beat logic.
+		if turtleController != nil {
+			api.GET("/turtle/status", turtleController.HandleGetStatus)
 		}
 
 		api.GET("/segment-pnl/:strategy", segmentPnLController.HandleGetSegmentPnL)

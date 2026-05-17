@@ -283,6 +283,25 @@ export function outOfTrendWindow(now) {
 // Alpaca account don't keep TrendProphet awake. Attribution is derived from
 // each position's most recent buy order's strategy tag.
 async function trendPreflight(runtime, agentConfig) {
+  // Kill switch: when the Turtle Go scheduler is running (TURTLE_SCHEDULER_ENABLED=true,
+  // surfaced via /api/v1/turtle/status), the LLM beat has nothing to do — the
+  // scheduler executes the full TRADING_RULES_TREND.md heartbeat deterministically.
+  // The LLM remains configured only for the quarterly trend_parameter_review skill.
+  //
+  // Fail open on endpoint error (404 when the flag is off, network error otherwise)
+  // so the LLM beat continues to run as today. The check carries an 800ms timeout
+  // so a hung Go process can't stall the harness.
+  try {
+    const schedResp = await runtime.goAxios.get('/api/v1/turtle/status', { timeout: 800 });
+    if (schedResp?.data?.scheduler_enabled === true) {
+      return { skip: true, reason: 'Turtle Go scheduler enabled — LLM beat unnecessary' };
+    }
+  } catch (_err) {
+    // 404 (controller not registered) or any other error → fall through to the
+    // existing in-window/positions/signals logic. The kill switch should never
+    // wedge the agent.
+  }
+
   // Step 1 — time window. Skips the bulk of beats without any API calls.
   const window = outOfTrendWindow(new Date());
   if (window.out) {

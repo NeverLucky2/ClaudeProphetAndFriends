@@ -70,6 +70,13 @@ const regimeAllow = (tier = 'NORMAL', score = 60) => ({
   },
 });
 
+// Turtle Go scheduler status helpers. When the scheduler is enabled in the Go
+// process, the trend preflight kill switch fires unconditionally and skips
+// the LLM beat. When the controller is absent (env flag off), the endpoint
+// 404s; preflight catches and falls through to the existing logic.
+const turtleStatusEnabled = () => ({ data: { scheduler_enabled: true, last_run: null } });
+const turtleStatusDisabled404 = () => { const e = new Error('not found'); e.response = { status: 404 }; throw e; };
+
 // ── isEconomicBlackout ─────────────────────────────────────────────
 
 test('isEconomicBlackout: returns blackout=true when service reports blackout', async () => {
@@ -439,4 +446,58 @@ test('harvest: monitor_enabled + open condors + entries available → run (entri
   ]);
   const r = await resolvePreflight('harvest', rt, {});
   assert.equal(r.skip, false);
+});
+
+// ── trendPreflight kill switch ────────────────────────────────────
+//
+// When TURTLE_SCHEDULER_ENABLED=true, the Go service runs the full
+// TRADING_RULES_TREND.md heartbeat sequence. The LLM beat is then
+// unconditional dead weight — preflight must skip every beat regardless
+// of time window, positions, or entry signals. When the env flag is off,
+// the controller is not registered and the endpoint 404s; the kill switch
+// must swallow that and let the existing logic run.
+
+test('trend: scheduler enabled → skip with "scheduler enabled" reason', async () => {
+  const rt = makeRuntime([
+    ['/api/v1/turtle/status', turtleStatusEnabled],
+  ]);
+  const r = await resolvePreflight('trend', rt, {});
+  assert.equal(r.skip, true);
+  assert.match(r.reason, /Turtle Go scheduler enabled/);
+});
+
+test('trend: turtle/status 404 → falls through to existing window check', async () => {
+  // Outside the 16:55-17:05 ET window → the existing window-skip wins.
+  // The kill switch swallows the 404 and lets trendPreflight continue.
+  //
+  // We cannot easily fake the wall clock from this test, so we just check
+  // that the result is SOMETHING (skip or run), NOT the scheduler-enabled
+  // reason. This proves the kill switch fell through cleanly.
+  const rt = makeRuntime([
+    ['/api/v1/turtle/status', turtleStatusDisabled404],
+    // Provide other routes so the function can complete without unmocked-URL errors:
+    [/^\/api\/v1\/positions\?strategy=trend/, () => byStrategy(0)],
+    [/^\/api\/v1\/trend\/signal\//, () => ({ data: { last_close: 90, donchian_100_high: 95, sma_200: 88, atr_20: 1 } })],
+    ['/api/v1/regime-gate/status', () => regimeAllow()],
+    ['/api/v1/econ/blackout', () => blackoutOff()],
+  ]);
+  const r = await resolvePreflight('trend', rt, {});
+  // Either out-of-window (most of the time), or in-window-no-signals, both fine.
+  // The key assertion: it did NOT short-circuit on "scheduler enabled".
+  assert.notEqual(r.reason, 'Turtle Go scheduler enabled — LLM beat unnecessary');
+});
+
+test('trend: turtle/status returns scheduler_enabled=false → falls through', async () => {
+  // If someone hits the endpoint and it returns scheduler_enabled=false for
+  // some reason (which shouldn't happen in this controller, but defensively),
+  // the kill switch must NOT trip.
+  const rt = makeRuntime([
+    ['/api/v1/turtle/status', () => ({ data: { scheduler_enabled: false } })],
+    [/^\/api\/v1\/positions\?strategy=trend/, () => byStrategy(0)],
+    [/^\/api\/v1\/trend\/signal\//, () => ({ data: { last_close: 90, donchian_100_high: 95, sma_200: 88, atr_20: 1 } })],
+    ['/api/v1/regime-gate/status', () => regimeAllow()],
+    ['/api/v1/econ/blackout', () => blackoutOff()],
+  ]);
+  const r = await resolvePreflight('trend', rt, {});
+  assert.notEqual(r.reason, 'Turtle Go scheduler enabled — LLM beat unnecessary');
 });
