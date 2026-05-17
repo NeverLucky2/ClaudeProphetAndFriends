@@ -3,6 +3,8 @@
 **Updated:** 2026-05-06
 **Style:** Mechanical multi-asset trend-following on ETFs — rule executor only
 
+> **Backend automation:** When `TURTLE_SCHEDULER_ENABLED=true` (operator env flag), the entire `Heartbeat Behavior` sequence below is executed by `TurtleScheduler` in the Go backend on a daily 17:00 ET weekday cron. The LLM is retained only for the quarterly `trend_parameter_review` skill (operator-triggered). The trend-agent preflight then skips every beat via `/api/v1/turtle/status`. This rules file is the auditable spec of what the scheduler does; edits here do NOT change agent runtime behavior when the flag is on unless `services/turtle_executor.go` is updated to match.
+
 ---
 
 ## Core Philosophy
