@@ -304,7 +304,7 @@ func main() {
 		harvestMonitor := services.NewHarvestExitMonitor(storageService, harvestPricer, harvestCloser)
 		harvestMonitor.SetUpdater(storageService)
 		harvestMonitor.SetOrderTracker(tradingService)
-		nyLoc, _ := time.LoadLocation("America/New_York") // re-derive locally; do not depend on services.nyLoc
+		nyLoc, _ := time.LoadLocation("America/New_York") // local var keeps the closure self-contained; services.nyLoc is the package-level equivalent
 		marketIsOpen := func() bool {
 			return services.StaticMarketPhase(time.Now().UTC(), nyLoc) == "open"
 		}

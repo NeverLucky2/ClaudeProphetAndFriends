@@ -22,8 +22,10 @@ type TurtleController struct {
 	scheduler *services.TurtleScheduler
 }
 
-// NewTurtleController constructs the controller. Both args are required;
-// no nil-guard (caller in main.go owns lifetime).
+// NewTurtleController constructs the controller. scheduler is required;
+// no nil-guard (caller in main.go owns lifetime — the controller is only
+// constructed inside the TURTLE_SCHEDULER_ENABLED branch, where the
+// scheduler has just been built).
 func NewTurtleController(scheduler *services.TurtleScheduler) *TurtleController {
 	return &TurtleController{scheduler: scheduler}
 }
