@@ -2,6 +2,8 @@
 // friction estimates, writes parallel *.friction.json files. Spec:
 // docs/superpowers/specs/2026-05-17-friction-and-walkforward-design.md
 
+import { createHash } from 'node:crypto';
+
 const OCC_SYMBOL = /^[A-Z]{1,6}\d{6}[CP]\d{8}$/;
 const IC_MARKERS = ['iron condor', 'ic ', ' ic', '4-leg', '4 leg'];
 const STOP_OUT_SUBSTRINGS = [
@@ -144,4 +146,70 @@ export function computeIronCondorFriction(action, profile) {
     close_was_losing,
     haircut_breakdown: { spread_crossing, commissions, regulatory_fees },
   };
+}
+
+const CALCULATORS = {
+  stocks: (action, profile) => {
+    const stopOut = isStopOut(action);
+    const r = computeStockFriction(action, profile, stopOut);
+    return { ...r, close_was_losing: action.market_data.exit_price < action.market_data.entry_price };
+  },
+  penny_stocks: (action, profile) => {
+    const stopOut = isStopOut(action);
+    const r = computePennyFriction(action, profile, stopOut);
+    return { ...r, close_was_losing: action.market_data.exit_price < action.market_data.entry_price };
+  },
+  single_leg_options: (action, profile) => computeSingleLegOptionFriction(action, profile),
+  iron_condor: (action, profile) => computeIronCondorFriction(action, profile),
+};
+
+function configHashShort(config) {
+  // Stable JSON for hashing (sorted keys).
+  const json = JSON.stringify(config, Object.keys(config).sort());
+  return createHash('sha256').update(json).digest('hex').slice(0, 8);
+}
+
+function deriveRawPl(action, profileKey) {
+  const md = action.market_data;
+  if (typeof md.unrealized_pl === 'number') return md.unrealized_pl;
+  const isOption = profileKey === 'single_leg_options' || profileKey === 'iron_condor';
+  const multiplier = isOption ? 100 : 1;
+  return (md.exit_price - md.entry_price) * md.size * multiplier;
+}
+
+export function applyFriction(action, agentId, config) {
+  const profileKey = detectAssetClass(action, agentId);
+  if (!profileKey) return { skip: true, reason: 'unrecognized asset class' };
+
+  const md = action?.market_data;
+  if (!md || typeof md.entry_price !== 'number' || typeof md.exit_price !== 'number') {
+    return { skip: true, reason: 'missing market_data.entry_price or exit_price' };
+  }
+
+  const profile = config[profileKey];
+  if (!profile) return { skip: true, reason: `no friction profile for ${profileKey}` };
+
+  const calc = CALCULATORS[profileKey](action, profile);
+  const raw_pl = deriveRawPl(action, profileKey);
+  const friction_adjusted_pl = +(raw_pl - calc.haircut_total_usd).toFixed(4);
+
+  const augmented = {
+    ...action,
+    market_data: {
+      ...md,
+      raw_pl,
+      friction_adjusted_pl,
+    },
+    friction_meta: {
+      profile_applied: profileKey,
+      close_was_losing: calc.close_was_losing,
+      haircut_total_usd: calc.haircut_total_usd,
+      haircut_breakdown: calc.haircut_breakdown,
+      friction_config_version: config.version,
+      friction_config_hash: configHashShort(config),
+    },
+  };
+
+  const sign_flip_warning = raw_pl > 0 && friction_adjusted_pl < 0;
+  return sign_flip_warning ? { action: augmented, sign_flip_warning: true } : { action: augmented };
 }

@@ -251,3 +251,93 @@ test('computeIronCondorFriction: exit > entry skips multiplier', () => {
   assert.equal(result.haircut_total_usd, 156);
   assert.equal(result.close_was_losing, false);
 });
+
+import { applyFriction } from './apply-friction.mjs';
+
+const FULL_CONFIG = {
+  version: '2026-05-17.1',
+  stocks: STOCK_PROFILE,
+  penny_stocks: PENNY_PROFILE,
+  single_leg_options: OPT_PROFILE,
+  iron_condor: IC_PROFILE,
+};
+
+test('applyFriction: stock trade produces augmented action with friction_meta', () => {
+  const action = {
+    symbol: 'SPY',
+    reasoning: 'taking profit at target',
+    market_data: { entry_price: 500, exit_price: 505, size: 100, unrealized_pl: 500 },
+  };
+  const result = applyFriction(action, 'default', FULL_CONFIG);
+  assert.equal(result.skip, undefined);
+  assert.equal(result.action.market_data.raw_pl, 500);
+  assert.equal(result.action.market_data.friction_adjusted_pl, 500 - 4.02);
+  assert.equal(result.action.friction_meta.profile_applied, 'stocks');
+  assert.equal(result.action.friction_meta.close_was_losing, false);
+  assert.equal(result.action.friction_meta.friction_config_version, '2026-05-17.1');
+  assert.ok(typeof result.action.friction_meta.friction_config_hash === 'string');
+  assert.equal(result.action.friction_meta.friction_config_hash.length, 8);
+});
+
+test('applyFriction: unrecognized asset class -> skip with reason', () => {
+  const action = { symbol: 'weird-symbol', reasoning: '', market_data: { entry_price: 1, exit_price: 1, size: 1 } };
+  const result = applyFriction(action, 'default', FULL_CONFIG);
+  assert.equal(result.skip, true);
+  assert.match(result.reason, /asset class/);
+});
+
+test('applyFriction: missing entry_price -> skip with reason', () => {
+  const action = { symbol: 'SPY', reasoning: '', market_data: { exit_price: 100, size: 10 } };
+  const result = applyFriction(action, 'default', FULL_CONFIG);
+  assert.equal(result.skip, true);
+  assert.match(result.reason, /market_data/);
+});
+
+test('applyFriction: option uses single_leg_options profile (close_was_losing surfaced)', () => {
+  const action = {
+    symbol: 'QQQ260515C00712000',
+    reasoning: 'thesis broken, cutting',
+    market_data: { entry_price: 7.5, exit_price: 6.8, size: 6, unrealized_pl: -420 },
+  };
+  const result = applyFriction(action, 'default', FULL_CONFIG);
+  assert.equal(result.action.friction_meta.profile_applied, 'single_leg_options');
+  assert.equal(result.action.friction_meta.close_was_losing, true);
+});
+
+test('applyFriction: harvest agent forces iron_condor profile even on non-OCC symbol', () => {
+  const action = {
+    symbol: 'SPY',
+    reasoning: '',
+    market_data: { entry_price: 2.0, exit_price: 0.5, size: 10, theoretical_credit: 2000, unrealized_pl: 1500 },
+  };
+  const result = applyFriction(action, 'harvest', FULL_CONFIG);
+  assert.equal(result.action.friction_meta.profile_applied, 'iron_condor');
+});
+
+test('applyFriction: sign-flip warning surfaced when small winner becomes loser', () => {
+  // Stock: raw +$3, haircut $4.02 → -1.02.
+  const action = {
+    symbol: 'SPY',
+    reasoning: 'small win',
+    market_data: { entry_price: 100, exit_price: 100.03, size: 100, unrealized_pl: 3 },
+  };
+  const result = applyFriction(action, 'default', FULL_CONFIG);
+  assert.equal(result.action.market_data.friction_adjusted_pl < 0, true);
+  assert.equal(result.sign_flip_warning, true);
+});
+
+test('applyFriction: raw_pl falls back to (exit-entry)×size when unrealized_pl absent (stocks)', () => {
+  const action = { symbol: 'SPY', reasoning: '', market_data: { entry_price: 100, exit_price: 105, size: 100 } };
+  const result = applyFriction(action, 'default', FULL_CONFIG);
+  assert.equal(result.action.market_data.raw_pl, 500);
+});
+
+test('applyFriction: raw_pl falls back to (exit-entry)×size×100 for options', () => {
+  const action = {
+    symbol: 'QQQ260515C00712000',
+    reasoning: '',
+    market_data: { entry_price: 5.0, exit_price: 6.0, size: 2 },
+  };
+  const result = applyFriction(action, 'default', FULL_CONFIG);
+  assert.equal(result.action.market_data.raw_pl, 200);
+});
