@@ -1,0 +1,7 @@
+{
+  "timestamp": "2026-05-11T15:30:00Z",
+  "action": "SELL",
+  "symbol": "SPY",
+  "reasoning": "taking profit at target",
+  "market_data": { "entry_price": 500, "exit_price": 505, "size": 100, "unrealized_pl": 500 }
+}

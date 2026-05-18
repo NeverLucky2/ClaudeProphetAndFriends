@@ -2,9 +2,11 @@
 // friction estimates, writes parallel *.friction.json files. Spec:
 // docs/superpowers/specs/2026-05-17-friction-and-walkforward-design.md
 
-import { createHash } from 'node:crypto';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import * as defaultFs from 'node:fs';
+import { join, resolve } from 'node:path';
+import { createHash } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 
 const OCC_SYMBOL = /^[A-Z]{1,6}\d{6}[CP]\d{8}$/;
 const IC_MARKERS = ['iron condor', 'ic ', ' ic', '4-leg', '4 leg'];
@@ -265,4 +267,76 @@ export function resolveSandboxesForAgent(agentConfigPath, agentId) {
     }
   }
   return ids;
+}
+
+export function processSandboxes({ agentId, projectRoot, fs = defaultFs }) {
+  const configPath = join(projectRoot, 'config', 'friction.json');
+  const agentCfgPath = join(projectRoot, 'data', 'agent-config.json');
+  const config = loadFrictionConfig(configPath);
+  const sandboxIds = resolveSandboxesForAgent(agentCfgPath, agentId);
+
+  const stats = { processed: 0, skipped: 0, sign_flips: 0, skip_reasons: {} };
+
+  for (const sbId of sandboxIds) {
+    const dir = join(projectRoot, 'data', 'sandboxes', sbId, 'decisive_actions');
+    if (!fs.existsSync(dir)) continue;
+    const entries = readdirSync(dir).filter(f => f.endsWith('.json') && !f.endsWith('.friction.json'));
+    for (const fname of entries) {
+      const fullPath = join(dir, fname);
+      let action;
+      try {
+        action = JSON.parse(fs.readFileSync(fullPath, 'utf8'));
+      } catch (err) {
+        process.stderr.write(`apply-friction: malformed JSON at ${fullPath}: ${err.message}\n`);
+        stats.skipped += 1;
+        stats.skip_reasons['malformed_json'] = (stats.skip_reasons['malformed_json'] ?? 0) + 1;
+        continue;
+      }
+      let out;
+      try {
+        out = applyFriction(action, agentId, config);
+      } catch (err) {
+        process.stderr.write(`apply-friction: calculator error at ${fullPath}: ${err.message}\n`);
+        stats.skipped += 1;
+        stats.skip_reasons['calculator_error'] = (stats.skip_reasons['calculator_error'] ?? 0) + 1;
+        continue;
+      }
+      if (out.skip) {
+        process.stderr.write(`apply-friction: skipped ${fullPath}: ${out.reason}\n`);
+        stats.skipped += 1;
+        stats.skip_reasons[out.reason] = (stats.skip_reasons[out.reason] ?? 0) + 1;
+        continue;
+      }
+      if (out.sign_flip_warning) {
+        process.stderr.write(`apply-friction: sign-flip on ${fullPath} (raw ${out.action.market_data.raw_pl} -> adjusted ${out.action.market_data.friction_adjusted_pl})\n`);
+        stats.sign_flips += 1;
+      }
+      const outPath = join(dir, fname.replace(/\.json$/, '.friction.json'));
+      const content = JSON.stringify(out.action, null, 2);
+      writeAtomic(outPath, content, fs);
+      stats.processed += 1;
+    }
+  }
+
+  return stats;
+}
+
+// CLI entry — only runs when invoked directly, not when imported.
+// On Windows, import.meta.url uses forward slashes and file:///C:/... triple-slash form,
+// while process.argv[1] may be a relative or backslash path. Resolve both to absolute OS paths.
+{
+  const __filename = fileURLToPath(import.meta.url);
+  const argv1abs = process.argv[1] ? resolve(process.argv[1]) : '';
+  if (__filename === argv1abs) {
+    const args = process.argv.slice(2);
+    const agentIdx = args.indexOf('--agent');
+    if (agentIdx === -1 || !args[agentIdx + 1]) {
+      process.stderr.write('Usage: node scripts/apply-friction.mjs --agent <agent-id>\n');
+      process.exit(2);
+    }
+    const agentId = args[agentIdx + 1];
+    const projectRoot = process.cwd();
+    const stats = processSandboxes({ agentId, projectRoot });
+    process.stdout.write(JSON.stringify(stats, null, 2) + '\n');
+  }
 }

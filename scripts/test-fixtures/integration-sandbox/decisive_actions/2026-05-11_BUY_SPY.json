@@ -1,0 +1,7 @@
+{
+  "timestamp": "2026-05-11T14:00:00Z",
+  "action": "BUY",
+  "symbol": "SPY",
+  "reasoning": "entry on breakout",
+  "market_data": { "entry_price": 500, "exit_price": 500, "size": 100 }
+}

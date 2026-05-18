@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import * as defaultFs from 'node:fs';
 
 import { detectAssetClass, isStopOut } from './apply-friction.mjs';
 
@@ -445,4 +446,68 @@ test('resolveSandboxesForAgent: throws if agent-config missing', () => {
     () => resolveSandboxesForAgent('/nope.json', 'default'),
     /agent-config.*not found/i,
   );
+});
+
+import { processSandboxes } from './apply-friction.mjs';
+import { rmSync } from 'node:fs';
+
+test('processSandboxes: end-to-end on integration fixtures', () => {
+  const tmpRoot = join(FIX_DIR, '__tmp_integration__');
+  rmSync(tmpRoot, { recursive: true, force: true });
+
+  const { mkdirSync, cpSync } = defaultFs;
+  mkdirSync(join(tmpRoot, 'config'), { recursive: true });
+  cpSync(join(FIX_DIR, 'friction-valid.json'), join(tmpRoot, 'config', 'friction.json'));
+  mkdirSync(join(tmpRoot, 'data'), { recursive: true });
+  cpSync(join(FIX_DIR, 'integration-agent-config.json'), join(tmpRoot, 'data', 'agent-config.json'));
+  cpSync(
+    join(FIX_DIR, 'integration-sandbox'),
+    join(tmpRoot, 'data', 'sandboxes', 'integration-sandbox'),
+    { recursive: true },
+  );
+
+  const result = processSandboxes({ agentId: 'default', projectRoot: tmpRoot });
+  // BUY: entry=exit=500 → raw_pl = 0, friction adjusted = -4.02.
+  // SELL: raw_pl = 500, friction adjusted = 495.98.
+  // Both have full market_data, both process.
+  assert.equal(result.processed, 2);
+  assert.equal(result.skipped, 0);
+
+  const sellFriction = JSON.parse(defaultFs.readFileSync(
+    join(tmpRoot, 'data', 'sandboxes', 'integration-sandbox', 'decisive_actions', '2026-05-11_SELL_SPY.friction.json'),
+    'utf8',
+  ));
+  assert.equal(sellFriction.market_data.friction_adjusted_pl, 495.98);
+  assert.equal(sellFriction.friction_meta.profile_applied, 'stocks');
+
+  rmSync(tmpRoot, { recursive: true, force: true });
+});
+
+test('processSandboxes: idempotent (two runs produce byte-identical output)', () => {
+  const tmpRoot = join(FIX_DIR, '__tmp_idempotent__');
+  rmSync(tmpRoot, { recursive: true, force: true });
+  const { mkdirSync, cpSync, readFileSync: rfs } = defaultFs;
+  mkdirSync(join(tmpRoot, 'config'), { recursive: true });
+  cpSync(join(FIX_DIR, 'friction-valid.json'), join(tmpRoot, 'config', 'friction.json'));
+  mkdirSync(join(tmpRoot, 'data'), { recursive: true });
+  cpSync(join(FIX_DIR, 'integration-agent-config.json'), join(tmpRoot, 'data', 'agent-config.json'));
+  cpSync(
+    join(FIX_DIR, 'integration-sandbox'),
+    join(tmpRoot, 'data', 'sandboxes', 'integration-sandbox'),
+    { recursive: true },
+  );
+
+  processSandboxes({ agentId: 'default', projectRoot: tmpRoot });
+  const firstRun = rfs(
+    join(tmpRoot, 'data', 'sandboxes', 'integration-sandbox', 'decisive_actions', '2026-05-11_SELL_SPY.friction.json'),
+    'utf8',
+  );
+  processSandboxes({ agentId: 'default', projectRoot: tmpRoot });
+  const secondRun = rfs(
+    join(tmpRoot, 'data', 'sandboxes', 'integration-sandbox', 'decisive_actions', '2026-05-11_SELL_SPY.friction.json'),
+    'utf8',
+  );
+  assert.equal(firstRun, secondRun, 'idempotent runs must produce byte-identical output');
+
+  rmSync(tmpRoot, { recursive: true, force: true });
 });
