@@ -1589,11 +1589,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // broker's client_order_id as "{strategy}:{uuid}" so fills carry the
         // tag through reconciliation. Empty string is a no-op (legacy
         // behavior preserved for agents without a configured strategyId).
+        //
+        // Field rename: the MCP tool schema exposes `order_type` to the LLM
+        // (clearer than the overloaded "type"), but the Go controller's
+        // BuyRequest binds on `json:"type"`. Sending `order_type` here
+        // silently failed binding — req.Type stayed "" → defaulted to
+        // "market" — while limit_price still bound correctly, so Alpaca got
+        // a market order with a limit price attached and rejected with
+        // "market orders require no stop or limit price" (HTTP 422 code
+        // 40010001). Translate to `type` at this boundary so the LLM-facing
+        // name stays explicit while the Go-side canonical name stays "type".
         const strategy = process.env.OPENPROPHET_STRATEGY || '';
         const requestData = {
           symbol: args.symbol,
           qty: args.quantity,
-          order_type: args.order_type,
+          type: args.order_type,
           ...(args.limit_price && { limit_price: args.limit_price }),
           ...(strategy && { strategy }),
         };
@@ -1609,11 +1619,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'place_sell_order': {
+        // See place_buy_order for why `order_type` → `type` (silent binding
+        // failure caused Spark's LAND limit-sell to land as a market order
+        // with a limit_price attached on 2026-05-18).
         const strategy = process.env.OPENPROPHET_STRATEGY || '';
         const requestData = {
           symbol: args.symbol,
           qty: args.quantity,
-          order_type: args.order_type,
+          type: args.order_type,
           ...(args.limit_price && { limit_price: args.limit_price }),
           ...(strategy && { strategy }),
         };
