@@ -511,3 +511,42 @@ test('processSandboxes: idempotent (two runs produce byte-identical output)', ()
 
   rmSync(tmpRoot, { recursive: true, force: true });
 });
+
+test('processSandboxes: stale pre-existing .friction.json is overwritten (no mtime skip)', () => {
+  const tmpRoot = join(FIX_DIR, '__tmp_stale_overwrite__');
+  rmSync(tmpRoot, { recursive: true, force: true });
+  const { mkdirSync, cpSync, writeFileSync, readFileSync: rfs } = defaultFs;
+  mkdirSync(join(tmpRoot, 'config'), { recursive: true });
+  cpSync(join(FIX_DIR, 'friction-valid.json'), join(tmpRoot, 'config', 'friction.json'));
+  mkdirSync(join(tmpRoot, 'data'), { recursive: true });
+  cpSync(join(FIX_DIR, 'integration-agent-config.json'), join(tmpRoot, 'data', 'agent-config.json'));
+  cpSync(
+    join(FIX_DIR, 'integration-sandbox'),
+    join(tmpRoot, 'data', 'sandboxes', 'integration-sandbox'),
+    { recursive: true },
+  );
+
+  const frictionPath = join(
+    tmpRoot, 'data', 'sandboxes', 'integration-sandbox', 'decisive_actions',
+    '2026-05-11_SELL_SPY.friction.json',
+  );
+
+  const staleContent = JSON.stringify({
+    symbol: 'STALE',
+    market_data: { raw_pl: 999, friction_adjusted_pl: 999 },
+    friction_meta: { profile_applied: 'stocks', friction_config_version: '0.0.0-stale' },
+  }, null, 2);
+  writeFileSync(frictionPath, staleContent);
+  assert.equal(rfs(frictionPath, 'utf8'), staleContent, 'precondition: stale file is in place');
+
+  processSandboxes({ agentId: 'default', projectRoot: tmpRoot });
+
+  const afterRun = rfs(frictionPath, 'utf8');
+  assert.notEqual(afterRun, staleContent, 'stale .friction.json must be overwritten by processSandboxes');
+  const parsed = JSON.parse(afterRun);
+  assert.equal(parsed.symbol, 'SPY', 'overwritten file must reflect the raw decisive action (symbol SPY), not the stale STALE');
+  assert.equal(parsed.friction_meta.friction_config_version, '2026-05-17.1', 'overwritten file must carry current config version');
+  assert.equal(parsed.market_data.friction_adjusted_pl, 495.98, 'overwritten file must carry recomputed P&L (495.98), not stale 999');
+
+  rmSync(tmpRoot, { recursive: true, force: true });
+});
