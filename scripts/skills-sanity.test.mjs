@@ -65,3 +65,29 @@ test('.claude/skills/stress-test-friction/SKILL.md: codifies flip-rate threshold
   assert.match(content, /0\.05 ≤ flip_rate < 0\.20/);
   assert.match(content, /flip_rate ≥ 0\.20/);
 });
+
+const ADAPT_FOR_GATE = [
+  '.claude/skills/adapt-strategy/SKILL.md',
+  '.claude/skills/adapt-strategy-penny/SKILL.md',
+  '.claude/skills/harvest-parameter-review/SKILL.md',
+  '.claude/skills/trend-parameter-review/SKILL.md',
+];
+
+for (const path of ADAPT_FOR_GATE) {
+  test(`${path}: references significance-gate.mjs`, () => {
+    const content = readFileSync(path, 'utf8');
+    assert.match(content, /scripts\/significance-gate\.mjs/);
+  });
+
+  test(`${path}: has the FINAL precedence rule list`, () => {
+    const content = readFileSync(path, 'utf8');
+    assert.match(content, /FINAL precedence/);
+    assert.match(content, /NEEDS-OVERRIDE/);
+  });
+
+  test(`${path}: has the asset-class tagging table`, () => {
+    const content = readFileSync(path, 'utf8');
+    assert.match(content, /iron condor/);
+    assert.match(content, /Asset-class tagging/);
+  });
+}

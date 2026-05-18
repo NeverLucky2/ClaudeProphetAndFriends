@@ -166,6 +166,30 @@ For each parameter, compute:
 **Min-credit gates (wing/3 and $0.30 floor)**
 - How many entries were skipped for "credit below minimum"? If a meaningful number, are the skipped entries ones the user would have wanted (i.e. were they post-hoc winners)? You can't know the counterfactual perfectly, but you can note that {N} entries were filtered by the credit gate over the window.
 
+## Step 4.5 — Significance gate (per asset class)
+
+Pipe the **adapt set** (NOT the hold-out) as a JSON array on stdin to:
+
+```
+node scripts/significance-gate.mjs
+```
+
+Defaults: `min_losing_trades = 5`, `min_drawdown_pct = 0.05`. Override via `--min-losses` / `--min-drawdown` if the user requests.
+
+Read the per-category result. Display this table to the user:
+
+```
+Category            Trades  Losses  Drawdown  Gate
+stocks                  N1      L1     dd1%   ✓ PASSED / ✗ BLOCKED
+single_leg_options      N2      L2     dd2%   ...
+iron_condor             N3      L3     dd3%   ...
+penny_stocks            N4      L4     dd4%   ...
+```
+
+For BLOCKED categories, also display the gate's `reason` string.
+
+**Record the per-category gate result in conversation state as `SIGNIFICANCE_GATE`.** Step 6 will use this to decide which proposals are allowed.
+
 ## Step 5 — IVR-at-entry vs. realized-vol relationship
 
 For each CLOSED condor, compute (or extract from the DB if logged) the realized vol over the holding period of the underlying. Plot conceptually: x = `ivr_at_entry`, y = realized P&L per contract.
@@ -208,6 +232,20 @@ Examples of proposals you must NOT make (these are structural, not parametric):
 
 If your evidence points at a structural problem rather than a parameter problem, do NOT propose a parameter edit. Go to Step 7.
 
+**Asset-class tagging + significance gate check (NEW):** Before emitting each proposed edit, tag it with one or more asset-class categories based on its rule text:
+
+| Proposal text contains | Tagged as |
+|---|---|
+| "iron condor" / "IC" / "4-leg" / "credit spread" | `iron_condor` |
+| "option" / "call" / "put" / "DTE" / "delta" / OCC strike format | `single_leg_options` |
+| "penny" / explicit sub-$5 ticker mention | `penny_stocks` |
+| "stock" / "equity" / share-count language / common ticker mention | `stocks` |
+| Affects all positions equally (e.g., "max concurrent positions ≤10") | All currently-traded categories in the adapt set |
+
+If ALL tagged categories have `cleared: true` in `SIGNIFICANCE_GATE.by_category`, emit the proposal normally. Otherwise, do NOT emit the proposal — instead log:
+
+> Gap [N] skipped — proposal would affect category `<X>` which did not clear significance gate (`<reason>`).
+
 ## Step 6.5 — Validate proposed edits against hold-out (READ-ONLY, NO ITERATION)
 
 For each proposed edit from Step 6, classify it as **mechanical** (the rule maps to a supported predicate) or **qualitative** (everything else).
@@ -236,16 +274,27 @@ For each qualitative edit, read the hold-out trades and write a one-paragraph ju
 
 ## Step 6.6 — Attach hold-out verdicts to proposals
 
-For each proposal, attach a verdict block to its display:
+For each proposal, attach a combined verdict block:
 
-> **HOLD-OUT VERDICT:** APPROVED-BY-HOLDOUT — `review_type: mechanical` — trades_affected: 3 — net_pl_delta_usd: +$145
-> Limitations: (any `limitation_notes` from the scorer)
-> ⚠️ A 12-15 trade hold-out is a sanity check, not a hypothesis test.
+```
+SIGNIFICANCE GATE: PASSED — <category> (<losses> losses, <drawdown>% dd)
+HOLD-OUT VERDICT:  <APPROVED-BY-HOLDOUT|REJECTED-BY-HOLDOUT|INCONCLUSIVE> — review_type: <mechanical|qualitative> — trades_affected: <N> — net_pl_delta_usd: <±$X>
+REGIME WARNING:    <"<text>"|none|"insufficient_sample (need >= 5 affected trades; have N)">
+FINAL:             <APPROVED|NEEDS-OVERRIDE|INCONCLUSIVE>
+```
 
-Application rules to apply in Step 8:
-- **APPROVED-BY-HOLDOUT**: user-approved proposals applied normally.
-- **REJECTED-BY-HOLDOUT**: requires explicit user override before being applied.
-- **INCONCLUSIVE**: user decides as normal — most proposals will land here at current sample size. Do not auto-reject or auto-approve.
+**FINAL precedence (first matching rule wins, evaluated top-down):**
+
+1. If SIGNIFICANCE GATE = BLOCKED → proposal was never generated, no verdict block.
+2. If HOLD-OUT VERDICT = REJECTED-BY-HOLDOUT → `FINAL: NEEDS-OVERRIDE` (user can apply with explicit confirmation).
+3. If REGIME WARNING is present (not "none" and not "insufficient_sample") → `FINAL: NEEDS-OVERRIDE`.
+4. If HOLD-OUT VERDICT = INCONCLUSIVE → `FINAL: INCONCLUSIVE`.
+5. Otherwise (SIGNIFICANCE=PASSED, HOLD-OUT=APPROVED, no regime warning) → `FINAL: APPROVED`.
+
+Application rules in Step 8:
+- `APPROVED`: applied if the user approves it in Step 7.
+- `NEEDS-OVERRIDE`: user must explicitly confirm before it is applied.
+- `INCONCLUSIVE`: user decides as normal.
 
 ## Step 7 — Structural escalation (do NOT silently change structure)
 
