@@ -90,3 +90,39 @@ export function scoreStopAtPct(holdoutTrades, params) {
     limitation_notes: [STOP_AT_PCT_LIMITATION],
   });
 }
+
+export function scoreMaxConcurrentPositions(holdoutTrades, params) {
+  const { limit } = params;
+  const open = new Set();
+  let trades_affected = 0;
+  let net_pl_delta_usd = 0;
+  let blocked_winners = 0;
+  let blocked_losers = 0;
+  const details = [];
+
+  const sorted = [...holdoutTrades].sort((a, b) => (a.timestamp ?? '').localeCompare(b.timestamp ?? ''));
+
+  for (const t of sorted) {
+    const isOpen = t.action === 'BUY';
+    const isClose = t.action === 'SELL' || t.action === 'CLOSE';
+    if (isOpen) {
+      if (open.size >= limit) {
+        trades_affected += 1;
+        const pl = t.market_data?.friction_adjusted_pl ?? 0;
+        net_pl_delta_usd -= pl;
+        if (pl > 0) blocked_winners += 1;
+        if (pl < 0) blocked_losers += 1;
+        details.push({ symbol: t.symbol, timestamp: t.timestamp, open_count_before_block: open.size, pl });
+      } else {
+        open.add(t.symbol);
+      }
+    } else if (isClose) {
+      open.delete(t.symbol);
+    }
+  }
+  return buildVerdict({
+    predicate: 'max_concurrent_positions', params,
+    holdout_size: holdoutTrades.length, trades_affected, net_pl_delta_usd,
+    blocked_winners, blocked_losers, details,
+  });
+}

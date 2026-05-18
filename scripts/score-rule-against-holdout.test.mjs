@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildVerdict, scoreMaxPositionSizePct, scoreStopAtPct } from './score-rule-against-holdout.mjs';
+import { buildVerdict, scoreMaxPositionSizePct, scoreStopAtPct, scoreMaxConcurrentPositions } from './score-rule-against-holdout.mjs';
 
 test('buildVerdict: trades_affected = 0 -> INCONCLUSIVE', () => {
   const v = buildVerdict({
@@ -139,4 +139,26 @@ test('scoreStopAtPct: trade that closed at -15% with stop -10% -> flagged, posit
   const v = scoreStopAtPct(trades, { stop: -0.10 });
   assert.equal(v.trades_affected, 1);
   assert.equal(v.net_pl_delta_usd, 500);
+});
+
+test('scoreMaxConcurrentPositions: never exceeds limit -> 0 affected', () => {
+  const trades = [
+    { action: 'BUY', symbol: 'A', timestamp: '2026-05-01T10:00:00Z', market_data: { friction_adjusted_pl: 100 } },
+    { action: 'SELL', symbol: 'A', timestamp: '2026-05-01T11:00:00Z', market_data: { friction_adjusted_pl: 100 } },
+    { action: 'BUY', symbol: 'B', timestamp: '2026-05-01T12:00:00Z', market_data: { friction_adjusted_pl: 50 } },
+  ];
+  const v = scoreMaxConcurrentPositions(trades, { limit: 3 });
+  assert.equal(v.trades_affected, 0);
+});
+
+test('scoreMaxConcurrentPositions: exceeds limit -> flagged', () => {
+  // Limit 2. Three BUYs in a row without SELLs.
+  const trades = [
+    { action: 'BUY', symbol: 'A', timestamp: '2026-05-01T10:00:00Z', market_data: { friction_adjusted_pl: 100 } },
+    { action: 'BUY', symbol: 'B', timestamp: '2026-05-01T11:00:00Z', market_data: { friction_adjusted_pl: 50 } },
+    { action: 'BUY', symbol: 'C', timestamp: '2026-05-01T12:00:00Z', market_data: { friction_adjusted_pl: -200 } },
+  ];
+  const v = scoreMaxConcurrentPositions(trades, { limit: 2 });
+  assert.equal(v.trades_affected, 1); // only the 3rd BUY pushes count to 3 (>2)
+  assert.equal(v.net_pl_delta_usd, 200); // -1 × (-200), preventing the loser saves $200
 });
