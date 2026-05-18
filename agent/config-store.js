@@ -715,6 +715,7 @@ export async function addAccount({ name, publicKey, secretKey, baseUrl, paper })
     throw err;
   }
   syncLegacyAliases(_config);
+  await saveConfig();
   return { ...account, publicKey, secretKey };
 }
 
