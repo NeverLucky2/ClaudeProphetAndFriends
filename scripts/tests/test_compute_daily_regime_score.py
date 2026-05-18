@@ -277,3 +277,33 @@ def test_cli_flag_overrides_default_threshold(tmp_path):
     # 2h-old file (covered already by test_fresh_input_is_not_flagged_stale
     # so we don't repeat the assertion here — this test is purely about
     # the flag mechanism).
+
+
+def test_utf8_input_does_not_crash(tmp_path):
+    # 2026-05-18 regression: bubble_scorer emits Japanese phase labels
+    # ("警戒域", "中") in its JSON. On Windows, Path.read_text() defaulted to
+    # cp1252 which can't decode the multi-byte UTF-8 bytes, so the script
+    # crashed with UnicodeDecodeError — and the scheduler swallowed the
+    # non-zero exit, leaving regime_gate.json stale for days. The fix forces
+    # encoding="utf-8" on both read_text and write_text. This test pins the
+    # behavior so a future "let's drop the encoding arg" cleanup gets caught.
+    inputs = _make_inputs(tmp_path, breadth=70, macro=80, top=30, bubble=None)
+    bubble_path = tmp_path / "bubble.json"
+    bubble_path.write_text(
+        json.dumps({
+            "percentage": 50,
+            "phase": "警戒域",
+            "minsky_phase": "Displacement/Early Boom (きっかけ・初期拡張)",
+        }),
+        encoding="utf-8",
+    )
+    inputs["--bubble"] = bubble_path
+
+    output_path = _run_script(tmp_path, inputs)
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+
+    # bubble extraction (top-level "percentage") still works alongside the
+    # non-ASCII siblings. Score arithmetic same as test_full_inputs_computes_correct_score.
+    assert payload["score"] == 52
+    assert payload["components"]["bubble"]["present"] is True
+    assert payload["components"]["bubble"]["value"] == 50

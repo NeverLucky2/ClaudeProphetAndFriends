@@ -107,8 +107,12 @@ def _read_score(
         )
         return NEUTRAL_VALUE, file_path.name, False
     try:
-        raw = json.loads(file_path.read_text())
-    except (json.JSONDecodeError, OSError) as exc:
+        # Explicit utf-8: Path.read_text() defaults to locale encoding (cp1252
+        # on Windows), which crashes on multi-byte chars upstream skills emit
+        # (e.g., bubble_scorer's Japanese phase labels). Operator silence then
+        # eats the failure because the scheduler swallows non-zero exits.
+        raw = json.loads(file_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
         print(
             f"warn: {component} input unreadable ({exc}): {file_path} — using neutral {NEUTRAL_VALUE}",
             file=sys.stderr,
@@ -225,7 +229,7 @@ def main() -> int:
         input_stale_after_hours=args.input_stale_after_hours,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(payload, indent=2))
+    args.output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return 0
 
 
