@@ -8,6 +8,16 @@ You are running the monthly parameter review for the Harvest iron-condor agent. 
 
 You may NOT change the strategy structure. You may ONLY propose numerical edits. If the structure itself looks broken, escalate per Step 7.
 
+## Step 0 — Apply friction to raw trade data
+
+Before reading any trade data, run:
+
+`node scripts/apply-friction.mjs --agent harvest`
+
+Report the resulting `{ processed, skipped, sign_flips, skip_reasons }` stats to the user. **If `skipped` exceeds 10% of `processed + skipped`, warn the user that the adapt set may be biased and offer to abort.**
+
+All subsequent data loading reads `*.friction.json` files in each sandbox's `decisive_actions/` directory, NOT the raw `*.json` files. **All P&L-derived metrics (win rate, average win/loss, profit factor) MUST use `market_data.friction_adjusted_pl`. If that field is absent on a record, fall back to the original P&L field and tag the record in any output as "raw-pl-fallback".**
+
 ## Step 1 — Load current parameters
 
 Read `TRADING_RULES_HARVEST.md`. Extract the live values of the following parameters (these are the only knobs you may propose edits to):
@@ -39,7 +49,7 @@ This skill aggregates condor history from **every** sandbox running the `harvest
 Then, for each `<DIR>` in `<HARVEST_DIRS>`:
 
 a. Glob `data/sandboxes/<DIR>/activity_logs/activity_*.json`. Read every file with a date within the last 90 calendar days.
-b. Glob `data/sandboxes/<DIR>/decisive_actions/*.json`. Read every file with a `timestamp` within the last 90 calendar days.
+b. Glob `data/sandboxes/<DIR>/decisive_actions/*.friction.json`. Merge all matched files from all `<HARVEST_DIRS>`, sort by file mtime descending, read the **50 most recent overall** (not 50 per sandbox). If fewer than 50 `.friction.json` files exist across all sandboxes, use what's available and note the actual count in the report. If fewer than 10 exist in total, warn the user explicitly that analysis may be premature on this little data and offer to abort.
 c. Read `data/sandboxes/<DIR>/prophet_trader.db` if you can — the `harvest_condors` table is the authoritative source for realized condor P&L. Per-row fields you care about (verify exact column names by inspecting the table schema first):
    - underlying, opened_at, closed_at, status (CLOSED is the cohort you analyze)
    - credit_received, cost_to_close, realized_pnl
@@ -88,6 +98,18 @@ edits will be proposed this cycle. Re-run next month.
 Then stop. Do not edit `TRADING_RULES_HARVEST.md`. Do not propose changes. The user has explicitly forbidden relaxing this threshold.
 
 If count ≥ 10, proceed to Step 4.
+
+## Step 3.5 — Split into adapt set and hold-out set
+
+Sort all loaded decisive-action records by timestamp ascending. Compute `holdout_size = ceil(N × 0.20)` where N is the number of loaded records. The **adapt set** is the oldest `N − holdout_size` records; the **hold-out set** is the newest `holdout_size`.
+
+State both counts and date ranges to the user explicitly, plus symbol concentration:
+
+> Adapting on N1 decisions (date1 → date2). Holding out N2 decisions (date3 → date4) for validation.
+> Adapt-set top 3 symbols: SYM1 (X%), SYM2 (Y%), SYM3 (Z%).
+> Hold-out-set top 3 symbols: SYM1 (X%), SYM2 (Y%), SYM3 (Z%).
+
+**Gap analysis (Step 4) and proposal generation (Step 6) use ONLY the adapt set.** Do not peek at the hold-out set during these steps — it is reserved for Step 6.5 validation.
 
 ## Step 4 — Per-parameter evidence
 
@@ -166,6 +188,45 @@ Examples of proposals you must NOT make (these are structural, not parametric):
 - Adding adjustment / rolling logic (the rules explicitly forbid this)
 
 If your evidence points at a structural problem rather than a parameter problem, do NOT propose a parameter edit. Go to Step 7.
+
+## Step 6.5 — Validate proposed edits against hold-out (READ-ONLY, NO ITERATION)
+
+For each proposed edit from Step 6, classify it as **mechanical** (the rule maps to a supported predicate) or **qualitative** (everything else).
+
+**Mechanical predicates currently supported:**
+
+| Rule shape | Predicate name | Params |
+|---|---|---|
+| Position size ≤ X% | `max_position_size_pct` | `{ "limit": X }` |
+| Stop at -X% | `stop_at_pct` | `{ "stop": -X }` |
+| Max N concurrent positions | `max_concurrent_positions` | `{ "limit": N }` |
+| No re-entry within N hours | `no_reentry_within_hours` | `{ "hours": N }` |
+| DTE between min and max | `dte_bounds` | `{ "min": M, "max": X }` |
+
+For each mechanical edit, invoke the scorer (pipe the hold-out set as a JSON array on stdin):
+
+```
+echo '<HOLDOUT_JSON_ARRAY>' | node scripts/score-rule-against-holdout.mjs --predicate <name> --params '<params>'
+```
+
+Capture the returned envelope including `verdict`, `trades_affected`, `net_pl_delta_usd`, and any `limitation_notes`.
+
+For each qualitative edit, read the hold-out trades and write a one-paragraph judgment citing specific held-out trades by symbol and timestamp. Emit a parallel envelope with `review_type: "qualitative"` and a `verdict` of APPROVED-BY-HOLDOUT, REJECTED-BY-HOLDOUT, or INCONCLUSIVE based on your judgment.
+
+**Once hold-out data has been read in this step, no new proposals may be generated in the same skill invocation.** If the user wants to propose alternatives after seeing hold-out verdicts, that requires a new skill run with a fresh trade window. This prevents hold-out information from leaking into proposal generation.
+
+## Step 6.6 — Attach hold-out verdicts to proposals
+
+For each proposal, attach a verdict block to its display:
+
+> **HOLD-OUT VERDICT:** APPROVED-BY-HOLDOUT — `review_type: mechanical` — trades_affected: 3 — net_pl_delta_usd: +$145
+> Limitations: (any `limitation_notes` from the scorer)
+> ⚠️ A 12-15 trade hold-out is a sanity check, not a hypothesis test.
+
+Application rules to apply in Step 8:
+- **APPROVED-BY-HOLDOUT**: user-approved proposals applied normally.
+- **REJECTED-BY-HOLDOUT**: requires explicit user override before being applied.
+- **INCONCLUSIVE**: user decides as normal — most proposals will land here at current sample size. Do not auto-reject or auto-approve.
 
 ## Step 7 — Structural escalation (do NOT silently change structure)
 
