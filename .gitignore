@@ -51,3 +51,6 @@ quickstart.sh
 
 # Friction-adjusted derived trade files (regenerated from raw decisive_actions by scripts/apply-friction.mjs)
 data/sandboxes/**/*.friction.json
+
+# Regime history (regenerated from FMP by scripts/build-regime-history.mjs)
+data/reports/regime_history.json

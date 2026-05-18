@@ -14,6 +14,14 @@ Before reading any trade data, run:
 
 Report the resulting `{ processed, skipped, sign_flips }` stats to the user. All subsequent data loading reads `*.friction.json` files. All P&L-derived metrics (win rate, profit factor, average win/loss, drawdown) MUST use `market_data.friction_adjusted_pl`. If absent on a record, fall back to the original P&L field and tag the record in output as "raw-pl-fallback".
 
+## Step 0.5 — Build regime history
+
+After the friction post-processor completes, run:
+
+`node scripts/build-regime-history.mjs --from <YYYY-MM-DD of oldest loaded trade> --to <today YYYY-MM-DD>`
+
+If the script exits non-zero, continue but treat every trade as `regime: "unknown"`. Regime composition appears in this report as informational only — no gating, no proposals, no scorer integration.
+
 ## Step 1 — Load data
 
 This skill aggregates history from every sandbox running the **`penny-prophet`** agent (name "PennyProphet"). Sandboxes are resolved by agent, never by sandbox name or hardcoded ID.
@@ -27,6 +35,10 @@ This skill aggregates history from every sandbox running the **`penny-prophet`**
    - Glob `data/sandboxes/<DIR>/decisive_actions/*.friction.json`, merge across sandboxes, read the **80 most recent overall** by file mtime.
 
    Tag every loaded record with the sandbox it came from — large per-sandbox divergences are themselves a finding worth surfacing in Step 5.
+
+**Join regime label:** For each loaded trade, convert `action.timestamp` to America/New_York and look up in `regime_history.labels` (walk back up to 5 calendar days for weekends/holidays). Tag each trade with a `regime` field; missing → `regime: "unknown"`.
+
+When summarizing in the report, include a one-line "Regime composition: X% bull-trend, Y% chop, Z% bear-trend, W% unknown" before the headline P&L table.
 
 PennyProphet generates more trades per day than Prophet (60-second heartbeat during market_open vs Prophet's 600-second), so the windows are wider here than in `review-performance`.
 

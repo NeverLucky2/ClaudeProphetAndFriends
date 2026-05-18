@@ -1,0 +1,55 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+
+const ADAPT_SKILLS = [
+  '.claude/skills/adapt-strategy/SKILL.md',
+  '.claude/skills/adapt-strategy-penny/SKILL.md',
+  '.claude/skills/harvest-parameter-review/SKILL.md',
+  '.claude/skills/trend-parameter-review/SKILL.md',
+];
+
+for (const path of ADAPT_SKILLS) {
+  test(`${path}: has Step 0.5 — Build regime history exactly once`, () => {
+    const content = readFileSync(path, 'utf8');
+    const matches = content.match(/## Step 0\.5 — Build regime history/g) ?? [];
+    assert.equal(matches.length, 1, `expected exactly 1 occurrence of Step 0.5 header; got ${matches.length}`);
+  });
+
+  test(`${path}: references build-regime-history.mjs`, () => {
+    const content = readFileSync(path, 'utf8');
+    assert.match(content, /scripts\/build-regime-history\.mjs/);
+  });
+
+  test(`${path}: references --regime-history flag in scorer invocation`, () => {
+    const content = readFileSync(path, 'utf8');
+    assert.match(content, /--regime-history data\/reports\/regime_history\.json/);
+  });
+
+  test(`${path}: references --adapt-set-distribution flag`, () => {
+    const content = readFileSync(path, 'utf8');
+    assert.match(content, /--adapt-set-distribution/);
+  });
+}
+
+const REVIEW_SKILLS = [
+  '.claude/skills/review-performance/SKILL.md',
+  '.claude/skills/review-performance-penny/SKILL.md',
+];
+
+for (const path of REVIEW_SKILLS) {
+  test(`${path}: has Step 0.5 — Build regime history`, () => {
+    const content = readFileSync(path, 'utf8');
+    assert.match(content, /## Step 0\.5 — Build regime history/);
+  });
+
+  test(`${path}: references build-regime-history.mjs`, () => {
+    const content = readFileSync(path, 'utf8');
+    assert.match(content, /scripts\/build-regime-history\.mjs/);
+  });
+
+  test(`${path}: does NOT call score-rule-against-holdout (review-only, no scorer)`, () => {
+    const content = readFileSync(path, 'utf8');
+    assert.doesNotMatch(content, /score-rule-against-holdout\.mjs/);
+  });
+}

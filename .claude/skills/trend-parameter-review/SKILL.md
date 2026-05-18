@@ -22,6 +22,14 @@ All subsequent data loading reads `*.friction.json` files in each sandbox's `dec
 
 Note: TrendProphet's authoritative P&L source is the `prophet_trader.db` ledger (Step 2c). Friction applies only to the `decisive_actions/` stream used as a fallback and for behavioral-gap analysis. The DB cohort is used as-is for realized P&L calculations in Steps 3–7.
 
+## Step 0.5 — Build regime history
+
+After the friction post-processor completes, run:
+
+`node scripts/build-regime-history.mjs --from <YYYY-MM-DD of oldest loaded trade> --to <today YYYY-MM-DD>`
+
+Report the returned `{ action, path }` to the user. If the script exits non-zero (FMP key missing, network error), continue but tag every trade `regime: "unknown"` in Step 2 and warn the user that regime composition and `regime_warning` will be unavailable this run.
+
 ## Step 1 — Load current parameters
 
 Read `TRADING_RULES_TREND.md`. Extract live values for the parameters below (these are the only knobs you may propose edits to). The values shown are the snapshot at skill-creation time — re-read on every run.
@@ -55,6 +63,9 @@ Then, for each `<DIR>` in `<TREND_DIRS>`:
 
 a. Glob `data/sandboxes/<DIR>/activity_logs/activity_*.json`. Read every file dated within the last 180 calendar days.
 b. Glob `data/sandboxes/<DIR>/decisive_actions/*.friction.json`. Merge all matched files from all `<TREND_DIRS>`, sort by file mtime descending, read the **50 most recent overall** (not 50 per sandbox). If fewer than 50 `.friction.json` files exist across all sandboxes, use what's available and note the actual count in the report. If fewer than 10 exist in total, warn the user explicitly that analysis may be premature on this little data and offer to abort.
+
+**Join regime label:** After loading each `.friction.json`, also load `data/reports/regime_history.json` (if Step 0.5 succeeded). For each trade, convert `action.timestamp` to America/New_York using `Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date(timestamp))` and look up the date in `regime_history.labels`. If the date is a weekend/holiday or otherwise missing, walk back up to 5 calendar days for the previous trading day's label. Still missing → tag the trade `regime: "unknown"`. Add the resolved label as a top-level `regime` field on each loaded record.
+
 c. Read `data/sandboxes/<DIR>/prophet_trader.db` if you can. The trend ledger is persisted to disk per `TRADING_RULES_TREND.md` "Persisted Ledger" section. Verify exact table name and column names by inspecting the schema first; expected columns:
    - ticker, entry_date, entry_price, shares, atr_at_entry, initial_stop, donchian_100_high_at_entry
    - exit_date, exit_price, exit_reason ∈ {trailing_stop, initial_hard_stop, manual, circuit_breaker}
@@ -113,6 +124,15 @@ State both counts and date ranges to the user explicitly, plus symbol concentrat
 > Adapting on N1 decisions (date1 → date2). Holding out N2 decisions (date3 → date4) for validation.
 > Adapt-set top 3 symbols: SYM1 (X%), SYM2 (Y%), SYM3 (Z%).
 > Hold-out-set top 3 symbols: SYM1 (X%), SYM2 (Y%), SYM3 (Z%).
+
+> Adapt set regime composition: X% bull-trend, Y% chop, Z% bear-trend, W% unknown
+> Hold-out set regime composition: …
+
+If any single regime ≥70% in the adapt set, append:
+
+> ⚠️ Adapt set is heavily skewed to <regime>; findings may not generalize.
+
+Compute the adapt-set regime distribution as an object `{ "bull-trend": 0.X, "chop": 0.Y, "bear-trend": 0.Z, "unknown": 0.W }` (proportions summing to 1.0) and **record it in conversation state** as `ADAPT_SET_REGIME_DISTRIBUTION` — Step 7.5 will pass this to the scorer.
 
 **Gap analysis (Steps 4–6) and proposal generation (Step 7) use ONLY the adapt set for decisive-action-derived signals.** The DB cohort from Step 2c is always used in full for realized-P&L calculations — it is not split. Do not peek at the hold-out decisive-action records during Steps 4–7; they are reserved for Step 7.5 validation.
 
@@ -239,9 +259,9 @@ For each proposed edit from Step 7, classify it as **mechanical** (the rule maps
 
 For each mechanical edit, invoke the scorer (pipe the hold-out set as a JSON array on stdin):
 
-```
-echo '<HOLDOUT_JSON_ARRAY>' | node scripts/score-rule-against-holdout.mjs --predicate <name> --params '<params>'
-```
+`echo '<HOLDOUT_JSON_ARRAY>' | node scripts/score-rule-against-holdout.mjs --predicate <name> --params '<params>' --regime-history data/reports/regime_history.json --adapt-set-distribution '<ADAPT_SET_REGIME_DISTRIBUTION_JSON>'`
+
+The returned envelope may now contain a `regime_warning` field (when affected trades over-index a regime by ≥25pp vs adapt-set baseline) or `regime_warning_skipped: "insufficient_sample (need >= 5 affected trades; have N)"`. Capture both for Step 7.6.
 
 Capture the returned envelope including `verdict`, `trades_affected`, `net_pl_delta_usd`, and any `limitation_notes`.
 
