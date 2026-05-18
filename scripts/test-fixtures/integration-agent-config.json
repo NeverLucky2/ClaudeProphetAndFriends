@@ -1,0 +1,7 @@
+{
+  "agents": [{ "id": "default", "name": "Prophet", "strategyId": "p1" }],
+  "strategies": [{ "id": "p1", "name": "P1", "customRules": "" }],
+  "sandboxes": {
+    "ints": { "name": "ints", "accountId": "integration-sandbox", "agent": { "activeAgentId": "default" } }
+  }
+}

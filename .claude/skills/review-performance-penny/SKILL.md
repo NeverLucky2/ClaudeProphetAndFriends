@@ -6,6 +6,14 @@ allowed-tools: Read Glob
 
 You are doing a structured performance review for the PennyProphet autonomous trading agent. Work through the following steps in order.
 
+## Step 0 — Apply friction to raw trade data
+
+Before reading any trade data, run:
+
+`node scripts/apply-friction.mjs --agent penny-prophet`
+
+Report the resulting `{ processed, skipped, sign_flips }` stats to the user. All subsequent data loading reads `*.friction.json` files. All P&L-derived metrics (win rate, profit factor, average win/loss, drawdown) MUST use `market_data.friction_adjusted_pl`. If absent on a record, fall back to the original P&L field and tag the record in output as "raw-pl-fallback".
+
 ## Step 1 — Load data
 
 This skill aggregates history from every sandbox running the **`penny-prophet`** agent (name "PennyProphet"). Sandboxes are resolved by agent, never by sandbox name or hardcoded ID.
@@ -16,7 +24,7 @@ This skill aggregates history from every sandbox running the **`penny-prophet`**
 4. Iterate `sandboxes` and keep every entry where `agent.activeAgentId === 'penny-prophet'`. Collect their `accountId` values as `<PENNY_DIRS>`. State the sandbox list (name → accountId) before continuing. If empty, stop and tell the user no sandbox currently uses the agent.
 5. For each `<DIR>` in `<PENNY_DIRS>`:
    - Glob `data/sandboxes/<DIR>/activity_logs/activity_*.json`, read the **7 most recent per sandbox**.
-   - Glob `data/sandboxes/<DIR>/decisive_actions/*.json`, merge across sandboxes, read the **80 most recent overall** by file mtime.
+   - Glob `data/sandboxes/<DIR>/decisive_actions/*.friction.json`, merge across sandboxes, read the **80 most recent overall** by file mtime.
 
    Tag every loaded record with the sandbox it came from — large per-sandbox divergences are themselves a finding worth surfacing in Step 5.
 

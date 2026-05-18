@@ -6,6 +6,16 @@ allowed-tools: Read Glob
 
 You are closing the learning loop for the Prophet trading agent. Your job is to read what the agent actually did, compare it to what the strategy says it should do, find the gaps, and propose concrete rule changes — then apply the ones the user approves.
 
+## Step 0 — Apply friction to raw trade data
+
+Before reading any trade data, run:
+
+`node scripts/apply-friction.mjs --agent default`
+
+Report the resulting `{ processed, skipped, sign_flips, skip_reasons }` stats to the user. **If `skipped` exceeds 10% of `processed + skipped`, warn the user that the adapt set may be biased and offer to abort.**
+
+All subsequent data loading reads `*.friction.json` files in each sandbox's `decisive_actions/` directory, NOT the raw `*.json` files. **All P&L-derived metrics (win rate, average win/loss, profit factor) MUST use `market_data.friction_adjusted_pl`. If that field is absent on a record, fall back to the original P&L field and tag the record in any output as "raw-pl-fallback".**
+
 ## Step 1 — Resolve target agent, strategy, and sandboxes
 
 This skill targets the **`default`** agent (name "Prophet"). Sandboxes are resolved by agent — never by sandbox name. Activity from every sandbox running this agent is aggregated so the strategy is tuned against the full history.
@@ -20,12 +30,24 @@ State the resolved sandbox list (sandbox name → accountId directory) before co
 
 ## Step 3 — Load recent decisions (last 30 days, all Prophet sandboxes)
 
-For each `<DIR>` in `<PROPHET_DIRS>`: glob `data/sandboxes/<DIR>/decisive_actions/*.json`. Merge all matched files into one list, sort by file mtime descending, read the **60 most recent overall** (not 60 per sandbox). For each, extract:
+For each `<DIR>` in `<PROPHET_DIRS>`: glob `data/sandboxes/<DIR>/decisive_actions/*.friction.json`. Merge all matched files into one list, sort by file mtime descending, read the **75 most recent overall** (not 75 per sandbox). If fewer than 75 `.friction.json` files exist across all sandboxes, use what's available; if fewer than 20 exist in total, warn the user explicitly that adaptation may be premature on this little data and offer to abort. For each, extract:
 - `timestamp`
 - `sandboxId` (record which directory it came from — useful for gap analysis if a pattern is sandbox-specific)
 - `action` (BUY / SELL / HOLD / etc.)
 - `symbol`
 - `reasoning` (full text)
+
+## Step 3.5 — Split into adapt set and hold-out set
+
+Sort all loaded decisions by timestamp ascending. Compute `holdout_size = ceil(N × 0.20)` where N is the number of loaded decisions. The **adapt set** is the oldest `N − holdout_size` decisions; the **hold-out set** is the newest `holdout_size`.
+
+State both counts and date ranges to the user explicitly, plus symbol concentration:
+
+> Adapting on N1 decisions (date1 → date2). Holding out N2 decisions (date3 → date4) for validation.
+> Adapt-set top 3 symbols: SYM1 (X%), SYM2 (Y%), SYM3 (Z%).
+> Hold-out-set top 3 symbols: SYM1 (X%), SYM2 (Y%), SYM3 (Z%).
+
+**Gap analysis (Step 5) and proposal generation (Step 6) use ONLY the adapt set.** Do not peek at the hold-out set during these steps — it is reserved for Step 6.5 validation.
 
 ## Step 4 — Load recent P&L context (all Prophet sandboxes)
 
@@ -85,6 +107,45 @@ For each significant gap (ignore one-offs; focus on patterns appearing 2+ times)
 ---
 
 If a gap suggests adding a *new* rule rather than changing an existing one, say so explicitly and write the full new rule text.
+
+## Step 6.5 — Validate proposed edits against hold-out (READ-ONLY, NO ITERATION)
+
+For each proposed edit from Step 6, classify it as **mechanical** (the rule maps to a supported predicate) or **qualitative** (everything else).
+
+**Mechanical predicates currently supported:**
+
+| Rule shape | Predicate name | Params |
+|---|---|---|
+| Position size ≤ X% | `max_position_size_pct` | `{ "limit": X }` |
+| Stop at -X% | `stop_at_pct` | `{ "stop": -X }` |
+| Max N concurrent positions | `max_concurrent_positions` | `{ "limit": N }` |
+| No re-entry within N hours | `no_reentry_within_hours` | `{ "hours": N }` |
+| DTE between min and max | `dte_bounds` | `{ "min": M, "max": X }` |
+
+For each mechanical edit, invoke the scorer (pipe the hold-out set as a JSON array on stdin):
+
+```
+echo '<HOLDOUT_JSON_ARRAY>' | node scripts/score-rule-against-holdout.mjs --predicate <name> --params '<params>'
+```
+
+Capture the returned envelope including `verdict`, `trades_affected`, `net_pl_delta_usd`, and any `limitation_notes`.
+
+For each qualitative edit, read the hold-out trades and write a one-paragraph judgment citing specific held-out trades by symbol and timestamp. Emit a parallel envelope with `review_type: "qualitative"` and a `verdict` of APPROVED-BY-HOLDOUT, REJECTED-BY-HOLDOUT, or INCONCLUSIVE based on your judgment.
+
+**Once hold-out data has been read in this step, no new proposals may be generated in the same skill invocation.** If the user wants to propose alternatives after seeing hold-out verdicts, that requires a new skill run with a fresh trade window. This prevents hold-out information from leaking into proposal generation.
+
+## Step 6.6 — Attach hold-out verdicts to proposals
+
+For each proposal, attach a verdict block to its display:
+
+> **HOLD-OUT VERDICT:** APPROVED-BY-HOLDOUT — `review_type: mechanical` — trades_affected: 3 — net_pl_delta_usd: +$145
+> Limitations: (any `limitation_notes` from the scorer)
+> ⚠️ A 12-15 trade hold-out is a sanity check, not a hypothesis test.
+
+Application rules to apply in Step 8:
+- **APPROVED-BY-HOLDOUT**: user-approved proposals applied normally.
+- **REJECTED-BY-HOLDOUT**: requires explicit user override before being applied.
+- **INCONCLUSIVE**: user decides as normal — most proposals will land here at current sample size. Do not auto-reject or auto-approve.
 
 ## Step 7 — Present and confirm
 

@@ -48,3 +48,6 @@ __pycache__/
 # News summary cache
 news_summaries/*.json
 quickstart.sh
+
+# Friction-adjusted derived trade files (regenerated from raw decisive_actions by scripts/apply-friction.mjs)
+data/sandboxes/**/*.friction.json
