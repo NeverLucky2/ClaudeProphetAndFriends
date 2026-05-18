@@ -23,7 +23,7 @@ This skill aggregates history from every sandbox running the **`default`** agent
 3. In `strategies[]`, find the entry with that id — extract strategy `name`, `id`, and `customRules`. This is the rulebook the audit will compare behavior against.
 4. Iterate `sandboxes` and keep every entry where `agent.activeAgentId === 'default'`. Collect their `accountId` values as `<PROPHET_DIRS>`. State the sandbox list (name → accountId) before continuing. If empty, stop and tell the user no sandbox currently uses the agent.
 5. For each `<DIR>` in `<PROPHET_DIRS>`:
-   - Glob `data/sandboxes/<DIR>/activity_logs/activity_*.friction.json`, read the **5 most recent per sandbox**.
+   - Glob `data/sandboxes/<DIR>/activity_logs/activity_*.json`, read the **5 most recent per sandbox**.
    - Glob `data/sandboxes/<DIR>/decisive_actions/*.friction.json`, merge across sandboxes, read the **40 most recent overall** by file mtime.
 
    Tag every loaded record with the sandbox it came from — large per-sandbox divergences are themselves a finding worth surfacing in Step 5.
