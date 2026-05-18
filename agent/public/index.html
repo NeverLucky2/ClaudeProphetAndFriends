@@ -3006,8 +3006,12 @@ async function saveManagerPrompt() {
 
 async function newManagerSession() {
   await fetch('/api/manager/new-session', { method: 'POST' });
-  const term = sandboxTerminals['_manager']?.termEl;
-  if (term) term.innerHTML = '<div class="log-entry info"><span class="time">' + fmtTime() + '</span>New conversation started.</div>';
+  const t = sandboxTerminals['_manager'];
+  if (t && t.termEl) {
+    t.termEl.innerHTML = '<div class="log-entry info"><span class="time">' + fmtTime() + '</span>New conversation started.</div>';
+    t.autoScroll = true;
+    if (t.jumpBtn) t.jumpBtn.classList.remove('visible');
+  }
   showToast('New manager session', 'info');
 }
 
