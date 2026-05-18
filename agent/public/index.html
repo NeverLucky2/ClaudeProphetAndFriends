@@ -3102,7 +3102,7 @@ function logToSandbox(sandboxId, html) {
   const t = sandboxTerminals[sandboxId];
   if (!t) return;
   t.termEl.insertAdjacentHTML('beforeend', html);
-  t.termEl.scrollTop = t.termEl.scrollHeight;
+  if (t.autoScroll !== false) t.termEl.scrollTop = t.termEl.scrollHeight;
 }
 
 function filterTerminalFor(sandboxId) {
