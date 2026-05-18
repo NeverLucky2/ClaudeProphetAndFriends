@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildVerdict, scoreMaxPositionSizePct } from './score-rule-against-holdout.mjs';
+import { buildVerdict, scoreMaxPositionSizePct, scoreStopAtPct } from './score-rule-against-holdout.mjs';
 
 test('buildVerdict: trades_affected = 0 -> INCONCLUSIVE', () => {
   const v = buildVerdict({
@@ -112,4 +112,31 @@ test('scoreMaxPositionSizePct: mixed -> net delta is sum', () => {
   const v = scoreMaxPositionSizePct(trades, { limit: 0.15 });
   assert.equal(v.trades_affected, 2);
   assert.equal(v.net_pl_delta_usd, -300);
+});
+
+test('scoreStopAtPct: includes limitation_notes always', () => {
+  const v = scoreStopAtPct([], { stop: -0.10 });
+  assert.ok(v.limitation_notes.length > 0);
+  assert.match(v.limitation_notes[0], /intra-trade trough/);
+});
+
+test('scoreStopAtPct: trade that closed at -5% with stop -10% -> not flagged', () => {
+  const trades = [{
+    symbol: 'SPY',
+    market_data: { entry_price: 100, size: 100, friction_adjusted_pl: -500, unrealized_pct: -5 },
+  }];
+  const v = scoreStopAtPct(trades, { stop: -0.10 });
+  assert.equal(v.trades_affected, 0);
+});
+
+test('scoreStopAtPct: trade that closed at -15% with stop -10% -> flagged, positive delta (rule cuts earlier)', () => {
+  // entry_value = 100 × 100 = 10000. Stop at -10% → -1000 exit. Actual pl = -1500.
+  // Delta = -1000 - (-1500) = +500 (rule would save $500).
+  const trades = [{
+    symbol: 'SPY',
+    market_data: { entry_price: 100, size: 100, friction_adjusted_pl: -1500, unrealized_pct: -15 },
+  }];
+  const v = scoreStopAtPct(trades, { stop: -0.10 });
+  assert.equal(v.trades_affected, 1);
+  assert.equal(v.net_pl_delta_usd, 500);
 });
