@@ -111,3 +111,34 @@ test('isStopOut: case-insensitive matching', () => {
 test('isStopOut: missing market_data -> false (cannot confirm losing P&L)', () => {
   assert.equal(isStopOut({ reasoning: 'stop hit' }), false);
 });
+
+import { computeStockFriction } from './apply-friction.mjs';
+
+const STOCK_PROFILE = {
+  per_share_slippage_usd: 0.02,
+  stop_gap_through_pct: 0.003,
+  commission_per_share: 0.0,
+  regulatory_fee_per_share: 0.0001,
+};
+
+test('computeStockFriction: round trip with no stop-out', () => {
+  // 100 shares, no stop. Per-side: (0.02 + 0.0001) × 100 = 2.01. Round trip = 4.02.
+  const action = { market_data: { entry_price: 100, exit_price: 102, size: 100 } };
+  const result = computeStockFriction(action, STOCK_PROFILE, false);
+  assert.equal(result.haircut_total_usd, 4.02);
+  assert.equal(result.haircut_breakdown.slippage, 4.0);
+  assert.equal(result.haircut_breakdown.regulatory_fees, 0.02);
+});
+
+test('computeStockFriction: stop-out adds gap-through extra', () => {
+  // Base haircut 4.02 (above). Stop adds 0.003 × 100 × 100 = 30.
+  const action = { market_data: { entry_price: 100, exit_price: 88, size: 100 } };
+  const result = computeStockFriction(action, STOCK_PROFILE, true);
+  assert.equal(result.haircut_total_usd, 34.02);
+  assert.equal(result.haircut_breakdown.stop_gap_through, 30);
+});
+
+test('computeStockFriction: missing size -> throws clear error', () => {
+  const action = { market_data: { entry_price: 100, exit_price: 102 } };
+  assert.throws(() => computeStockFriction(action, STOCK_PROFILE, false), /size/);
+});

@@ -41,3 +41,24 @@ export function isStopOut(action) {
   const reasoning = (action?.reasoning ?? '').toLowerCase();
   return STOP_OUT_SUBSTRINGS.some(s => reasoning.includes(s));
 }
+
+export function computeStockFriction(action, profile, stopOut) {
+  const md = action?.market_data ?? {};
+  const { entry_price, size } = md;
+  if (typeof size !== 'number') {
+    throw new Error(`computeStockFriction: missing market_data.size on action ${action?.symbol}`);
+  }
+
+  const slippage = profile.per_share_slippage_usd * size * 2;
+  const regulatory_fees = profile.regulatory_fee_per_share * size * 2;
+  const commissions = (profile.commission_per_share ?? 0) * size * 2;
+  const stop_gap_through = stopOut
+    ? profile.stop_gap_through_pct * entry_price * size
+    : 0;
+
+  const haircut_total_usd = +(slippage + regulatory_fees + commissions + stop_gap_through).toFixed(4);
+  return {
+    haircut_total_usd,
+    haircut_breakdown: { slippage, regulatory_fees, commissions, stop_gap_through },
+  };
+}
