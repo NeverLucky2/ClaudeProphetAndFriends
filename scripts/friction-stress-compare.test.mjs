@@ -78,6 +78,71 @@ test('compareFrictionSets: matched-count symmetry on well-formed input', () => {
   assert.equal(result.unmatched.length, 0);
 });
 
+test('compareFrictionSets: flip is symmetric across zero — baseline 0, stress -50', () => {
+  const baseline = [
+    { filename: 'a.friction.json', symbol: 'A', timestamp: '...',
+      market_data: { friction_adjusted_pl: 0 }, friction_meta: { profile_applied: 'stocks' } },
+  ];
+  const stress = [
+    { filename: 'a.friction-stress.json', symbol: 'A', timestamp: '...',
+      market_data: { friction_adjusted_pl: -50 }, friction_meta: { profile_applied: 'stocks' } },
+  ];
+  const result = compareFrictionSets({ agent: 'default', baseline, stress });
+  assert.equal(result.flips.length, 1, 'breakeven → loser should be flagged as a flip');
+});
+
+test('compareFrictionSets: flip is symmetric across zero — baseline 0, stress +50', () => {
+  const baseline = [
+    { filename: 'a.friction.json', symbol: 'A', timestamp: '...',
+      market_data: { friction_adjusted_pl: 0 }, friction_meta: { profile_applied: 'stocks' } },
+  ];
+  const stress = [
+    { filename: 'a.friction-stress.json', symbol: 'A', timestamp: '...',
+      market_data: { friction_adjusted_pl: 50 }, friction_meta: { profile_applied: 'stocks' } },
+  ];
+  const result = compareFrictionSets({ agent: 'default', baseline, stress });
+  assert.equal(result.flips.length, 1, 'breakeven → winner should be flagged as a flip');
+});
+
+test('compareFrictionSets: flip is symmetric across zero — baseline -50, stress 0', () => {
+  const baseline = [
+    { filename: 'a.friction.json', symbol: 'A', timestamp: '...',
+      market_data: { friction_adjusted_pl: -50 }, friction_meta: { profile_applied: 'stocks' } },
+  ];
+  const stress = [
+    { filename: 'a.friction-stress.json', symbol: 'A', timestamp: '...',
+      market_data: { friction_adjusted_pl: 0 }, friction_meta: { profile_applied: 'stocks' } },
+  ];
+  const result = compareFrictionSets({ agent: 'default', baseline, stress });
+  assert.equal(result.flips.length, 1, 'loser → breakeven should be flagged as a flip');
+});
+
+test('compareFrictionSets: flip is symmetric across zero — baseline +50, stress 0', () => {
+  const baseline = [
+    { filename: 'a.friction.json', symbol: 'A', timestamp: '...',
+      market_data: { friction_adjusted_pl: 50 }, friction_meta: { profile_applied: 'stocks' } },
+  ];
+  const stress = [
+    { filename: 'a.friction-stress.json', symbol: 'A', timestamp: '...',
+      market_data: { friction_adjusted_pl: 0 }, friction_meta: { profile_applied: 'stocks' } },
+  ];
+  const result = compareFrictionSets({ agent: 'default', baseline, stress });
+  assert.equal(result.flips.length, 1, 'winner → breakeven should be flagged as a flip');
+});
+
+test('compareFrictionSets: same-sign change is NOT flagged as flip (regression guard)', () => {
+  const baseline = [
+    { filename: 'a.friction.json', symbol: 'A', timestamp: '...',
+      market_data: { friction_adjusted_pl: 50 }, friction_meta: { profile_applied: 'stocks' } },
+  ];
+  const stress = [
+    { filename: 'a.friction-stress.json', symbol: 'A', timestamp: '...',
+      market_data: { friction_adjusted_pl: 100 }, friction_meta: { profile_applied: 'stocks' } },
+  ];
+  const result = compareFrictionSets({ agent: 'default', baseline, stress });
+  assert.equal(result.flips.length, 0, 'winner → bigger winner should not be a flip');
+});
+
 test('compareFrictionSets: unmatched listed when a side is missing a trade', () => {
   const baseline = [
     { filename: 'a.friction.json', symbol: 'A', timestamp: '...',

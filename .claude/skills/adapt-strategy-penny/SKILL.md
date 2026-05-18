@@ -22,7 +22,7 @@ After the friction post-processor completes, run:
 
 `node scripts/build-regime-history.mjs --from <YYYY-MM-DD of oldest loaded trade> --to <today YYYY-MM-DD>`
 
-Report the returned `{ action, path }` to the user. If the script exits non-zero (FMP key missing, network error), continue but tag every trade `regime: "unknown"` in Step 3 and warn the user that regime composition and `regime_warning` will be unavailable this run.
+Report the returned `{ action, path }` to the user. If the script exits non-zero (FMP key missing, network error), continue but tag every trade `regime: "unknown"` during trade loading and warn the user that regime composition and `regime_warning` will be unavailable this run.
 
 ## Step 1 — Resolve target agent, strategy, and sandboxes
 

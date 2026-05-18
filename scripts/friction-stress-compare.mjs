@@ -33,7 +33,7 @@ export function compareFrictionSets({ agent, baseline, stress, asOf = new Date()
     const sPl = s.market_data?.friction_adjusted_pl ?? 0;
     baseline_pl_usd += bPl;
     stress_pl_usd += sPl;
-    const flipped = (bPl > 0) !== (sPl > 0);
+    const flipped = Math.sign(bPl) !== Math.sign(sPl);
     if (flipped) flips.push({ symbol: b.symbol, timestamp: b.timestamp, baseline_pl: bPl, stress_pl: sPl });
     const asset = b.friction_meta?.profile_applied ?? 'unknown';
     perAsset[asset] = perAsset[asset] ?? { trade_count: 0, baseline_pl: 0, stress_pl: 0, flips: 0 };
