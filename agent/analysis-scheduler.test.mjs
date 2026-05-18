@@ -219,3 +219,82 @@ test('shouldTriggerWeeklyScreenerOnStartup: false on non-Sunday regardless of st
     );
   }
 });
+
+// Stub the side-effects so triggerJob can run in-process without touching the
+// filesystem or spawning python/opencode. Returns the stubbed scheduler so
+// tests can inspect _lastXxxDate fields directly.
+function _stubScheduler({ runnerThrows = false } = {}) {
+  const scheduler = new AnalysisScheduler();
+  scheduler._acquireLock = async () => true;
+  scheduler._releaseLock = async () => {};
+  scheduler._saveState = async () => {};
+  // Silence logs/events in the test harness.
+  scheduler._log = () => {};
+  scheduler.emit = () => true;
+  const failure = new Error('simulated runner failure');
+  const stub = async () => { if (runnerThrows) throw failure; };
+  scheduler._runRegimeGateCompute = stub;
+  scheduler._runMacroRegimeSkill   = stub;
+  scheduler._runBreadthSkill       = stub;
+  scheduler._runMarketTopSkill     = stub;
+  scheduler._runBubbleSkill        = stub;
+  return scheduler;
+}
+
+// 2026-05-18 regression: triggerJob used to set _lastXxxDate BEFORE awaiting the
+// runner. A silent runner failure (e.g., Python crashing on a UTF-8 input file
+// while node treated the non-zero exit as "completed") left state claiming the
+// job ran for today, which permanently masked the failure: the catch-up at
+// _checkSchedule short-circuits on `_lastRegimeGateDate === isoDate`. These
+// tests pin the new ordering — state advances ONLY after the runner returns
+// successfully — so a future refactor doesn't quietly revert the fix.
+test('triggerJob(regime_gate_compute): does NOT advance _lastRegimeGateDate when runner throws', async () => {
+  const scheduler = _stubScheduler({ runnerThrows: true });
+  scheduler._lastRegimeGateDate = '2026-05-15';   // pretend last successful run was Friday
+  await assert.rejects(
+    () => scheduler.triggerJob('regime_gate_compute', '2026-05-18'),
+    /simulated runner failure/,
+  );
+  // The whole point: failure must leave state at the pre-run value so the
+  // catch-up loop retries on the next heartbeat instead of marking today done.
+  assert.equal(scheduler._lastRegimeGateDate, '2026-05-15');
+});
+
+test('triggerJob(regime_gate_compute): DOES advance _lastRegimeGateDate when runner succeeds', async () => {
+  const scheduler = _stubScheduler({ runnerThrows: false });
+  scheduler._lastRegimeGateDate = '2026-05-15';
+  const result = await scheduler.triggerJob('regime_gate_compute', '2026-05-18');
+  assert.equal(result.success, true);
+  assert.equal(scheduler._lastRegimeGateDate, '2026-05-18');
+});
+
+test('triggerJob: failure leaves state unadvanced for all 4 upstream regime skills', async () => {
+  // Same fail-then-retry contract applies to macro_regime/breadth/market_top/bubble.
+  // If any one of them silently swallows a failure, regime_gate_compute downstream
+  // re-uses a stale upstream input and the >36h freshness guard is what saves us
+  // — too late to be the primary defense.
+  const cases = [
+    { job: 'macro_regime_skill', field: '_lastMacroRegimeDate' },
+    { job: 'breadth_skill',      field: '_lastBreadthDate' },
+    { job: 'market_top_skill',   field: '_lastMarketTopDate' },
+    { job: 'bubble_skill',       field: '_lastBubbleDate' },
+  ];
+  for (const { job, field } of cases) {
+    const scheduler = _stubScheduler({ runnerThrows: true });
+    // macro_regime_skill has the FMP_API_KEY guard that early-returns before
+    // the runner — set the env var so we exercise the throwing path.
+    const prevKey = process.env.FMP_API_KEY;
+    process.env.FMP_API_KEY = 'test_key';
+    try {
+      scheduler[field] = '2026-05-15';
+      await assert.rejects(
+        () => scheduler.triggerJob(job, '2026-05-18'),
+        /simulated runner failure/,
+        `${job} must propagate runner errors`,
+      );
+      assert.equal(scheduler[field], '2026-05-15', `${job}: ${field} must stay at pre-run value`);
+    } finally {
+      if (prevKey === undefined) delete process.env.FMP_API_KEY; else process.env.FMP_API_KEY = prevKey;
+    }
+  }
+});

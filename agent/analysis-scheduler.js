@@ -293,32 +293,38 @@ export class AnalysisScheduler extends EventEmitter {
         }));
         await this._saveState();
       } else if (jobName === 'regime_gate_compute') {
-        this._lastRegimeGateDate = isoDate;
+        // State-advance AFTER the runner: if it throws (spawn error, non-zero
+        // exit), _lastRegimeGateDate stays at its previous value and the
+        // catch-up at _checkSchedule retries on the next heartbeat. The old
+        // pre-await advance silently masked Python failures (the file was
+        // never written but state claimed today was done).
         await this._runRegimeGateCompute(isoDate);
+        this._lastRegimeGateDate = isoDate;
         await this._saveState();
       } else if (jobName === 'macro_regime_skill') {
         // Spec: missing FMP_API_KEY skips WITHOUT advancing _lastMacroRegimeDate
-        // so the operator can fix the env var and re-trigger same-day. Other
-        // failure modes (spawn error, non-zero exit) DO advance the date to
-        // avoid thrash retry — handled inside the runner.
+        // so the operator can fix the env var and re-trigger same-day. Spawn /
+        // non-zero exit now also leaves the date unchanged (runner throws),
+        // which lets the catch-up retry. Old behavior — advance-then-run —
+        // permanently masked transient script failures.
         if (!process.env.FMP_API_KEY) {
           this._log('macro_regime_skill: FMP_API_KEY not set — skipping; regime_gate_compute will fall back to neutral 50 for macro. Date not advanced so operator can re-trigger after setting key.', 'warning');
           return { skipped: true, reason: 'FMP_API_KEY missing', job: jobName };
         }
-        this._lastMacroRegimeDate = isoDate;
         await this._runMacroRegimeSkill(isoDate);
+        this._lastMacroRegimeDate = isoDate;
         await this._saveState();
       } else if (jobName === 'breadth_skill') {
-        this._lastBreadthDate = isoDate;
         await this._runBreadthSkill(isoDate);
+        this._lastBreadthDate = isoDate;
         await this._saveState();
       } else if (jobName === 'market_top_skill') {
-        this._lastMarketTopDate = isoDate;
         await this._runMarketTopSkill(isoDate);
+        this._lastMarketTopDate = isoDate;
         await this._saveState();
       } else if (jobName === 'bubble_skill') {
-        this._lastBubbleDate = isoDate;
         await this._runBubbleSkill(isoDate);
+        this._lastBubbleDate = isoDate;
         await this._saveState();
       } else if (jobName === 'trend_parameter_review') {
         this._lastTrendParamReviewQuarter = this._getQuarter(isoDate);
@@ -995,21 +1001,24 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
 
     const argv = buildMacroRegimeArgv(MACRO_REGIME_SCRIPT, REPORTS_DIR, process.env.FMP_API_KEY);
 
-    await new Promise((resolve) => {
+    // Reject on failure — see _runRegimeGateCompute for the rationale.
+    await new Promise((resolve, reject) => {
       const child = spawn(PYTHON_BIN, argv, { stdio: ['ignore', 'pipe', 'pipe'] });
       let stderr = '';
       child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
       child.on('error', (err) => {
         this._log(`macro_regime_skill spawn failed: ${err.message}`, 'error');
-        resolve();
+        reject(err);
       });
       child.on('close', (code) => {
         if (code === 0) {
           this._log(`macro_regime_skill complete → ${REPORTS_DIR}/macro_regime_<timestamp>.json`, 'success');
+          resolve();
         } else {
-          this._log(`macro_regime_skill exited ${code}; stderr: ${stderr.trim()}`, 'error');
+          const msg = `macro_regime_skill exited ${code}; stderr: ${stderr.trim()}`;
+          this._log(msg, 'error');
+          reject(new Error(msg));
         }
-        resolve();
       });
     });
 
@@ -1018,20 +1027,21 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
 
   // breadth_skill: LLM-driven via _runSkill so the LLM can run the CSV fetcher
   // and reshape the output to the schema compute_daily_regime_score.py expects.
+  // throwOnFailure=true: opencode crash → state stays unadvanced → catch-up retries.
   async _runBreadthSkill(date) {
-    await this._runSkill('breadth-chart-analyst', date, null, 15 * 60 * 1000, buildBreadthSkillAppendix(date));
+    await this._runSkill('breadth-chart-analyst', date, null, 15 * 60 * 1000, buildBreadthSkillAppendix(date), true);
   }
 
   // market_top_skill: LLM-driven so the LLM can WebSearch put/call, VIX-term,
   // and margin-debt-yoy inputs that market_top_detector.py requires.
   async _runMarketTopSkill(date) {
-    await this._runSkill('market-top-detector', date, null, 15 * 60 * 1000, buildMarketTopSkillAppendix(date));
+    await this._runSkill('market-top-detector', date, null, 15 * 60 * 1000, buildMarketTopSkillAppendix(date), true);
   }
 
   // bubble_skill: LLM-driven so the LLM can collect the 12 indicator values
   // and pass them as --scores '<json>' to bubble_scorer.py.
   async _runBubbleSkill(date) {
-    await this._runSkill('us-market-bubble-detector', date, null, 15 * 60 * 1000, buildBubbleSkillAppendix(date));
+    await this._runSkill('us-market-bubble-detector', date, null, 15 * 60 * 1000, buildBubbleSkillAppendix(date), true);
   }
 
   // Regime gate compute job. Spawns scripts/compute_daily_regime_score.py to
@@ -1053,21 +1063,27 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
     }
     const argv = buildRegimeComputeArgv(REPORTS_DIR, REGIME_COMPUTE_SCRIPT, REGIME_GATE_OUTPUT, files);
 
-    await new Promise((resolve) => {
+    // Reject on spawn error / non-zero exit so triggerJob's state-advance
+    // (which now runs AFTER this await) is skipped — the catch-up at
+    // _checkSchedule will retry on the next heartbeat until the script
+    // succeeds. Resolve-and-swallow would leave state claiming success.
+    await new Promise((resolve, reject) => {
       const child = spawn(PYTHON_BIN, argv, { stdio: ['ignore', 'pipe', 'pipe'] });
       let stderr = '';
       child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
       child.on('error', (err) => {
         this._log(`regime gate compute spawn failed: ${err.message}`, 'error');
-        resolve();
+        reject(err);
       });
       child.on('close', (code) => {
         if (code === 0) {
           this._log(`Regime gate compute complete → ${REGIME_GATE_OUTPUT}`, 'success');
+          resolve();
         } else {
-          this._log(`Regime gate compute exited ${code}; stderr: ${stderr.trim()}`, 'error');
+          const msg = `regime gate compute exited ${code}; stderr: ${stderr.trim()}`;
+          this._log(msg, 'error');
+          reject(new Error(msg));
         }
-        resolve();
       });
     });
 
@@ -1182,13 +1198,19 @@ Limit vcp_candidates and pead_candidates to top 5 each by score. Write only the 
   // Generic skill runner. Replaces $ARGUMENTS in the prompt with `target` if provided.
   // Optional `appendix` is concatenated after a `---` separator (used for AUTOMATED RUN
   // instructions that override skills' user-confirmation steps when scheduled).
-  async _runSkill(skillName, date, target, timeoutMs, appendix = null) {
+  // throwOnFailure=true makes opencode non-zero exits (or spawn errors)
+  // propagate up so triggerJob can skip its state-advance and let the
+  // catch-up retry on the next heartbeat. Default false preserves the
+  // existing fire-and-forget behavior for adapt_strategy, postmortems, etc.,
+  // where partial success is acceptable.
+  async _runSkill(skillName, date, target, timeoutMs, appendix = null, throwOnFailure = false) {
     this._log(`Starting ${skillName} for ${date}${target ? ` (target: ${target})` : ''}...`, 'info');
     this.emit('scheduler_job_start', { job: skillName.replace(/-/g, '_'), date });
 
     let prompt = await this._readSkillPrompt(skillName);
     if (!prompt) {
       this.emit('scheduler_job_end', { job: skillName.replace(/-/g, '_'), date, output: null });
+      if (throwOnFailure) throw new Error(`${skillName}: SKILL.md missing or unreadable`);
       return;
     }
     if (target !== null && target !== undefined) {
@@ -1198,9 +1220,12 @@ Limit vcp_candidates and pead_candidates to top 5 each by score. Write only the 
       prompt += '\n\n---\n' + appendix;
     }
 
-    await this._runOneshotOpencode(prompt, skillName, timeoutMs);
+    const { code, error } = await this._runOneshotOpencode(prompt, skillName, timeoutMs);
     this._log(`${skillName} complete.`, 'success');
     this.emit('scheduler_job_end', { job: skillName.replace(/-/g, '_'), date, output: null });
+    if (throwOnFailure && (error || code !== 0)) {
+      throw error ?? new Error(`${skillName} exited ${code}`);
+    }
   }
 
   async _runAdaptStrategy(date) {
@@ -1301,18 +1326,22 @@ Limit vcp_candidates and pead_candidates to top 5 each by score. Write only the 
         }
       }, timeoutMs);
 
+      // Return { code, error } so callers that need strict success semantics
+      // (e.g., breadth/market_top/bubble regime skills via throwOnFailure)
+      // can detect spawn errors and non-zero exits. Existing callers ignore
+      // the return value and keep their fire-and-forget behavior.
       proc.on('exit', (code) => {
         clearTimeout(timeout);
         if (tempFile) fs.unlink(tempFile).catch(() => {});
         this._log(`[${jobName}] finished (exit: ${code})`, code === 0 ? 'success' : 'warning');
-        resolve();
+        resolve({ code, error: null });
       });
 
       proc.on('error', (err) => {
         clearTimeout(timeout);
         if (tempFile) fs.unlink(tempFile).catch(() => {});
         this._log(`[${jobName}] spawn failed: ${err.message}`, 'error');
-        resolve();
+        resolve({ code: null, error: err });
       });
     });
   }
