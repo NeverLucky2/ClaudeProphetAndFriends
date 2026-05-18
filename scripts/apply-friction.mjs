@@ -251,3 +251,18 @@ export function writeAtomic(path, content, fsImpl = defaultFs) {
     throw err;
   }
 }
+
+export function resolveSandboxesForAgent(agentConfigPath, agentId) {
+  if (!existsSync(agentConfigPath)) {
+    throw new Error(`agent-config not found at ${agentConfigPath}`);
+  }
+  const cfg = JSON.parse(readFileSync(agentConfigPath, 'utf8'));
+  const sandboxes = cfg.sandboxes ?? {};
+  const ids = [];
+  for (const sb of Object.values(sandboxes)) {
+    if (sb?.agent?.activeAgentId === agentId && typeof sb.accountId === 'string') {
+      ids.push(sb.accountId);
+    }
+  }
+  return ids;
+}

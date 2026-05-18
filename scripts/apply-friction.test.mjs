@@ -422,3 +422,27 @@ test('writeAtomic: if write throws, does not rename and does not leave stale tmp
   // Write failed before tmp existed → no cleanup needed (existsSync returned false in mock)
   assert.equal(removes.length, 0);
 });
+
+import { resolveSandboxesForAgent } from './apply-friction.mjs';
+
+const AGENT_CFG = join(FIX_DIR, 'agent-config-sample.json');
+
+test('resolveSandboxesForAgent: returns accountIds for matching sandboxes', () => {
+  const ids = resolveSandboxesForAgent(AGENT_CFG, 'default');
+  assert.deepEqual(ids.sort(), ['aaa111', 'bbb222']);
+});
+
+test('resolveSandboxesForAgent: returns single match', () => {
+  assert.deepEqual(resolveSandboxesForAgent(AGENT_CFG, 'harvest'), ['ddd444']);
+});
+
+test('resolveSandboxesForAgent: returns empty array for agent with no sandboxes', () => {
+  assert.deepEqual(resolveSandboxesForAgent(AGENT_CFG, 'trend-prophet'), []);
+});
+
+test('resolveSandboxesForAgent: throws if agent-config missing', () => {
+  assert.throws(
+    () => resolveSandboxesForAgent('/nope.json', 'default'),
+    /agent-config.*not found/i,
+  );
+});
