@@ -116,3 +116,32 @@ export function computeSingleLegOptionFriction(action, profile) {
     haircut_breakdown: { spread_crossing, commissions, regulatory_fees },
   };
 }
+
+export function computeIronCondorFriction(action, profile) {
+  const md = action?.market_data ?? {};
+  const { entry_price, exit_price, size } = md;
+  if (typeof entry_price !== 'number' || typeof exit_price !== 'number' || typeof size !== 'number') {
+    throw new Error(`computeIronCondorFriction: missing entry_price/exit_price/size on ${action?.symbol}`);
+  }
+
+  const theoretical_credit = typeof md.theoretical_credit === 'number'
+    ? md.theoretical_credit
+    : entry_price * size * 100;
+
+  const close_was_losing = exit_price < entry_price;
+  const base_spread_cost = profile.assumed_spread_pct_of_credit * theoretical_credit;
+  const losing_close_multiplier = close_was_losing
+    ? (profile.spread_crossing_pct_close_when_losing - profile.spread_crossing_pct_close)
+    : 0;
+  const spread_crossing = base_spread_cost * (1 + losing_close_multiplier);
+
+  const commissions = profile.commission_per_contract * profile.leg_count * 2 * size;
+  const regulatory_fees = profile.regulatory_fee_per_contract * profile.leg_count * 2 * size;
+
+  const haircut_total_usd = +(spread_crossing + commissions + regulatory_fees).toFixed(4);
+  return {
+    haircut_total_usd,
+    close_was_losing,
+    haircut_breakdown: { spread_crossing, commissions, regulatory_fees },
+  };
+}

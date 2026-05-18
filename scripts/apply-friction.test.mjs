@@ -212,3 +212,42 @@ test('computeSingleLegOptionFriction: losing close uses higher close pct', () =>
   assert.ok(Math.abs(result.haircut_total_usd - 240.06) < 0.01, `got ${result.haircut_total_usd}`);
   assert.equal(result.close_was_losing, true);
 });
+
+import { computeIronCondorFriction } from './apply-friction.mjs';
+
+const IC_PROFILE = {
+  spread_crossing_pct_open: 0.55,
+  spread_crossing_pct_close: 0.65,
+  spread_crossing_pct_close_when_losing: 0.80,
+  assumed_spread_pct_of_credit: 0.10,
+  leg_count: 4,
+  commission_per_contract: 0.65,
+  regulatory_fee_per_contract: 0.05,
+};
+
+test('computeIronCondorFriction: winning-framing test (exit < entry) with explicit theoretical_credit', () => {
+  // 10 contracts, theoretical_credit = 2000. entry 2.0, exit 0.5.
+  // close_was_losing = (0.5 < 2.0) = true → multiplier = 0.80 - 0.65 = 0.15.
+  // base = 0.10 × 2000 = 200. spread = 200 × 1.15 = 230.
+  // fees = (0.65 + 0.05) × 4 × 2 × 10 = 56. Total = 286.
+  const action = { market_data: { entry_price: 2.0, exit_price: 0.5, size: 10, theoretical_credit: 2000 } };
+  const result = computeIronCondorFriction(action, IC_PROFILE);
+  assert.equal(result.haircut_total_usd, 286);
+  assert.equal(result.close_was_losing, true);
+});
+
+test('computeIronCondorFriction: theoretical_credit estimated from entry × size × 100 when absent', () => {
+  // entry 2.0, 10 contracts → estimated credit = 2000. Same numbers as above.
+  const action = { market_data: { entry_price: 2.0, exit_price: 0.5, size: 10 } };
+  const result = computeIronCondorFriction(action, IC_PROFILE);
+  assert.equal(result.haircut_total_usd, 286);
+});
+
+test('computeIronCondorFriction: exit > entry skips multiplier', () => {
+  // exit 1.5 > entry 1.0 → close_was_losing = false → multiplier = 0.
+  // base = 100. spread = 100 × 1 = 100. fees = 56. Total = 156.
+  const action = { market_data: { entry_price: 1.0, exit_price: 1.5, size: 10, theoretical_credit: 1000 } };
+  const result = computeIronCondorFriction(action, IC_PROFILE);
+  assert.equal(result.haircut_total_usd, 156);
+  assert.equal(result.close_was_losing, false);
+});
