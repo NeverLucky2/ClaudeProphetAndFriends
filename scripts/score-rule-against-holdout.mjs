@@ -161,3 +161,44 @@ export function scoreNoReentryWithinHours(holdoutTrades, params) {
     blocked_winners, blocked_losers, details,
   });
 }
+
+const OCC_FOR_DTE = /^[A-Z]{1,6}(\d{2})(\d{2})(\d{2})[CP]\d{8}$/;
+
+function parseDteFromOcc(symbol, entryTimestamp) {
+  const m = OCC_FOR_DTE.exec(symbol);
+  if (!m) return null;
+  const yy = Number(m[1]), mm = Number(m[2]), dd = Number(m[3]);
+  // Assume 20YY for OCC (good through 2099)
+  const expMs = Date.UTC(2000 + yy, mm - 1, dd);
+  const entryMs = Date.parse(entryTimestamp);
+  if (!Number.isFinite(entryMs) || !Number.isFinite(expMs)) return null;
+  return Math.round((expMs - entryMs) / 86400000);
+}
+
+export function scoreDteBounds(holdoutTrades, params) {
+  const { min, max } = params;
+  let trades_affected = 0;
+  let net_pl_delta_usd = 0;
+  let blocked_winners = 0;
+  let blocked_losers = 0;
+  const details = [];
+
+  for (const t of holdoutTrades) {
+    if (t.action !== 'BUY') continue;
+    const dte = parseDteFromOcc(t.symbol ?? '', t.timestamp);
+    if (dte === null) continue;
+    if (dte < min || dte > max) {
+      trades_affected += 1;
+      const pl = t.market_data?.friction_adjusted_pl ?? 0;
+      net_pl_delta_usd -= pl;
+      if (pl > 0) blocked_winners += 1;
+      if (pl < 0) blocked_losers += 1;
+      details.push({ symbol: t.symbol, dte, pl });
+    }
+  }
+  return buildVerdict({
+    predicate: 'dte_bounds', params,
+    holdout_size: holdoutTrades.length, trades_affected, net_pl_delta_usd,
+    blocked_winners, blocked_losers, details,
+  });
+}

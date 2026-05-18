@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildVerdict, scoreMaxPositionSizePct, scoreStopAtPct, scoreMaxConcurrentPositions, scoreNoReentryWithinHours } from './score-rule-against-holdout.mjs';
+import { buildVerdict, scoreMaxPositionSizePct, scoreStopAtPct, scoreMaxConcurrentPositions, scoreNoReentryWithinHours, scoreDteBounds } from './score-rule-against-holdout.mjs';
 
 test('buildVerdict: trades_affected = 0 -> INCONCLUSIVE', () => {
   const v = buildVerdict({
@@ -192,4 +192,41 @@ test('scoreNoReentryWithinHours: reentry past window -> not flagged', () => {
   ];
   const v = scoreNoReentryWithinHours(trades, { hours: 2 });
   assert.equal(v.trades_affected, 0);
+});
+
+test('scoreDteBounds: non-option trade ignored', () => {
+  const trades = [{ action: 'BUY', symbol: 'SPY', timestamp: '2026-05-01T10:00:00Z', market_data: { friction_adjusted_pl: 100 } }];
+  const v = scoreDteBounds(trades, { min: 50, max: 120 });
+  assert.equal(v.trades_affected, 0);
+});
+
+test('scoreDteBounds: option DTE within bounds -> not flagged', () => {
+  // Entry 2026-05-01, exp 260801 (Aug 1) = ~92 days.
+  const trades = [{
+    action: 'BUY', symbol: 'SPY260801C00400000', timestamp: '2026-05-01T10:00:00Z',
+    market_data: { friction_adjusted_pl: 100 },
+  }];
+  const v = scoreDteBounds(trades, { min: 50, max: 120 });
+  assert.equal(v.trades_affected, 0);
+});
+
+test('scoreDteBounds: option DTE under min -> flagged', () => {
+  // Entry 2026-05-01, exp 260510 = 9 days.
+  const trades = [{
+    action: 'BUY', symbol: 'SPY260510C00400000', timestamp: '2026-05-01T10:00:00Z',
+    market_data: { friction_adjusted_pl: -200 },
+  }];
+  const v = scoreDteBounds(trades, { min: 50, max: 120 });
+  assert.equal(v.trades_affected, 1);
+  assert.equal(v.net_pl_delta_usd, 200); // prevents a $200 loss
+});
+
+test('scoreDteBounds: option DTE over max -> flagged', () => {
+  // Entry 2026-05-01, exp 270501 = 365 days.
+  const trades = [{
+    action: 'BUY', symbol: 'SPY270501C00400000', timestamp: '2026-05-01T10:00:00Z',
+    market_data: { friction_adjusted_pl: 50 },
+  }];
+  const v = scoreDteBounds(trades, { min: 50, max: 120 });
+  assert.equal(v.trades_affected, 1);
 });
