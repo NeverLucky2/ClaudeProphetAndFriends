@@ -90,3 +90,29 @@ export function computePennyFriction(action, profile, stopOut) {
     haircut_breakdown: { slippage, regulatory_fees, commissions, stop_gap_through },
   };
 }
+
+export function computeSingleLegOptionFriction(action, profile) {
+  const md = action?.market_data ?? {};
+  const { entry_price, exit_price, size } = md;
+  if (typeof entry_price !== 'number' || typeof exit_price !== 'number' || typeof size !== 'number') {
+    throw new Error(`computeSingleLegOptionFriction: missing entry_price/exit_price/size on ${action?.symbol}`);
+  }
+
+  const mid_price = (entry_price + exit_price) / 2;
+  const spread_dollars = profile.assumed_spread_pct_of_mid * mid_price;
+  const close_was_losing = exit_price < entry_price;
+  const selected_close_pct = close_was_losing
+    ? profile.spread_crossing_pct_close_when_losing
+    : profile.spread_crossing_pct_close;
+
+  const spread_crossing = spread_dollars * (profile.spread_crossing_pct_open + selected_close_pct) * size * 100;
+  const commissions = profile.commission_per_contract * size * 2;
+  const regulatory_fees = profile.regulatory_fee_per_contract * size * 2;
+
+  const haircut_total_usd = +(spread_crossing + commissions + regulatory_fees).toFixed(4);
+  return {
+    haircut_total_usd,
+    close_was_losing,
+    haircut_breakdown: { spread_crossing, commissions, regulatory_fees },
+  };
+}

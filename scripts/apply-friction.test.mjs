@@ -181,3 +181,34 @@ test('computePennyFriction: stop-out uses wider gap-through (0.015)', () => {
   // Stop gap: 0.015 × 2.0 × 1000 = 30.
   assert.equal(result.haircut_breakdown.stop_gap_through, 30);
 });
+
+import { computeSingleLegOptionFriction } from './apply-friction.mjs';
+
+const OPT_PROFILE = {
+  spread_crossing_pct_open: 0.60,
+  spread_crossing_pct_close: 0.65,
+  spread_crossing_pct_close_when_losing: 0.75,
+  assumed_spread_pct_of_mid: 0.04,
+  commission_per_contract: 0.65,
+  regulatory_fee_per_contract: 0.05,
+};
+
+test('computeSingleLegOptionFriction: winning close uses normal close pct', () => {
+  // entry 7.50, exit 8.50, 6 contracts. mid = 8.0, spread_dollars = 0.04 × 8 = 0.32.
+  // crossing = 0.60 + 0.65 = 1.25. spread_cost = 0.32 × 1.25 × 6 × 100 = 240.
+  // fees = (0.65 + 0.05) × 6 × 2 = 8.4. Total = 248.4.
+  const action = { market_data: { entry_price: 7.5, exit_price: 8.5, size: 6 } };
+  const result = computeSingleLegOptionFriction(action, OPT_PROFILE);
+  assert.equal(result.haircut_total_usd, 248.4);
+  assert.equal(result.close_was_losing, false);
+});
+
+test('computeSingleLegOptionFriction: losing close uses higher close pct', () => {
+  // entry 7.50, exit 6.80, 6 contracts. mid = 7.15. spread_dollars = 0.04 × 7.15 = 0.286.
+  // crossing = 0.60 + 0.75 = 1.35. spread_cost = 0.286 × 1.35 × 6 × 100 = 231.66.
+  // fees = 8.4. Total ≈ 240.06.
+  const action = { market_data: { entry_price: 7.5, exit_price: 6.8, size: 6 } };
+  const result = computeSingleLegOptionFriction(action, OPT_PROFILE);
+  assert.ok(Math.abs(result.haircut_total_usd - 240.06) < 0.01, `got ${result.haircut_total_usd}`);
+  assert.equal(result.close_was_losing, true);
+});
