@@ -1363,7 +1363,7 @@ app.get('/api/portfolio/positions', async (req, res) => {
   try {
     const client = getGoClientForSandbox(req.query.sandboxId);
     if (!client) return res.status(404).json({ error: 'Sandbox trading backend unavailable' });
-    const { data } = await client.get('/api/v1/options/positions');
+    const { data } = await client.get('/api/v1/positions');
     res.json(data);
   } catch { res.status(502).json({ error: 'Trading bot unavailable' }); }
 });
