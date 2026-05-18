@@ -12,12 +12,18 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Test override paths (null = use real paths)
 let CONFIG_PATH_OVERRIDE = null;
 let SECRETS_PATH_OVERRIDE = null;
+let BACKUP_DIR_OVERRIDE = null;
 
-export function _setPathsForTests({ configPath, secretsPath } = {}) {
+export function _setPathsForTests({ configPath, secretsPath, backupDir } = {}) {
   CONFIG_PATH_OVERRIDE = configPath ?? null;
   SECRETS_PATH_OVERRIDE = secretsPath ?? null;
+  BACKUP_DIR_OVERRIDE = backupDir ?? null;
   // Force re-init on next loadConfig
   _config = null;
+}
+
+function getBackupDir() {
+  return BACKUP_DIR_OVERRIDE || path.join(__dirname, '..', 'data', 'backups');
 }
 
 // Test hook: replace the bound credential-store module (lets tests inject failures).
@@ -492,7 +498,7 @@ function mergeSandbox(sandbox, fallback = {}) {
   };
 }
 
-function normalizeConfig(raw = {}) {
+async function normalizeConfig(raw = {}) {
   const rawSchemaVersion = Number(raw.schemaVersion) || 0;
   const defaults = createDefaultConfig();
   const config = {
@@ -512,10 +518,10 @@ function normalizeConfig(raw = {}) {
     config.sandboxes[sandboxId] = mergeSandbox({ id: sandboxId, ...sandbox }, config);
   }
 
-  return migrateLegacyConfig(config, rawSchemaVersion);
+  return await migrateLegacyConfig(config, rawSchemaVersion);
 }
 
-function migrateLegacyConfig(config, rawSchemaVersion = 0) {
+async function migrateLegacyConfig(config, rawSchemaVersion = 0) {
   // v2 → v3: bump default `closed` heartbeat from 3600s to 14400s.
   // Only matches the OLD default exactly so user customizations (e.g. 7200, 10800) are preserved.
   if (rawSchemaVersion < 3) {
@@ -533,7 +539,63 @@ function migrateLegacyConfig(config, rawSchemaVersion = 0) {
       if (sandbox?.heartbeat?.closed === 14400) sandbox.heartbeat.closed = 28800;
     }
   }
-  config.schemaVersion = 4;
+
+  // v4 → v5: dedup accounts sharing the same (publicKey, baseUrl, paper) triple,
+  // rewrite sandbox.accountId pointers, extract secrets into the credential store,
+  // and strip publicKey/secretKey from accounts[]. Backup is written before mutation.
+  if (rawSchemaVersion < 5) {
+    // Step 1: backup
+    const backupDir = getBackupDir();
+    await fs.mkdir(backupDir, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const backupPath = path.join(backupDir, `agent-config.v4.${stamp}.json`);
+    await fs.writeFile(backupPath, JSON.stringify(config, null, 2));
+
+    // Step 2: dedup accounts
+    const groups = new Map();
+    for (const acct of config.accounts || []) {
+      const key = `${acct.publicKey}|${acct.baseUrl}|${acct.paper}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(acct);
+    }
+    const idRemap = new Map(); // oldId -> survivorId
+    const survivors = [];
+    for (const group of groups.values()) {
+      const survivor = group.find(a => /\(from \.env\)$/.test(a.name))
+        || [...group].sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || '') || a.id.localeCompare(b.id))[0];
+      survivors.push(survivor);
+      for (const a of group) {
+        idRemap.set(a.id, survivor.id);
+      }
+    }
+    const beforeCount = config.accounts.length;
+    config.accounts = survivors;
+
+    // Step 3: rewrite sandbox.accountId pointers
+    let pointerRewrites = 0;
+    for (const sbx of Object.values(config.sandboxes || {})) {
+      const next = idRemap.get(sbx.accountId);
+      if (next && next !== sbx.accountId) {
+        sbx.accountId = next;
+        pointerRewrites++;
+      }
+    }
+
+    // Step 4: extract secrets to credential store, strip from accounts[]
+    let extracted = 0;
+    for (const acct of config.accounts) {
+      if (acct.publicKey && acct.secretKey) {
+        await credStore().setCredentials(acct.id, { publicKey: acct.publicKey, secretKey: acct.secretKey });
+        delete acct.publicKey;
+        delete acct.secretKey;
+        extracted++;
+      }
+    }
+
+    console.log(`[migration] v4→v5: deduped ${beforeCount} accounts → ${survivors.length}, rewrote ${pointerRewrites} sandbox pointers, extracted ${extracted} credential sets, backup at ${backupPath}`);
+  }
+
+  config.schemaVersion = 5;  // was 4
   if (!config.sandboxes) config.sandboxes = {};
 
   for (const account of config.accounts || []) {
@@ -599,7 +661,7 @@ export async function loadConfig() {
   await credStore().loadCredentialStore(getSecretsPath());
   try {
     const raw = await fs.readFile(getConfigPath(), 'utf-8');
-    _config = normalizeConfig(JSON.parse(raw));
+    _config = await normalizeConfig(JSON.parse(raw));
   } catch (err) {
     if (err.code !== 'ENOENT') console.error('Warning: Failed to parse config file:', err.message);
     _config = createDefaultConfig();
