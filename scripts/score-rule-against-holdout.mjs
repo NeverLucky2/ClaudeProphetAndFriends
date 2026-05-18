@@ -1,6 +1,9 @@
 // Predicate scorer for walk-forward hold-out validation. Spec:
 // docs/superpowers/specs/2026-05-17-friction-and-walkforward-design.md
 
+import { fileURLToPath } from 'node:url';
+import { resolve as resolvePath } from 'node:path';
+
 const MIN_TRADES_FOR_NON_INCONCLUSIVE = 3;
 const MIN_ABS_DELTA_FOR_NON_INCONCLUSIVE = 200;
 
@@ -201,4 +204,68 @@ export function scoreDteBounds(holdoutTrades, params) {
     holdout_size: holdoutTrades.length, trades_affected, net_pl_delta_usd,
     blocked_winners, blocked_losers, details,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Dispatcher
+// ---------------------------------------------------------------------------
+
+const PREDICATE_MAP = {
+  max_position_size_pct: scoreMaxPositionSizePct,
+  stop_at_pct: scoreStopAtPct,
+  max_concurrent_positions: scoreMaxConcurrentPositions,
+  no_reentry_within_hours: scoreNoReentryWithinHours,
+  dte_bounds: scoreDteBounds,
+};
+
+export const SUPPORTED_PREDICATES = Object.keys(PREDICATE_MAP);
+
+export function dispatchPredicate(name, params, holdoutTrades) {
+  const fn = PREDICATE_MAP[name];
+  if (!fn) {
+    throw new Error(`unknown predicate "${name}". Supported: ${SUPPORTED_PREDICATES.join(', ')}`);
+  }
+  return fn(holdoutTrades, params);
+}
+
+// ---------------------------------------------------------------------------
+// CLI entry — only runs when invoked directly, not when imported.
+// Uses Windows-safe path comparison: fileURLToPath + resolvePath.
+// ---------------------------------------------------------------------------
+
+{
+  const __filename = fileURLToPath(import.meta.url);
+  const argv1abs = process.argv[1] ? resolvePath(process.argv[1]) : '';
+  if (__filename === argv1abs) {
+    const args = process.argv.slice(2);
+    const pIdx = args.indexOf('--predicate');
+    const paramsIdx = args.indexOf('--params');
+    if (pIdx === -1 || paramsIdx === -1) {
+      process.stderr.write('Usage: cat holdout.json | node scripts/score-rule-against-holdout.mjs --predicate <name> --params <json>\n');
+      process.exit(2);
+    }
+    const predicate = args[pIdx + 1];
+    let params;
+    try { params = JSON.parse(args[paramsIdx + 1]); } catch (err) {
+      process.stderr.write(`--params is not valid JSON: ${err.message}\n`);
+      process.exit(2);
+    }
+    // Read trades from stdin (synchronous, small data).
+    let stdin = '';
+    process.stdin.on('data', chunk => { stdin += chunk; });
+    process.stdin.on('end', () => {
+      let trades;
+      try { trades = JSON.parse(stdin); } catch (err) {
+        process.stderr.write(`stdin is not valid JSON: ${err.message}\n`);
+        process.exit(2);
+      }
+      try {
+        const result = dispatchPredicate(predicate, params, trades);
+        process.stdout.write(JSON.stringify(result, null, 2) + '\n');
+      } catch (err) {
+        process.stderr.write(`${err.message}\n`);
+        process.exit(2);
+      }
+    });
+  }
 }

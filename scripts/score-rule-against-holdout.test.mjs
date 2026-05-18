@@ -230,3 +230,27 @@ test('scoreDteBounds: option DTE over max -> flagged', () => {
   const v = scoreDteBounds(trades, { min: 50, max: 120 });
   assert.equal(v.trades_affected, 1);
 });
+
+import { dispatchPredicate, SUPPORTED_PREDICATES } from './score-rule-against-holdout.mjs';
+
+test('dispatchPredicate: max_position_size_pct routes correctly', () => {
+  const v = dispatchPredicate('max_position_size_pct', { limit: 0.15 }, []);
+  assert.equal(v.predicate, 'max_position_size_pct');
+});
+
+test('dispatchPredicate: unknown name throws with supported list', () => {
+  assert.throws(
+    () => dispatchPredicate('nonexistent', {}, []),
+    /unknown predicate.*max_position_size_pct/,
+  );
+});
+
+test('SUPPORTED_PREDICATES contains the 5 starter predicates', () => {
+  assert.deepEqual(SUPPORTED_PREDICATES.sort(), [
+    'dte_bounds',
+    'max_concurrent_positions',
+    'max_position_size_pct',
+    'no_reentry_within_hours',
+    'stop_at_pct',
+  ]);
+});
