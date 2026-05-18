@@ -10,6 +10,18 @@ Your job is to evaluate, with evidence, whether any of the strategy's numerical 
 
 You may NOT change the strategy structure (long-only, ETF-only, daily-bar, Donchian+SMA-only signal, persisted-ledger architecture, heartbeat scheduling structure, cold-start mechanism). Only numerical parameters and universe-trim decisions are in scope.
 
+## Step 0 — Apply friction to raw trade data
+
+Before reading any trade data, run:
+
+`node scripts/apply-friction.mjs --agent trend-prophet`
+
+Report the resulting `{ processed, skipped, sign_flips, skip_reasons }` stats to the user. **If `skipped` exceeds 10% of `processed + skipped`, warn the user that the adapt set may be biased and offer to abort.**
+
+All subsequent data loading reads `*.friction.json` files in each sandbox's `decisive_actions/` directory, NOT the raw `*.json` files. **All P&L-derived metrics (win rate, average win/loss, profit factor) MUST use `market_data.friction_adjusted_pl`. If that field is absent on a record, fall back to the original P&L field and tag the record in any output as "raw-pl-fallback".**
+
+Note: TrendProphet's authoritative P&L source is the `prophet_trader.db` ledger (Step 2c). Friction applies only to the `decisive_actions/` stream used as a fallback and for behavioral-gap analysis. The DB cohort is used as-is for realized P&L calculations in Steps 3–7.
+
 ## Step 1 — Load current parameters
 
 Read `TRADING_RULES_TREND.md`. Extract live values for the parameters below (these are the only knobs you may propose edits to). The values shown are the snapshot at skill-creation time — re-read on every run.
@@ -42,7 +54,7 @@ This skill aggregates trade history from **every** sandbox running the `trend-pr
 Then, for each `<DIR>` in `<TREND_DIRS>`:
 
 a. Glob `data/sandboxes/<DIR>/activity_logs/activity_*.json`. Read every file dated within the last 180 calendar days.
-b. Glob `data/sandboxes/<DIR>/decisive_actions/*.json`. Read every file with a `timestamp` within the last 180 calendar days.
+b. Glob `data/sandboxes/<DIR>/decisive_actions/*.friction.json`. Merge all matched files from all `<TREND_DIRS>`, sort by file mtime descending, read the **50 most recent overall** (not 50 per sandbox). If fewer than 50 `.friction.json` files exist across all sandboxes, use what's available and note the actual count in the report. If fewer than 10 exist in total, warn the user explicitly that analysis may be premature on this little data and offer to abort.
 c. Read `data/sandboxes/<DIR>/prophet_trader.db` if you can. The trend ledger is persisted to disk per `TRADING_RULES_TREND.md` "Persisted Ledger" section. Verify exact table name and column names by inspecting the schema first; expected columns:
    - ticker, entry_date, entry_price, shares, atr_at_entry, initial_stop, donchian_100_high_at_entry
    - exit_date, exit_price, exit_reason ∈ {trailing_stop, initial_hard_stop, manual, circuit_breaker}
@@ -91,6 +103,18 @@ this cycle. Re-run next quarter.
 Then stop. Do not edit `TRADING_RULES_TREND.md`. Do not propose changes. The user has explicitly forbidden relaxing this threshold.
 
 If count ≥ 6, proceed to Step 4.
+
+## Step 3.5 — Split into adapt set and hold-out set
+
+Sort all loaded decisive-action records by timestamp ascending. Compute `holdout_size = ceil(N × 0.20)` where N is the number of loaded decisive-action records. The **adapt set** is the oldest `N − holdout_size` records; the **hold-out set** is the newest `holdout_size`.
+
+State both counts and date ranges to the user explicitly, plus symbol concentration:
+
+> Adapting on N1 decisions (date1 → date2). Holding out N2 decisions (date3 → date4) for validation.
+> Adapt-set top 3 symbols: SYM1 (X%), SYM2 (Y%), SYM3 (Z%).
+> Hold-out-set top 3 symbols: SYM1 (X%), SYM2 (Y%), SYM3 (Z%).
+
+**Gap analysis (Steps 4–6) and proposal generation (Step 7) use ONLY the adapt set for decisive-action-derived signals.** The DB cohort from Step 2c is always used in full for realized-P&L calculations — it is not split. Do not peek at the hold-out decisive-action records during Steps 4–7; they are reserved for Step 7.5 validation.
 
 ## Step 4 — Per-ticker analysis (TLT, GLD, USO, DBC, UUP, EEM)
 
@@ -198,6 +222,45 @@ Examples of proposals you must NOT make (these are structural, not parametric):
 - Changing the cold-start mechanism
 
 If your evidence points at one of these, do NOT propose a parameter edit. Go to Step 8.
+
+## Step 7.5 — Validate proposed edits against hold-out (READ-ONLY, NO ITERATION)
+
+For each proposed edit from Step 7, classify it as **mechanical** (the rule maps to a supported predicate) or **qualitative** (everything else).
+
+**Mechanical predicates currently supported:**
+
+| Rule shape | Predicate name | Params |
+|---|---|---|
+| Position size ≤ X% | `max_position_size_pct` | `{ "limit": X }` |
+| Stop at -X% | `stop_at_pct` | `{ "stop": -X }` |
+| Max N concurrent positions | `max_concurrent_positions` | `{ "limit": N }` |
+| No re-entry within N hours | `no_reentry_within_hours` | `{ "hours": N }` |
+| DTE between min and max | `dte_bounds` | `{ "min": M, "max": X }` |
+
+For each mechanical edit, invoke the scorer (pipe the hold-out set as a JSON array on stdin):
+
+```
+echo '<HOLDOUT_JSON_ARRAY>' | node scripts/score-rule-against-holdout.mjs --predicate <name> --params '<params>'
+```
+
+Capture the returned envelope including `verdict`, `trades_affected`, `net_pl_delta_usd`, and any `limitation_notes`.
+
+For each qualitative edit, read the hold-out trades and write a one-paragraph judgment citing specific held-out trades by symbol and timestamp. Emit a parallel envelope with `review_type: "qualitative"` and a `verdict` of APPROVED-BY-HOLDOUT, REJECTED-BY-HOLDOUT, or INCONCLUSIVE based on your judgment.
+
+**Once hold-out data has been read in this step, no new proposals may be generated in the same skill invocation.** If the user wants to propose alternatives after seeing hold-out verdicts, that requires a new skill run with a fresh trade window. This prevents hold-out information from leaking into proposal generation.
+
+## Step 7.6 — Attach hold-out verdicts to proposals
+
+For each proposal, attach a verdict block to its display:
+
+> **HOLD-OUT VERDICT:** APPROVED-BY-HOLDOUT — `review_type: mechanical` — trades_affected: 3 — net_pl_delta_usd: +$145
+> Limitations: (any `limitation_notes` from the scorer)
+> ⚠️ A 12-15 trade hold-out is a sanity check, not a hypothesis test.
+
+Application rules to apply in Step 10:
+- **APPROVED-BY-HOLDOUT**: user-approved proposals applied normally.
+- **REJECTED-BY-HOLDOUT**: requires explicit user override before being applied.
+- **INCONCLUSIVE**: user decides as normal — most proposals will land here at current sample size. Do not auto-reject or auto-approve.
 
 ## Step 8 — Structural escalation (do NOT silently change structure)
 
