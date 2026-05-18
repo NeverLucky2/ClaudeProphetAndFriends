@@ -115,3 +115,40 @@ test('getAccountById returns null creds when secrets are missing for that id', a
   assert.equal(got.publicKey, null);
   assert.equal(got.secretKey, null);
 });
+
+// ── createSandboxForAccount ───────────────────────────────────────────
+
+test('createSandboxForAccount: generates sbx_<uuid8> distinct from sbx_<accountId>', async () => {
+  await cfgStore.loadConfig();
+  const a = await cfgStore.addAccount({ name: 'A', publicKey: 'PK', secretKey: 'SK', baseUrl: 'x', paper: true });
+  const sbx = await cfgStore.createSandboxForAccount(a.id, { name: 'First' });
+  assert.equal(sbx.accountId, a.id);
+  assert.notEqual(sbx.id, `sbx_${a.id}`, 'sandbox id is no longer derived from accountId');
+  assert.match(sbx.id, /^sbx_[0-9a-f]{8}$/);
+  assert.equal(sbx.name, 'First');
+});
+
+test('createSandboxForAccount: two calls produce distinct sandboxes pointing at same account', async () => {
+  await cfgStore.loadConfig();
+  const a = await cfgStore.addAccount({ name: 'A', publicKey: 'PK', secretKey: 'SK', baseUrl: 'x', paper: true });
+  const sbx1 = await cfgStore.createSandboxForAccount(a.id, { name: 'One' });
+  const sbx2 = await cfgStore.createSandboxForAccount(a.id, { name: 'Two' });
+  assert.notEqual(sbx1.id, sbx2.id);
+  assert.equal(sbx1.accountId, a.id);
+  assert.equal(sbx2.accountId, a.id);
+});
+
+test('createSandboxForAccount: throws if accountId unknown', async () => {
+  await cfgStore.loadConfig();
+  await assert.rejects(
+    () => cfgStore.createSandboxForAccount('nope', { name: 'X' }),
+    /account not found/i
+  );
+});
+
+test('createSandboxForAccount: applies agentId override when provided', async () => {
+  await cfgStore.loadConfig();
+  const a = await cfgStore.addAccount({ name: 'A', publicKey: 'PK', secretKey: 'SK', baseUrl: 'x', paper: true });
+  const sbx = await cfgStore.createSandboxForAccount(a.id, { name: 'Harvest sbx', agentId: 'harvest' });
+  assert.equal(sbx.agent.activeAgentId, 'harvest');
+});

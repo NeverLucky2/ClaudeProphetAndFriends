@@ -773,6 +773,29 @@ export async function setActiveAccount(id) {
   await saveConfig();
 }
 
+export async function createSandboxForAccount(accountId, { name, agentId } = {}) {
+  const account = _config.accounts.find(a => a.id === accountId);
+  if (!account) throw new Error('Account not found');
+  const sandboxId = `sbx_${crypto.randomUUID().slice(0, 8)}`;
+  const sandbox = createSandbox(account, {
+    id: sandboxId,
+    name: name || account.name,
+    activeAgentId: agentId || _config.activeAgentId,
+    activeModel: _config.activeModel,
+    heartbeat: _config.heartbeat,
+    permissions: _config.permissions,
+    plugins: _config.plugins,
+  });
+  _config.sandboxes[sandboxId] = sandbox;
+  if (!_config.activeSandboxId) {
+    _config.activeSandboxId = sandboxId;
+    _config.activeAccountId = accountId;
+  }
+  syncLegacyAliases(_config);
+  await saveConfig();
+  return sandbox;
+}
+
 export function getActiveAccount() {
   return _config.accounts.find(a => a.id === _config.activeAccountId) || null;
 }
