@@ -28,3 +28,31 @@ export function buildVerdict({
     verdict, limitation_notes, details,
   };
 }
+
+export function scoreMaxPositionSizePct(holdoutTrades, params) {
+  const { limit } = params;
+  let trades_affected = 0;
+  let net_pl_delta_usd = 0;
+  let blocked_winners = 0;
+  let blocked_losers = 0;
+  const details = [];
+
+  for (const t of holdoutTrades) {
+    const md = t.market_data ?? {};
+    if (typeof md.entry_price !== 'number' || typeof md.size !== 'number' || typeof md.portfolio_value !== 'number') continue;
+    const positionPct = (md.entry_price * md.size) / md.portfolio_value;
+    if (positionPct > limit) {
+      trades_affected += 1;
+      const pl = md.friction_adjusted_pl ?? 0;
+      net_pl_delta_usd -= pl;
+      if (pl > 0) blocked_winners += 1;
+      if (pl < 0) blocked_losers += 1;
+      details.push({ symbol: t.symbol, position_pct: +positionPct.toFixed(4), pl });
+    }
+  }
+  return buildVerdict({
+    predicate: 'max_position_size_pct', params,
+    holdout_size: holdoutTrades.length, trades_affected, net_pl_delta_usd,
+    blocked_winners, blocked_losers, details,
+  });
+}
