@@ -2759,6 +2759,35 @@ async function submitSandboxFromAccount() {
 
 const sandboxTerminals = {}; // { sandboxId: { el, logs[] } }
 
+function attachTerminalScrollControls(sandboxId) {
+  const t = sandboxTerminals[sandboxId];
+  if (!t || !t.termEl) return;
+
+  t.autoScroll = true;
+
+  const splitEl = t.el.querySelector('.terminal-split');
+  if (!splitEl) return;
+
+  const btn = document.createElement('button');
+  btn.className = 'jump-bottom-btn';
+  btn.type = 'button';
+  btn.title = 'Jump to bottom';
+  btn.innerHTML = '&#8595; Jump to bottom';
+  splitEl.appendChild(btn);
+  t.jumpBtn = btn;
+
+  t.termEl.addEventListener('scroll', () => {
+    const atBottom = t.termEl.scrollHeight - t.termEl.scrollTop - t.termEl.clientHeight < 50;
+    t.autoScroll = atBottom;
+    t.jumpBtn.classList.toggle('visible', !atBottom);
+  });
+
+  btn.addEventListener('click', () => {
+    t.termEl.scrollTop = t.termEl.scrollHeight;
+    // The scroll listener will pick up the at-bottom state and hide the button.
+  });
+}
+
 function ensureSandboxTerminal(sandboxId, label) {
   if (sandboxTerminals[sandboxId]) return sandboxTerminals[sandboxId];
   
@@ -2848,6 +2877,7 @@ function ensureSandboxTerminal(sandboxId, label) {
     <div class="sidebar-overlay" data-overlay="${sandboxId}" onclick="toggleMobileSidebar('${sandboxId}')"></div>`;
   container.appendChild(wrapper);
   sandboxTerminals[sandboxId] = { el: wrapper, termEl: wrapper.querySelector('[data-terminal]') };
+  attachTerminalScrollControls(sandboxId);
   return sandboxTerminals[sandboxId];
 }
 
@@ -2921,6 +2951,7 @@ function ensureManagerTerminal() {
     + '</div>';
   container.appendChild(wrapper);
   sandboxTerminals['_manager'] = { el: wrapper, termEl: wrapper.querySelector('[data-terminal]') };
+  attachTerminalScrollControls('_manager');
 }
 
 function refreshManagerDropdowns() {
