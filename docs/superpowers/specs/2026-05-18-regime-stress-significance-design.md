@@ -85,21 +85,28 @@ Pure-function Node.js script. Pulls SPY daily closes from FMP, classifies each U
 
 If `--from`/`--to` are omitted, defaults are `--from` 90 days back and `--to` today. The adapt skills supply explicit `--from` matching their oldest trade-date.
 
-**Classifier (3-bucket SPY-only):**
+**Classifier (3-bucket SPY-only with 50DMA-slope tiebreaker):**
 
 ```
 For each trading date D in [from, to]:
-  spy_close[D]      = SPY adjusted close that day
-  spy_50dma[D]      = mean(spy_close[D-49..D])  (requires 50 days of prior data → fetch range starts from-49 days)
-  spy_20d_return[D] = (spy_close[D] / spy_close[D-20]) - 1
+  spy_close[D]       = SPY adjusted close that day
+  spy_50dma[D]       = mean(spy_close[D-49..D])  (requires 50 days of prior data → fetch range starts from-49 days)
+  spy_20d_return[D]  = (spy_close[D] / spy_close[D-20]) - 1
+  spy_50dma_slope[D] = (spy_50dma[D] - spy_50dma[D-20]) / spy_50dma[D-20]
 
   if spy_close[D] > spy_50dma[D] AND spy_20d_return[D] > 0:
-      regime[D] = "bull-trend"
+      regime[D] = "bull-trend"                              # full agreement
   elif spy_close[D] < spy_50dma[D] AND spy_20d_return[D] < 0:
-      regime[D] = "bear-trend"
+      regime[D] = "bear-trend"                              # full agreement
+  elif spy_close[D] > spy_50dma[D] AND spy_50dma_slope[D] > 0:
+      regime[D] = "bull-trend"                              # pullback inside uptrend
+  elif spy_close[D] < spy_50dma[D] AND spy_50dma_slope[D] < 0:
+      regime[D] = "bear-trend"                              # bounce inside downtrend
   else:
-      regime[D] = "chop"
+      regime[D] = "chop"                                    # genuine non-trending day
 ```
+
+The slope tiebreaker keeps "chop" reserved for days where price and 50DMA-trend genuinely disagree. Without it, every pullback inside an uptrend gets labeled chop, polluting the bucket with trend-day behavior and making the regime-skew warning under-fire.
 
 **Output schema (`data/reports/regime_history.json`):**
 
@@ -121,7 +128,18 @@ For each trading date D in [from, to]:
 
 **Rebuild policy (idempotency):**
 
-The script reads any existing `regime_history.json` first. If its `range` covers every date in the requested window AND its `as_of` is < 24 hours old AND `classifier.version` matches the current script's classifier version, reuse it (exit 0 with a "cache hit" stderr message, no rewrite). Otherwise, fetch SPY data covering [from-49, to], compute, and write atomically (write-to-tmp-then-rename, mirror of `writeAtomic` in `apply-friction.mjs`).
+The script reads any existing `regime_history.json` first. Cache is reused only when ALL of these hold:
+
+1. `range` covers every date in the requested window.
+2. `as_of` is after the most recent NYSE session close + 1-hour buffer. **Specifically:** if the current time is before 5pm ET on a US trading day, the latest valid session close is yesterday's 4pm ET. If current time is after 5pm ET on a US trading day, today's 4pm ET. On weekends/holidays, the most recent prior trading day's 4pm ET. Cache is fresh only when `as_of >= that session-close + 1h`.
+3. `classifier.version` matches the current script's classifier version.
+4. `--force-rebuild` flag is NOT set.
+
+If all four hold, reuse and exit 0 with a "cache hit" stderr message and no rewrite. Otherwise, fetch SPY data covering [from-49, to], compute, and write atomically (write-to-tmp-then-rename, mirror of `writeAtomic` in `apply-friction.mjs`).
+
+**Why session-close + buffer instead of "< 24 hours":** A naive 24h freshness check passes at 10am on the same calendar day even though today's SPY close doesn't exist yet — the cache built at 10am will keep being reused all afternoon and the script will never pick up today's close. Tying freshness to NYSE session close + 1h ensures the cache is only "fresh" once today's data is actually queryable from FMP.
+
+**CLI flags summary:** `--from <YYYY-MM-DD>` (default: 90 days ago), `--to <YYYY-MM-DD>` (default: today in ET), `--force-rebuild` (skip cache check, always fetch + write).
 
 **Error handling:**
 
@@ -134,26 +152,43 @@ The script reads any existing `regime_history.json` first. If its `range` covers
 
 #### 2. `scripts/score-rule-against-holdout.mjs` extension
 
-**New optional CLI flag:** `--regime-history <path>`.
+**New optional CLI flags:** `--regime-history <path>` and `--adapt-set-distribution <json>`.
 
-When provided, the scorer reads the regime history once, and for any predicate that produces a `trades_affected > 0` result, computes the regime composition of those specific affected trades. If any single regime accounts for ≥70% of affected trades, append a `regime_warning` string to the envelope:
+When provided together, the scorer reads the regime history and, for any predicate that produces a `trades_affected ≥ 5` result, computes the regime composition of those specific affected trades AND compares to the adapt-set baseline distribution. If any single regime is over-represented in the affected trades by ≥25 percentage points relative to its share in the adapt set, append a `regime_warning` to the envelope.
 
+**Two-stage gate (avoids fragile thresholds at small sample size):**
+
+```
+if trades_affected < 5:
+    regime_warning_skipped = "insufficient_sample (need >= 5 affected trades; have <trades_affected>)"
+else:
+    for each regime r:
+        affected_pct = (affected_trades where regime == r).count / trades_affected
+        baseline_pct = adapt_set_distribution[r] (or 0 if absent)
+        if affected_pct - baseline_pct >= 0.25:
+            regime_warning = "affected trades <affected_pct%> <r> vs adapt-set <baseline_pct%> — proposal over-indexes on <r> regime by <delta_pp>pp"
+            break
+```
+
+**Why relative-to-adapt-set, not absolute ≥70%:** If the adapt set itself is 80% bull-trend (small sample, recent bull market), any predicate firing on bull-trend trades would trip an absolute threshold spuriously — the bias is in the data, not the proposal. The relative comparison flags only proposals that over-index on a regime *beyond what the underlying data does*.
+
+**Example envelope:**
 ```json
 {
   "predicate": "stop_at_pct",
   "params": { "stop": -0.10 },
   "review_type": "mechanical",
-  "trades_affected": 3,
+  "trades_affected": 6,
   "net_pl_delta_usd": 145,
   "verdict": "APPROVED-BY-HOLDOUT",
-  "regime_warning": "100% of affected trades (3/3) occurred in regime bull-trend — proposal may not generalize",
+  "regime_warning": "affected trades 100% bull-trend vs adapt-set 62% — proposal over-indexes on bull-trend regime by 38pp",
   "...": "..."
 }
 ```
 
-When `--regime-history` is omitted (or the path doesn't exist), the envelope simply has no `regime_warning` field. No silent fallback to "unknown" — absence is signal that regime data wasn't available.
+When `--regime-history` or `--adapt-set-distribution` is omitted (or the regime path doesn't exist), the envelope simply has no `regime_warning` field. No silent fallback.
 
-Joining regime label to a held-out trade: `regime_history.labels[trade.timestamp.slice(0,10)]`. If absent, walk back up to 5 calendar days for the previous trading day. Still absent → that trade contributes to an `unknown` bucket which is excluded from the 70% concentration calculation (rather than counted as its own regime).
+Joining regime label to a held-out trade: convert `trade.timestamp` to America/New_York timezone, slice `YYYY-MM-DD`, lookup in `regime_history.labels`. If absent (weekend / holiday / late ET trade tipping into next UTC day), walk back up to 5 calendar days for the previous trading day's label. Still absent → that trade is excluded from both the `affected_pct` and `baseline_pct` calculations (excluded from numerator and denominator alike — does not count as its own regime).
 
 #### 3. Skill edits for regime tagging
 
@@ -265,8 +300,22 @@ User-initiated. Steps:
 
 1. Resolve agent — if no arg, iterate all 4 agents.
 2. Generate report via `scripts/friction-stress-compare.mjs` if missing or stale (>24h).
-3. Read report, present human-readable summary with per-asset-class verdict.
+3. Read report, present human-readable summary with per-asset-class verdict using the codified flip-rate thresholds below.
 4. **Never modify any config or strategy file.** Diagnostic-only.
+
+**Flip-rate verdict thresholds (codified to keep skill output consistent across runs):**
+
+```
+flip_rate = flips_in_category / matched_trade_count_in_category
+
+  flip_rate < 0.05   → "durable"     ("edge survives worst-case fills")
+  0.05 ≤ flip_rate < 0.20  → "marginal"   ("edge thins under stress; tighten entry filters")
+  flip_rate ≥ 0.20   → "thin"        ("edge does not survive worst-case fills; reconsider before live deployment")
+
+  matched_trade_count_in_category == 0 → "n/a (no trades in window)"
+```
+
+Without codified thresholds, the same data could yield differently-worded verdicts across runs depending on prompt-by-prompt interpretation. Encoding the thresholds in the skill ensures the same numbers always produce the same verdict.
 
 Example output:
 
@@ -303,12 +352,20 @@ gateForCategory(trades, params):
   losses = trades.filter(t => t.market_data.friction_adjusted_pl < 0)
   losing_pl_abs = |sum of losses' friction_adjusted_pl|
 
-  # Gross dollar exposure denominator
+  # Gross dollar exposure denominator (per-asset formulas — see table above)
+  WING_WIDTH_BY_UNDERLYING = { SPY: 5, QQQ: 5, IWM: 2, GLD: 2, TLT: 1 }
+
   exposure_per_trade(t):
-    if t.friction_meta.profile_applied in ("single_leg_options", "iron_condor"):
-        |t.market_data.entry_price × t.market_data.size × 100|
-    else:
-        |t.market_data.entry_price × t.market_data.size|
+    profile = t.friction_meta.profile_applied
+    if profile == "iron_condor":
+        wing_width = t.market_data.wing_width
+                  ?? WING_WIDTH_BY_UNDERLYING[underlying_from_symbol(t.symbol)]
+                  ?? (t.market_data.entry_price * 10)   # fallback, log stderr
+        return |wing_width × t.market_data.size × 100|
+    elif profile == "single_leg_options":
+        return |t.market_data.entry_price × t.market_data.size × 100|
+    else:  # stocks or penny_stocks
+        return |t.market_data.entry_price × t.market_data.size|
   gross_exposure = max(sum of exposure_per_trade for all trades in category, 1.0)
 
   drawdown_pct = losing_pl_abs / gross_exposure
@@ -338,7 +395,19 @@ evaluateGate(adaptSetTrades, params):
 
 **Drawdown denominator choice:**
 
-Gross dollar exposure (Σ |entry_price × size × multiplier|) rather than starting account equity. Reasoning: equity-denominated drawdown ties the gate to account size, making the same trade pattern clear the gate in one sandbox and fail in another. Gross-exposure measures damage-per-dollar-deployed, which is the actually-relevant quantity for "does this signal warrant a rule change?" Capped at minimum of $1 to avoid divide-by-zero on empty categories.
+Gross dollar exposure (Σ exposure_per_trade) rather than starting account equity. Reasoning: equity-denominated drawdown ties the gate to account size, making the same trade pattern clear the gate in one sandbox and fail in another. Gross-exposure measures damage-per-dollar-deployed, which is the actually-relevant quantity for "does this signal warrant a rule change?" Capped at minimum of $1 to avoid divide-by-zero on empty categories.
+
+**Per-asset exposure formulas:**
+
+| profile_applied | exposure_per_trade |
+|---|---|
+| `stocks`, `penny_stocks` | `|entry_price × size|` |
+| `single_leg_options` | `|entry_price × size × 100|` (long-premium; max loss = premium paid) |
+| `iron_condor` | `wing_width × size × 100` where `wing_width` resolves in this order: (1) `market_data.wing_width` if present, (2) symbol-table lookup from the underlying ticker — `{SPY:5, QQQ:5, IWM:2, GLD:2, TLT:1}` matching `TRADING_RULES_HARVEST.md`, (3) fallback `entry_price × size × 100 × 10` (crude — emit a stderr warning when this path is hit). |
+
+**Why the IC formula matters:** the buying-power requirement and worst-case loss for a defined-risk credit spread is the wing width, not the credit collected. A $0.50 credit on a $5-wide SPY IC has max loss `($5 − $0.50) × 100 = $450` per contract, not $50 per contract. Using credit-as-exposure under-counts true exposure by ~10x, which would let a single losing IC trip the 5% drawdown gate trivially and clear it for trivial losses. The wing-width formula gives the gate something meaningful to fire on.
+
+**Implementation note (out of scope for this spec):** the Go agent should be asked to write `wing_width` (and `theoretical_credit`) into `market_data` when Harvest opens an IC. That's a future Go change; the symbol-table fallback covers current Harvest semantics in the meantime.
 
 **Trades with `profile_applied` missing or `unknown` (legacy / raw-pl-fallback):**
 
@@ -377,7 +446,7 @@ FINAL:             APPROVED — both gates cleared
 4. HOLD-OUT=INCONCLUSIVE → `FINAL: INCONCLUSIVE` — user decides as normal.
 5. SIGNIFICANCE=PASSED AND HOLD-OUT=APPROVED-BY-HOLDOUT AND no REGIME WARNING → `FINAL: APPROVED`.
 
-The "REGIME WARNING outranks INCONCLUSIVE" rule reflects that a regime-skewed sample is a structural concern about generalization, stronger than the noise-floor signal that INCONCLUSIVE represents. The user can still apply — the override path exists precisely for these "looks fine but might not generalize" cases.
+**Rationale for the asymmetry:** INCONCLUSIVE-with-warning is treated as structurally weaker evidence than plain INCONCLUSIVE. Both share the noise-floor problem (too few affected trades to distinguish signal from noise), but a regime-skewed inconclusive additionally fails the generalization test — the proposal's evidence is concentrated in a regime that may not recur. The override path exists for the user to apply anyway when they have outside context (e.g., "I know option premium is structurally too low this quarter regardless of regime"). This asymmetry is intentional, not an oversight.
 
 ## Skill Markdown Edits
 
@@ -399,7 +468,9 @@ Each step below is described by its *logical position* in the existing skill flo
 
 ### Step 3 extension — Join regime label
 
-> For each loaded `.friction.json`, join `regime_history.labels[action.timestamp.slice(0,10)]` onto the trade as `regime`. Holiday/weekend dates: walk back up to 5 calendar days for the previous trading day's label. Still missing → `regime: "unknown"`.
+> For each loaded `.friction.json`, convert `action.timestamp` to America/New_York timezone (use `Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(...)` to extract `YYYY-MM-DD`), then look up in `regime_history.labels`. Holiday/weekend dates and late-ET trades that would tip into the next UTC day: walk back up to 5 calendar days for the previous trading day's label. Still missing → `regime: "unknown"`.
+>
+> **TZ-conversion rationale:** raw `action.timestamp` is UTC. A trade at 21:00 ET (5pm ET in winter) is `02:00Z` the next day. Using UTC date directly would tag it with tomorrow's regime (frequently a weekend → walk back to today, which works) but a 21:00 ET trade on a Thursday becomes Friday in UTC and would tag with Friday's regime instead of Thursday's. The ET conversion makes the tag deterministic and tied to the actual session date.
 
 ### Step 3.5 extension — Regime composition in announcement
 
@@ -431,9 +502,13 @@ Each step below is described by its *logical position* in the existing skill flo
 >
 > > Gap [N] skipped — proposal would affect category \<X\> which did not clear significance gate.
 
-### Step 6.5 extension — Pass `--regime-history` to scorer
+### Step 6.5 extension — Pass `--regime-history` AND `--adapt-set-distribution` to scorer
 
-> When invoking `score-rule-against-holdout.mjs` for mechanical predicates, add `--regime-history data/reports/regime_history.json`. The envelope may now contain a `regime_warning` field — capture it for Step 6.6.
+> When invoking `score-rule-against-holdout.mjs` for mechanical predicates, add both:
+> - `--regime-history data/reports/regime_history.json`
+> - `--adapt-set-distribution '<json>'` where `<json>` is the adapt-set regime composition computed in Step 3.5 (e.g., `{"bull-trend":0.62,"chop":0.27,"bear-trend":0.09,"unknown":0.02}`)
+>
+> The envelope may now contain `regime_warning` (proposal over-indexes a regime by ≥25pp relative to adapt set) or `regime_warning_skipped` (`trades_affected < 5`). Capture both for Step 6.6.
 
 ### Step 6.6 extension — Combined verdict
 
@@ -472,10 +547,12 @@ Per `/adapt-strategy` (or any of the 4 adapt variants):
 - Classifier — bull-trend: SPY > 50DMA AND 20D return > 0 → `bull-trend`.
 - Classifier — bear-trend: SPY < 50DMA AND 20D return < 0 → `bear-trend`.
 - Classifier — chop: any other combination → `chop`.
-- Cache reuse: existing `regime_history.json` with covering range, fresh `as_of`, matching classifier version → no FMP call, exit 0.
+- Cache reuse: existing `regime_history.json` with covering range, `as_of` after most recent session close + 1h, matching classifier version, no `--force-rebuild` → no FMP call, exit 0.
 - Cache rebuild: range gap → fetch and rewrite.
-- Cache rebuild: stale `as_of` → fetch and rewrite.
+- Cache rebuild: `as_of` before most recent session close + 1h → fetch and rewrite (covers the "built at 10am, re-run at 5pm" intra-day staleness case).
 - Cache rebuild: classifier version mismatch → fetch and rewrite.
+- Cache rebuild: `--force-rebuild` flag → fetch and rewrite regardless of other freshness signals.
+- Session-close logic: fixture clock at 10am ET on a trading day → most-recent-close is yesterday 4pm ET. At 5pm ET → today 4pm ET. On Sunday → last Friday 4pm ET.
 - Holiday backfill: requested date is a weekend → consumer (skill or scorer) walks back to previous trading day, verified via direct fixture lookup.
 - FMP failure: missing API key → exit code 3 with clear message.
 - FMP failure: network error → exit code 4.
@@ -491,13 +568,16 @@ Per `/adapt-strategy` (or any of the 4 adapt variants):
 
 ### `scripts/score-rule-against-holdout.test.mjs` (extension)
 
-- `--regime-history` flag: regime_history.json loaded, joined to trades.
-- `regime_warning` emitted when ≥70% of affected trades in one regime.
-- `regime_warning` omitted when <70% concentration.
-- `regime_warning` omitted when `--regime-history` not provided.
+- `--regime-history` + `--adapt-set-distribution` flags: parsed and applied correctly.
+- `regime_warning` emitted when `trades_affected ≥ 5` AND some regime over-indexed by ≥25pp vs adapt-set baseline.
+- `regime_warning` omitted when over-index < 25pp (data and proposal are similarly skewed).
+- `regime_warning_skipped: "insufficient_sample"` when `trades_affected < 5`.
+- `regime_warning` omitted when `--regime-history` or `--adapt-set-distribution` not provided.
 - `regime_warning` omitted when `trades_affected == 0`.
-- `unknown` regime trades excluded from concentration calculation.
-- Holiday backfill: trade on Saturday gets Friday's regime label.
+- `unknown` regime trades excluded from both numerator (affected count) and denominator (baseline).
+- Holiday backfill: trade on Saturday gets Friday's regime label after walking back.
+- **TZ-aware date join:** trade with timestamp `2026-05-15T21:00:00.000Z` (Friday 5pm ET) → `2026-05-15` (Friday).
+- **TZ-aware date join:** trade with timestamp `2026-05-16T01:00:00.000Z` (Friday 9pm ET in summer DST) → `2026-05-15` (Friday) via ET conversion, NOT 2026-05-16 → walked back.
 
 ### `scripts/friction-stress-compare.test.mjs`
 
@@ -505,7 +585,8 @@ Per `/adapt-strategy` (or any of the 4 adapt variants):
 - Delta: stress − baseline equals expected on every matched pair.
 - Flip detection: `(baseline > 0) !== (stress > 0)` correctly identifies sign change.
 - Per-asset-class breakdown: mixed-asset fixture aggregates correctly.
-- Unmatched handling: a trade that fails friction baseline but succeeds stress → listed in `unmatched`.
+- **Matched-count symmetry (defensive):** on a fixture where every trade has full `market_data`, matched count under baseline equals matched count under stress AND equals total trade count. `unmatched[]` is empty. Document via test that non-empty `unmatched[]` indicates a code bug (asset-class detection diverging between configs), not a normal data condition — apply-friction's detection logic doesn't depend on config values.
+- Unmatched handling (failure surface): when a fixture is forced to produce diverging coverage (mock the detector to return null under one config), `unmatched[]` lists the affected trade with reason.
 - Idempotency: running twice produces identical content (modulo `as_of`).
 - Atomic write of report.
 
@@ -515,7 +596,12 @@ Per `/adapt-strategy` (or any of the 4 adapt variants):
 - gateForCategory: 2 losses, 6% drawdown → CLEARED (drawdown gate).
 - gateForCategory: 3 losses, 2% drawdown → BLOCKED (neither gate).
 - gateForCategory: 5 losses, 6% drawdown → CLEARED (both gates).
-- Gross-exposure denominator: stocks use entry_price × size; options use entry_price × size × 100.
+- Gross-exposure denominator (stocks): entry_price × size.
+- Gross-exposure denominator (single_leg_options): entry_price × size × 100.
+- **Gross-exposure denominator (iron_condor) — explicit `wing_width`:** trade with `market_data.wing_width: 5.0` and size 2 → exposure 1000 per trade.
+- **Gross-exposure denominator (iron_condor) — symbol-table lookup:** SPY IC with no explicit `wing_width` → falls back to table value 5.
+- **Gross-exposure denominator (iron_condor) — fallback path:** unknown underlying, no `wing_width` → uses `entry_price × size × 100 × 10` and emits a stderr warning.
+- **Significance gate fires correctly for IC:** an IC with $500 max-loss losing $100 represents 20% loss-on-exposure — clears the 5% drawdown gate. The OLD entry-price denominator would have shown $50 exposure and a 200% loss, trivially clearing. Test ensures the new formula gives the right answer.
 - Empty category → BLOCKED with explicit reason.
 - evaluateGate: trades grouped by `friction_meta.profile_applied` correctly.
 - evaluateGate: trade with missing `profile_applied` → `unknown` bucket, BLOCKED.
@@ -523,7 +609,8 @@ Per `/adapt-strategy` (or any of the 4 adapt variants):
 
 ### Integration / regression
 
-- Existing 163 tests continue to pass.
+- All existing tests continue to pass (run the full `npm test` suite at each phase boundary; the count grows with each phase's new test files).
+- **Defensive `processSandboxes` test (already added in this branch in `apply-friction.test.mjs`):** stale pre-existing `.friction.json` is always overwritten by `processSandboxes`. This dead-ends any future reviewer concern about "old friction files without `profile_applied` blocking the significance gate" — the design assumes friction files are regenerated every adapt run.
 - `adapt-strategy` SKILL.md and friends — sanity check that file-level grep for each new step heading returns exactly one match.
 
 ## Error Handling
@@ -544,14 +631,15 @@ Per `/adapt-strategy` (or any of the 4 adapt variants):
 
 ## Limitations and Honest Caveats
 
-1. **3-bucket SPY-only classifier is crude.** Many days that a richer model would split into "ranging-bullish" vs "ranging-bearish" all collapse into `chop`. Acceptable tradeoff for v1 simplicity; adding VIX or a vol-spike overlay is mechanical when needed.
+1. **3-bucket SPY-only classifier is still crude even with the slope tiebreaker.** A genuinely two-sided volatile market (large moves up and down within the same week) gets labeled by the dominant 20-day return rather than the volatility itself. Adding VIX or a vol-spike overlay is mechanical when needed.
 2. **Classifier may disagree with `macro-regime-detector` skill.** They use different inputs and different taxonomies. This is by design — the on-the-fly classifier is for reproducible trade-tagging across history, not macro analysis.
 3. **Heuristic asset-class tagging of proposals can misfire.** Some rules genuinely span asset classes ("no entries on FOMC day"). The catch-all rule ("affects all currently traded") is conservative — proposal blocked unless ALL tagged categories clear. May be too strict in edge cases; tune as we observe.
 4. **Significance gate is "category-local" but proposals can have cross-category effects.** A "max concurrent positions = 8" rule affects every category but is tagged with whichever is currently traded. If only options are traded but a stock category opens later, the rule still applies. Documented in tagging table.
-5. **Gross-exposure denominator may understate drawdown** when many small positions are open vs few large ones. The OR-gate with losing-trades count partially compensates.
+5. **Iron-condor exposure depends on `wing_width` being either written by Harvest or derivable from a symbol table.** If Harvest later trades a non-table underlying (e.g., adds SLV to the universe) without writing `wing_width` to `market_data`, the fallback path applies a crude 10x multiplier on entry price and emits a stderr warning. Production tuning: ask the Go agent to write `wing_width` and `theoretical_credit` into `market_data` (small follow-up, not gating this spec).
 6. **Three new failure modes during adapt runs** (FMP outage, regime cache corruption, stress-config malformed). Each fails-soft into a clearly-tagged degraded mode rather than blocking the whole adapt cycle.
 7. **Stress test is read-only.** It doesn't feed into the adapt verdicts — a strategy can fail stress and still pass hold-out and get APPROVED. A future "stress hold-out verdict" extension would tighten this further.
 8. **REGIME WARNING only annotates, never auto-rejects.** At current sample size, auto-rejection would be too restrictive. Revisit if trade counts grow.
+9. **`regime_warning` requires `trades_affected ≥ 5` to fire.** Below this floor, the affected/baseline comparison is itself too noisy to be reliable, so the envelope emits `regime_warning_skipped: "insufficient_sample"` instead. This means many small-sample proposals (typical at current hold-out size of 12-15 trades) won't get a regime signal at all — explicit absence of signal is more honest than a misleading false positive.
 
 ## Out of Scope (Explicit YAGNI)
 
@@ -565,3 +653,4 @@ Per `/adapt-strategy` (or any of the 4 adapt variants):
 - Extracting the asset-class tagging table into config (skill-prompt table is small and rarely edited).
 - Surfacing regime composition in `review-performance` skills *as a gating signal* (informational only at v1).
 - Bringing the Go agent into the loop for live regime tagging at trade time (out of scope; classifier here is post-hoc).
+- Asking Harvest to write `wing_width` and `theoretical_credit` into `market_data` for iron condors (small Go-side follow-up that would let us drop the symbol-table fallback; tracked as a separate task).
