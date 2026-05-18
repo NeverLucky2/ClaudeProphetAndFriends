@@ -142,3 +142,42 @@ test('computeStockFriction: missing size -> throws clear error', () => {
   const action = { market_data: { entry_price: 100, exit_price: 102 } };
   assert.throws(() => computeStockFriction(action, STOCK_PROFILE, false), /size/);
 });
+
+import { computePennyFriction } from './apply-friction.mjs';
+
+const PENNY_PROFILE = {
+  per_share_slippage_usd: 0.01,
+  slippage_pct_of_price_floor: 0.02,
+  stop_gap_through_pct: 0.015,
+  commission_per_share: 0.0,
+  regulatory_fee_per_share: 0.0001,
+};
+
+test('computePennyFriction: $0.50 stock uses pct floor (0.02 × 0.50 = 0.01 ties with usd floor)', () => {
+  // size 1000. Effective per-share = max(0.01, 0.02 × 0.5) = 0.01.
+  // Slippage: 0.01 × 1000 × 2 = 20. Reg fees: 0.0001 × 1000 × 2 = 0.2.
+  const action = { market_data: { entry_price: 0.5, exit_price: 0.52, size: 1000 } };
+  const result = computePennyFriction(action, PENNY_PROFILE, false);
+  assert.equal(result.haircut_total_usd, 20.2);
+});
+
+test('computePennyFriction: $0.05 stock (pct floor 0.02 × 0.05 = 0.001 < 0.01, so usd 0.01 wins)', () => {
+  // Effective = max(0.01, 0.001) = 0.01. Slippage: 0.01 × 1000 × 2 = 20.
+  const action = { market_data: { entry_price: 0.05, exit_price: 0.06, size: 1000 } };
+  const result = computePennyFriction(action, PENNY_PROFILE, false);
+  assert.equal(result.haircut_breakdown.slippage, 20);
+});
+
+test('computePennyFriction: $2 stock — pct floor wins (0.02 × 2 = 0.04 > 0.01)', () => {
+  // Effective = max(0.01, 0.04) = 0.04. Slippage: 0.04 × 1000 × 2 = 80.
+  const action = { market_data: { entry_price: 2.0, exit_price: 2.1, size: 1000 } };
+  const result = computePennyFriction(action, PENNY_PROFILE, false);
+  assert.equal(result.haircut_breakdown.slippage, 80);
+});
+
+test('computePennyFriction: stop-out uses wider gap-through (0.015)', () => {
+  const action = { market_data: { entry_price: 2.0, exit_price: 1.5, size: 1000 } };
+  const result = computePennyFriction(action, PENNY_PROFILE, true);
+  // Stop gap: 0.015 × 2.0 × 1000 = 30.
+  assert.equal(result.haircut_breakdown.stop_gap_through, 30);
+});

@@ -62,3 +62,31 @@ export function computeStockFriction(action, profile, stopOut) {
     haircut_breakdown: { slippage, regulatory_fees, commissions, stop_gap_through },
   };
 }
+
+export function computePennyFriction(action, profile, stopOut) {
+  const md = action?.market_data ?? {};
+  const { entry_price, size } = md;
+  if (typeof size !== 'number') {
+    throw new Error(`computePennyFriction: missing market_data.size on action ${action?.symbol}`);
+  }
+  if (typeof entry_price !== 'number') {
+    throw new Error(`computePennyFriction: missing market_data.entry_price on action ${action?.symbol}`);
+  }
+
+  const effectiveSlippagePerShare = Math.max(
+    profile.per_share_slippage_usd,
+    profile.slippage_pct_of_price_floor * entry_price,
+  );
+  const slippage = effectiveSlippagePerShare * size * 2;
+  const regulatory_fees = profile.regulatory_fee_per_share * size * 2;
+  const commissions = (profile.commission_per_share ?? 0) * size * 2;
+  const stop_gap_through = stopOut
+    ? profile.stop_gap_through_pct * entry_price * size
+    : 0;
+
+  const haircut_total_usd = +(slippage + regulatory_fees + commissions + stop_gap_through).toFixed(4);
+  return {
+    haircut_total_usd,
+    haircut_breakdown: { slippage, regulatory_fees, commissions, stop_gap_through },
+  };
+}
