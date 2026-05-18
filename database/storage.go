@@ -386,9 +386,21 @@ func (s *LocalStorage) SaveSignal(symbol, signalType, strategyName, reason strin
 	return nil
 }
 
-// SaveManagedPosition saves a managed position to the database
+// SaveManagedPosition upserts a managed position keyed on PositionID. The
+// caller (services.PositionManager.managedPositionToDB) builds a fresh
+// DBManagedPosition struct on every save without the GORM primary key — and
+// db.Save() with no PK INSERTs, which trips the uniqueIndex on PositionID for
+// the second and later writes. Pre-fix, those failures were logged at warn
+// and ignored: when an entry order filled, the in-memory position was marked
+// ACTIVE and the DB-side update silently dropped, leaving the row stuck in
+// PENDING. That state mismatch is what produced Spark's 2026-05-18 Beat-Context
+// misread (get_managed_positions returned 0 while the broker held LAND).
+// Upsert on PositionID so subsequent saves update in place.
 func (s *LocalStorage) SaveManagedPosition(position *models.DBManagedPosition) error {
-	result := s.db.Save(position)
+	result := s.db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "position_id"}},
+		UpdateAll: true,
+	}).Create(position)
 	if result.Error != nil {
 		return fmt.Errorf("failed to save managed position: %w", result.Error)
 	}

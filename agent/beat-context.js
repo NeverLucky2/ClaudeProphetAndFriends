@@ -8,14 +8,25 @@ export function renderBeatContextBlock(ctx) {
     const a = ctx.account;
     lines.push(`Portfolio: $${a.portfolio_value.toLocaleString()} | Cash: $${(a.cash ?? 0).toLocaleString()} | Buying Power: $${(a.buying_power ?? 0).toLocaleString()}`);
   }
+  // When a strategy filter was applied to the request (segment_pnl.strategy
+  // present), label the positions header so the agent knows the list is
+  // YOUR strategy's positions, not all broker positions. On 2026-05-18 Spark
+  // saw LAND under an unlabeled "Positions:" header, assumed it was a foreign
+  // broker position because get_managed_positions had returned 0 (separate
+  // PENDING/ACTIVE bug), and walked away from a position it should have
+  // managed. Explicit attribution closes that reasoning gap.
+  const strategyTag = ctx.segment_pnl && ctx.segment_pnl.strategy ? ctx.segment_pnl.strategy : '';
+  const positionsHeader = strategyTag
+    ? `Positions (your ${strategyTag} positions, attributed via order tag):`
+    : 'Positions:';
   if (Array.isArray(ctx.positions) && ctx.positions.length > 0) {
-    lines.push('Positions:');
+    lines.push(positionsHeader);
     for (const p of ctx.positions) {
       const sign = p.unrealized_pnl_pct >= 0 ? '+' : '';
       lines.push(`  - ${p.symbol}: ${p.qty} sh, P&L ${sign}${(p.unrealized_pnl_pct ?? 0).toFixed(1)}% ($${(p.unrealized_pnl ?? 0).toFixed(2)})`);
     }
   } else if (Array.isArray(ctx.positions)) {
-    lines.push('Positions: none');
+    lines.push(strategyTag ? `Positions (your ${strategyTag} positions): none` : 'Positions: none');
   }
   if (ctx.econ_blackout) {
     lines.push(`Econ Blackout: ${ctx.econ_blackout.is_blackout ? 'YES — ' + (ctx.econ_blackout.reason || 'unspecified') : 'no'}`);

@@ -8,6 +8,7 @@ import (
 	"prophet-trader/database"
 	"prophet-trader/interfaces"
 	"prophet-trader/models"
+	"strings"
 	"sync"
 	"time"
 
@@ -403,32 +404,139 @@ func (pm *PositionManager) checkEntryOrder(ctx context.Context, position *Manage
 			"fill_price":  position.EntryPrice,
 		}).Info("Entry order filled - position now active")
 
-		// Place risk management orders
+		// Place risk management orders. placeRiskOrders may mutate
+		// position.Status (e.g. to FAILED after auto-flatten), so save
+		// AFTER it returns and surface persistence errors loudly — a
+		// silent save failure here is what produced Spark's
+		// PENDING-in-DB / ACTIVE-in-memory drift on 2026-05-18.
 		pm.placeRiskOrders(ctx, position)
 
-		// Save to database
-		pm.savePositionToDB(position)
+		if err := pm.savePositionToDB(position); err != nil {
+			pm.logger.WithError(err).WithFields(logrus.Fields{
+				"position_id":              position.ID,
+				"symbol":                   position.Symbol,
+				"status":                   position.Status,
+				"operator_review_required": true,
+			}).Error("Failed to persist position state after entry fill — broker/DB out of sync")
+		}
 	}
 }
 
-// placeRiskOrders places stop loss and take profit orders
+// placeRiskOrders places stop loss and take profit orders.
+//
+// Stop-loss failure is a CAPITAL-PROTECTION emergency: the entry already
+// filled, the position is exposed, and the agent's stop is the only thing
+// between us and an open-ended loss. We retry once (in case the first attempt
+// hit a transient broker error), then auto-flatten via market sell if the
+// retry also fails. Without this guard, a sub-penny rejection (or any other
+// stop-placement error) leaves an unmanaged position with no risk control —
+// exactly what happened to Spark's LAND on 2026-05-18.
+//
+// Take-profit and partial-exit failures are non-fatal: the position retains
+// stop protection and can be managed/exited by the agent. We log loudly but
+// don't force-close — those are profit-side orders, not survival orders.
 func (pm *PositionManager) placeRiskOrders(ctx context.Context, position *ManagedPosition) {
-	// Place stop loss order
 	if err := pm.placeStopLossOrder(ctx, position); err != nil {
-		pm.logger.WithError(err).Error("Failed to place stop loss order")
-	}
+		pm.logger.WithError(err).WithFields(logrus.Fields{
+			"position_id": position.ID,
+			"symbol":      position.Symbol,
+			"stop_price":  position.StopLossPrice,
+		}).Warn("Stop loss placement failed on first attempt — retrying once")
 
-	// Place take profit order
-	if err := pm.placeTakeProfitOrder(ctx, position); err != nil {
-		pm.logger.WithError(err).Error("Failed to place take profit order")
-	}
-
-	// Place partial exit order if configured
-	if position.PartialExit != nil && position.PartialExit.Enabled {
-		if err := pm.placePartialExitOrder(ctx, position); err != nil {
-			pm.logger.WithError(err).Error("Failed to place partial exit order")
+		// Second attempt. placeStopLossOrder rounds defensively each call,
+		// so a sub-penny issue self-heals; this retry covers transient
+		// broker errors that wouldn't.
+		if err := pm.placeStopLossOrder(ctx, position); err != nil {
+			pm.logger.WithError(err).WithFields(logrus.Fields{
+				"position_id":              position.ID,
+				"symbol":                   position.Symbol,
+				"stop_price":               position.StopLossPrice,
+				"operator_review_required": true,
+			}).Error("Stop loss placement failed twice — auto-flattening unprotected position")
+			pm.flattenUnprotected(ctx, position, "stop_placement_failed")
+			return
 		}
 	}
+
+	if err := pm.placeTakeProfitOrder(ctx, position); err != nil {
+		pm.logger.WithError(err).WithFields(logrus.Fields{
+			"position_id": position.ID,
+			"symbol":      position.Symbol,
+		}).Warn("Failed to place take profit order — position remains protected by stop")
+	}
+
+	if position.PartialExit != nil && position.PartialExit.Enabled {
+		if err := pm.placePartialExitOrder(ctx, position); err != nil {
+			pm.logger.WithError(err).WithFields(logrus.Fields{
+				"position_id": position.ID,
+				"symbol":      position.Symbol,
+			}).Warn("Failed to place partial exit order")
+		}
+	}
+}
+
+// flattenUnprotected closes a position whose risk-management bracket could
+// not be established. Marks the position FAILED, places a tagged market sell
+// for the remaining quantity, and persists the new state. Used when stop-loss
+// placement fails (either at initial bracket setup or during a trailing-stop
+// replacement after the old stop has been canceled).
+func (pm *PositionManager) flattenUnprotected(ctx context.Context, position *ManagedPosition, reason string) {
+	exitSide := "sell"
+	if position.Side == "sell" {
+		exitSide = "buy"
+	}
+
+	// Mark FAILED before placing the flatten order so any concurrent read
+	// (Beat Context, get_managed_positions) sees the unsafe state.
+	position.Status = "FAILED"
+	position.UpdatedAt = time.Now()
+	position.Notes = strings.TrimSpace(position.Notes + " bracket_failed_flatten:" + reason)
+	if saveErr := pm.savePositionToDB(position); saveErr != nil {
+		pm.logger.WithError(saveErr).WithField("position_id", position.ID).Error("Failed to persist FAILED status before flatten")
+	}
+
+	flattenOrder := &interfaces.Order{
+		Symbol:      position.Symbol,
+		Qty:         position.RemainingQty,
+		Side:        exitSide,
+		Type:        "market",
+		TimeInForce: "day",
+		Status:      "pending",
+		SubmittedAt: time.Now(),
+		// Tag with the owning agent's strategy so the resulting DBOrder is
+		// attributable (matches placeEntryOrder).
+		Strategy: position.AgentStrategy,
+	}
+
+	result, err := pm.tradingService.PlaceOrder(ctx, flattenOrder)
+	if err != nil {
+		pm.logger.WithError(err).WithFields(logrus.Fields{
+			"position_id":              position.ID,
+			"symbol":                   position.Symbol,
+			"operator_review_required": true,
+			"reason":                   reason,
+		}).Error("Auto-flatten ALSO failed — position is unprotected, manual intervention required")
+		return
+	}
+
+	flattenOrder.ID = result.OrderID
+	flattenOrder.Status = result.Status
+	if pm.storageService != nil {
+		if saveErr := pm.storageService.SaveOrder(flattenOrder); saveErr != nil {
+			pm.logger.WithError(saveErr).WithFields(logrus.Fields{
+				"position_id": position.ID,
+				"order_id":    result.OrderID,
+			}).Warn("Failed to save flatten order to database")
+		}
+	}
+
+	pm.logger.WithFields(logrus.Fields{
+		"position_id":  position.ID,
+		"symbol":       position.Symbol,
+		"order_id":     result.OrderID,
+		"quantity":     position.RemainingQty,
+		"reason":       reason,
+	}).Info("Unprotected position auto-flattened")
 }
 
 // placeStopLossOrder places or updates stop loss order
@@ -437,6 +545,11 @@ func (pm *PositionManager) placeStopLossOrder(ctx context.Context, position *Man
 	if position.Side == "sell" {
 		exitSide = "buy"
 	}
+
+	// Defensive: snap to tick before sending. The calculator already rounds
+	// at construction time, but trailing-stop updates, manual overrides, and
+	// DB-loaded positions from before this fix can carry sub-penny values.
+	position.StopLossPrice = roundToTick(position.StopLossPrice)
 
 	order := &interfaces.Order{
 		Symbol:      position.Symbol,
@@ -470,6 +583,9 @@ func (pm *PositionManager) placeTakeProfitOrder(ctx context.Context, position *M
 	if position.Side == "sell" {
 		exitSide = "buy"
 	}
+
+	// Defensive: snap to tick before sending (see placeStopLossOrder).
+	position.TakeProfitPrice = roundToTick(position.TakeProfitPrice)
 
 	order := &interfaces.Order{
 		Symbol:      position.Symbol,
@@ -505,6 +621,9 @@ func (pm *PositionManager) placePartialExitOrder(ctx context.Context, position *
 	}
 
 	partialQty := position.Quantity * (position.PartialExit.Percent / 100.0)
+
+	// Defensive: snap to tick before sending (see placeStopLossOrder).
+	position.PartialExit.TargetPrice = roundToTick(position.PartialExit.TargetPrice)
 
 	order := &interfaces.Order{
 		Symbol:      position.Symbol,
@@ -581,16 +700,25 @@ func (pm *PositionManager) manageRiskOrders(ctx context.Context, position *Manag
 func (pm *PositionManager) updateTrailingStop(ctx context.Context, position *ManagedPosition) {
 	if position.Side == "buy" {
 		// For long positions, raise stop as price rises
-		newStopPrice := position.CurrentPrice * (1 - position.TrailingPercent/100.0)
+		newStopPrice := roundToTick(position.CurrentPrice * (1 - position.TrailingPercent/100.0))
 		if newStopPrice > position.StopLossPrice {
 			// Cancel old stop loss order
 			if position.StopLossOrderID != "" {
 				pm.tradingService.CancelOrder(ctx, position.StopLossOrderID)
 			}
 
-			// Update stop price and place new order
+			// Update stop price and place new order. If the replacement
+			// stop fails, the position is now unprotected (old stop already
+			// canceled) — flatten via market sell rather than leave it open.
 			position.StopLossPrice = newStopPrice
-			pm.placeStopLossOrder(ctx, position)
+			if err := pm.placeStopLossOrder(ctx, position); err != nil {
+				pm.logger.WithError(err).WithFields(logrus.Fields{
+					"position_id": position.ID,
+					"symbol":      position.Symbol,
+				}).Error("Trailing-stop replacement failed — auto-flattening unprotected position")
+				pm.flattenUnprotected(ctx, position, "trailing_stop_replacement_failed")
+				return
+			}
 
 			pm.logger.WithFields(logrus.Fields{
 				"position_id":    position.ID,
@@ -599,14 +727,21 @@ func (pm *PositionManager) updateTrailingStop(ctx context.Context, position *Man
 		}
 	} else {
 		// For short positions, lower stop as price falls
-		newStopPrice := position.CurrentPrice * (1 + position.TrailingPercent/100.0)
+		newStopPrice := roundToTick(position.CurrentPrice * (1 + position.TrailingPercent/100.0))
 		if newStopPrice < position.StopLossPrice {
 			if position.StopLossOrderID != "" {
 				pm.tradingService.CancelOrder(ctx, position.StopLossOrderID)
 			}
 
 			position.StopLossPrice = newStopPrice
-			pm.placeStopLossOrder(ctx, position)
+			if err := pm.placeStopLossOrder(ctx, position); err != nil {
+				pm.logger.WithError(err).WithFields(logrus.Fields{
+					"position_id": position.ID,
+					"symbol":      position.Symbol,
+				}).Error("Trailing-stop replacement failed — auto-flattening unprotected position")
+				pm.flattenUnprotected(ctx, position, "trailing_stop_replacement_failed")
+				return
+			}
 
 			pm.logger.WithFields(logrus.Fields{
 				"position_id":    position.ID,
@@ -833,34 +968,48 @@ func (pm *PositionManager) calculateQuantity(allocation, price float64) float64 
 
 func (pm *PositionManager) calculateStopLoss(entryPrice float64, stopPrice *float64, stopPercent *float64, side string) float64 {
 	if stopPrice != nil {
-		return *stopPrice
+		return roundToTick(*stopPrice)
 	}
 
 	if side == "buy" {
-		return entryPrice * (1 - *stopPercent/100.0)
+		return roundToTick(entryPrice * (1 - *stopPercent/100.0))
 	}
 
-	return entryPrice * (1 + *stopPercent/100.0)
+	return roundToTick(entryPrice * (1 + *stopPercent/100.0))
 }
 
 func (pm *PositionManager) calculateTakeProfit(entryPrice float64, profitPrice *float64, profitPercent *float64, side string) float64 {
 	if profitPrice != nil {
-		return *profitPrice
+		return roundToTick(*profitPrice)
 	}
 
 	if side == "buy" {
-		return entryPrice * (1 + *profitPercent/100.0)
+		return roundToTick(entryPrice * (1 + *profitPercent/100.0))
 	}
 
-	return entryPrice * (1 - *profitPercent/100.0)
+	return roundToTick(entryPrice * (1 - *profitPercent/100.0))
 }
 
 func (pm *PositionManager) calculatePartialExitPrice(entryPrice, targetPercent float64, side string) float64 {
 	if side == "buy" {
-		return entryPrice * (1 + targetPercent/100.0)
+		return roundToTick(entryPrice * (1 + targetPercent/100.0))
 	}
 
-	return entryPrice * (1 - targetPercent/100.0)
+	return roundToTick(entryPrice * (1 - targetPercent/100.0))
+}
+
+// roundToTick snaps a price to Alpaca's minimum increment so stop / limit
+// orders don't get rejected with HTTP 422 code 42210000 ("sub-penny increment
+// does not fulfill minimum pricing criteria"). Per Alpaca: stocks priced at or
+// above $1.00 must trade in $0.01 increments; below $1.00 they may use up to
+// $0.0001. We round (not floor) to keep the price within the intended buffer
+// — a long-side stop snapped down would widen the loss; snapped up tightens
+// it; the symmetric round-half-to-even policy is a wash on average.
+func roundToTick(price float64) float64 {
+	if price < 1.0 {
+		return math.Round(price*10000) / 10000
+	}
+	return math.Round(price*100) / 100
 }
 
 func (pm *PositionManager) generatePositionID() string {
