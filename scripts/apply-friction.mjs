@@ -4,6 +4,7 @@
 
 import { createHash } from 'node:crypto';
 import { readFileSync, existsSync } from 'node:fs';
+import * as defaultFs from 'node:fs';
 
 const OCC_SYMBOL = /^[A-Z]{1,6}\d{6}[CP]\d{8}$/;
 const IC_MARKERS = ['iron condor', 'ic ', ' ic', '4-leg', '4 leg'];
@@ -236,4 +237,17 @@ export function loadFrictionConfig(path) {
     }
   }
   return parsed;
+}
+
+export function writeAtomic(path, content, fsImpl = defaultFs) {
+  const tmp = `${path}.tmp`;
+  fsImpl.writeFileSync(tmp, content);
+  try {
+    fsImpl.renameSync(tmp, path);
+  } catch (err) {
+    if (fsImpl.existsSync(tmp)) {
+      try { fsImpl.unlinkSync(tmp); } catch { /* best effort */ }
+    }
+    throw err;
+  }
 }

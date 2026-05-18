@@ -371,3 +371,54 @@ test('loadFrictionConfig: malformed file (missing profiles) throws', () => {
     /missing required profile/i,
   );
 });
+
+import { writeAtomic } from './apply-friction.mjs';
+
+function makeMockFs(opts = {}) {
+  const writes = [];
+  const renames = [];
+  const removes = [];
+  const writeFileSync = (path, content) => {
+    if (opts.writeShouldThrow) throw new Error('disk full');
+    writes.push({ path, content });
+  };
+  const renameSync = (from, to) => {
+    if (opts.renameShouldThrow) throw new Error('rename failed');
+    renames.push({ from, to });
+  };
+  const unlinkSync = (path) => { removes.push(path); };
+  const existsSync = () => false; // No leftover tmp at start
+  return { mock: { writeFileSync, renameSync, unlinkSync, existsSync }, writes, renames, removes };
+}
+
+test('writeAtomic: writes to .tmp then renames', () => {
+  const { mock, writes, renames } = makeMockFs();
+  writeAtomic('/path/to/file.json', '{"a":1}', mock);
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].path, '/path/to/file.json.tmp');
+  assert.equal(writes[0].content, '{"a":1}');
+  assert.equal(renames.length, 1);
+  assert.deepEqual(renames[0], { from: '/path/to/file.json.tmp', to: '/path/to/file.json' });
+});
+
+test('writeAtomic: if rename throws, attempts to clean up the tmp file', () => {
+  // existsSync needs to return true for the unlink to be attempted.
+  const fs = {
+    writeFileSync: () => {},
+    renameSync: () => { throw new Error('rename failed'); },
+    existsSync: () => true,
+    unlinkSync: () => {},
+  };
+  const removes = [];
+  fs.unlinkSync = (p) => { removes.push(p); };
+  assert.throws(() => writeAtomic('/path/to/file.json', '{}', fs), /rename failed/);
+  assert.deepEqual(removes, ['/path/to/file.json.tmp']);
+});
+
+test('writeAtomic: if write throws, does not rename and does not leave stale tmp', () => {
+  const { mock, renames, removes } = makeMockFs({ writeShouldThrow: true });
+  assert.throws(() => writeAtomic('/path/to/file.json', '{}', mock), /disk full/);
+  assert.equal(renames.length, 0);
+  // Write failed before tmp existed → no cleanup needed (existsSync returned false in mock)
+  assert.equal(removes.length, 0);
+});
