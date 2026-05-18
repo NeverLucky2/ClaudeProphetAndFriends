@@ -3,6 +3,7 @@
 // docs/superpowers/specs/2026-05-17-friction-and-walkforward-design.md
 
 import { createHash } from 'node:crypto';
+import { readFileSync, existsSync } from 'node:fs';
 
 const OCC_SYMBOL = /^[A-Z]{1,6}\d{6}[CP]\d{8}$/;
 const IC_MARKERS = ['iron condor', 'ic ', ' ic', '4-leg', '4 leg'];
@@ -212,4 +213,27 @@ export function applyFriction(action, agentId, config) {
 
   const sign_flip_warning = raw_pl > 0 && friction_adjusted_pl < 0;
   return sign_flip_warning ? { action: augmented, sign_flip_warning: true } : { action: augmented };
+}
+
+const REQUIRED_PROFILES = ['stocks', 'penny_stocks', 'single_leg_options', 'iron_condor'];
+
+export function loadFrictionConfig(path) {
+  if (!existsSync(path)) {
+    throw new Error(`friction config not found at ${path}. See docs/superpowers/specs/2026-05-17-friction-and-walkforward-design.md for the required schema.`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(path, 'utf8'));
+  } catch (err) {
+    throw new Error(`friction config at ${path} is not valid JSON: ${err.message}`);
+  }
+  if (typeof parsed.version !== 'string') {
+    throw new Error(`friction config at ${path} is missing required string field "version"`);
+  }
+  for (const key of REQUIRED_PROFILES) {
+    if (!parsed[key] || typeof parsed[key] !== 'object') {
+      throw new Error(`friction config at ${path} is missing required profile "${key}"`);
+    }
+  }
+  return parsed;
 }

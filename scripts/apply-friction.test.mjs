@@ -341,3 +341,33 @@ test('applyFriction: raw_pl falls back to (exit-entry)×size×100 for options', 
   const result = applyFriction(action, 'default', FULL_CONFIG);
   assert.equal(result.action.market_data.raw_pl, 200);
 });
+
+import { loadFrictionConfig } from './apply-friction.mjs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const FIX_DIR = join(__dirname, 'test-fixtures');
+
+test('loadFrictionConfig: valid file returns parsed config with all profiles', () => {
+  const cfg = loadFrictionConfig(join(FIX_DIR, 'friction-valid.json'));
+  assert.equal(cfg.version, '2026-05-17.1');
+  assert.ok(cfg.stocks);
+  assert.ok(cfg.penny_stocks);
+  assert.ok(cfg.single_leg_options);
+  assert.ok(cfg.iron_condor);
+});
+
+test('loadFrictionConfig: missing file throws with clear message', () => {
+  assert.throws(
+    () => loadFrictionConfig(join(FIX_DIR, 'nonexistent.json')),
+    /friction config.*not found/i,
+  );
+});
+
+test('loadFrictionConfig: malformed file (missing profiles) throws', () => {
+  assert.throws(
+    () => loadFrictionConfig(join(FIX_DIR, 'friction-malformed.json')),
+    /missing required profile/i,
+  );
+});
