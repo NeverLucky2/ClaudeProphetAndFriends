@@ -681,6 +681,13 @@
     }
     .terminal::-webkit-scrollbar { width: 4px; }
     .terminal::-webkit-scrollbar-thumb { background: var(--rule); }
+    .terminal-area {
+      position: relative;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
     .jump-bottom-btn {
       position: absolute;
       bottom: 12px;
@@ -2765,15 +2772,15 @@ function attachTerminalScrollControls(sandboxId) {
 
   t.autoScroll = true;
 
-  const splitEl = t.el.querySelector('.terminal-split');
-  if (!splitEl) return;
+  const areaEl = t.el.querySelector('.terminal-area');
+  if (!areaEl) return;
 
   const btn = document.createElement('button');
   btn.className = 'jump-bottom-btn';
   btn.type = 'button';
   btn.title = 'Jump to bottom';
   btn.innerHTML = '&#8595; Jump to bottom';
-  splitEl.appendChild(btn);
+  areaEl.appendChild(btn);
   t.jumpBtn = btn;
 
   t.termEl.addEventListener('scroll', () => {
@@ -2813,8 +2820,10 @@ function ensureSandboxTerminal(sandboxId, label) {
       <button class="btn-clear" onclick="document.querySelector('[data-search=${sandboxId}]').value='';filterTerminalFor('${sandboxId}')" title="Clear">Clear</button>
     </div>
     <div class="terminal-split">
-      <div class="terminal" data-terminal="${sandboxId}">
-        <div class="log-entry info"><span class="time">--:--:--</span>${esc(label)} ready. Press Start to begin.</div>
+      <div class="terminal-area">
+        <div class="terminal" data-terminal="${sandboxId}">
+          <div class="log-entry info"><span class="time">--:--:--</span>${esc(label)} ready. Press Start to begin.</div>
+        </div>
       </div>
       <div class="sidebar">
         <div class="section">
@@ -2942,9 +2951,10 @@ function ensureManagerTerminal() {
     + '<button class="btn sm primary" onclick="saveManagerPrompt()" style="margin-top:4px;font-size:10px">Save</button>'
     + '</div>'
     + '<div class="terminal-split">'
+    + '<div class="terminal-area">'
     + '<div class="terminal" data-terminal="_manager" style="flex:1">'
     + '<div class="log-entry info"><span class="time">--:--:--</span>Manager ready. Configure agents, strategies, and research here.</div>'
-    + '</div></div>'
+    + '</div></div></div>'
     + '<div class="chat-input-bar">'
     + '<input type="text" placeholder="Ask the manager to create agents, strategies, research..." onkeydown="if(event.key===\'Enter\')sendManagerMessage()" autocomplete="off" id="manager-chat-input">'
     + '<button class="btn primary sm" onclick="sendManagerMessage()">Send</button>'
