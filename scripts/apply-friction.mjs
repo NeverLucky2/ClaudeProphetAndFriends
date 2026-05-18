@@ -4,6 +4,17 @@
 
 const OCC_SYMBOL = /^[A-Z]{1,6}\d{6}[CP]\d{8}$/;
 const IC_MARKERS = ['iron condor', 'ic ', ' ic', '4-leg', '4 leg'];
+const STOP_OUT_SUBSTRINGS = [
+  'stop hit',
+  'stopped out',
+  'stop triggered',
+  'hit my stop',
+  'hit stop',
+  'stop loss fired',
+  'sl hit',
+  'stop loss triggered',
+  'forced out',
+];
 
 export function detectAssetClass(action, agentId) {
   if (agentId === 'harvest') return 'iron_condor';
@@ -22,4 +33,11 @@ export function detectAssetClass(action, agentId) {
   }
 
   return null;
+}
+
+export function isStopOut(action) {
+  const unrealizedPct = action?.market_data?.unrealized_pct;
+  if (typeof unrealizedPct !== 'number' || unrealizedPct >= 0) return false;
+  const reasoning = (action?.reasoning ?? '').toLowerCase();
+  return STOP_OUT_SUBSTRINGS.some(s => reasoning.includes(s));
 }
