@@ -22,6 +22,14 @@ All subsequent data loading reads `*.friction.json` files in each sandbox's `dec
 
 Note: TrendProphet's authoritative P&L source is the `prophet_trader.db` ledger (Step 2c). Friction applies only to the `decisive_actions/` stream used as a fallback and for behavioral-gap analysis. The DB cohort is used as-is for realized P&L calculations in Steps 3–7.
 
+## Step 0.5 — Build regime history
+
+After the friction post-processor completes, run:
+
+`node scripts/build-regime-history.mjs --from <YYYY-MM-DD of oldest loaded trade> --to <today YYYY-MM-DD>`
+
+Report the returned `{ action, path }` to the user. If the script exits non-zero (FMP key missing, network error), continue but tag every trade `regime: "unknown"` in Step 2 and warn the user that regime composition and `regime_warning` will be unavailable this run.
+
 ## Step 1 — Load current parameters
 
 Read `TRADING_RULES_TREND.md`. Extract live values for the parameters below (these are the only knobs you may propose edits to). The values shown are the snapshot at skill-creation time — re-read on every run.
@@ -55,6 +63,9 @@ Then, for each `<DIR>` in `<TREND_DIRS>`:
 
 a. Glob `data/sandboxes/<DIR>/activity_logs/activity_*.json`. Read every file dated within the last 180 calendar days.
 b. Glob `data/sandboxes/<DIR>/decisive_actions/*.friction.json`. Merge all matched files from all `<TREND_DIRS>`, sort by file mtime descending, read the **50 most recent overall** (not 50 per sandbox). If fewer than 50 `.friction.json` files exist across all sandboxes, use what's available and note the actual count in the report. If fewer than 10 exist in total, warn the user explicitly that analysis may be premature on this little data and offer to abort.
+
+**Join regime label:** After loading each `.friction.json`, also load `data/reports/regime_history.json` (if Step 0.5 succeeded). For each trade, convert `action.timestamp` to America/New_York using `Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date(timestamp))` and look up the date in `regime_history.labels`. If the date is a weekend/holiday or otherwise missing, walk back up to 5 calendar days for the previous trading day's label. Still missing → tag the trade `regime: "unknown"`. Add the resolved label as a top-level `regime` field on each loaded record.
+
 c. Read `data/sandboxes/<DIR>/prophet_trader.db` if you can. The trend ledger is persisted to disk per `TRADING_RULES_TREND.md` "Persisted Ledger" section. Verify exact table name and column names by inspecting the schema first; expected columns:
    - ticker, entry_date, entry_price, shares, atr_at_entry, initial_stop, donchian_100_high_at_entry
    - exit_date, exit_price, exit_reason ∈ {trailing_stop, initial_hard_stop, manual, circuit_breaker}
@@ -113,6 +124,15 @@ State both counts and date ranges to the user explicitly, plus symbol concentrat
 > Adapting on N1 decisions (date1 → date2). Holding out N2 decisions (date3 → date4) for validation.
 > Adapt-set top 3 symbols: SYM1 (X%), SYM2 (Y%), SYM3 (Z%).
 > Hold-out-set top 3 symbols: SYM1 (X%), SYM2 (Y%), SYM3 (Z%).
+
+> Adapt set regime composition: X% bull-trend, Y% chop, Z% bear-trend, W% unknown
+> Hold-out set regime composition: …
+
+If any single regime ≥70% in the adapt set, append:
+
+> ⚠️ Adapt set is heavily skewed to <regime>; findings may not generalize.
+
+Compute the adapt-set regime distribution as an object `{ "bull-trend": 0.X, "chop": 0.Y, "bear-trend": 0.Z, "unknown": 0.W }` (proportions summing to 1.0) and **record it in conversation state** as `ADAPT_SET_REGIME_DISTRIBUTION` — Step 7.5 will pass this to the scorer.
 
 **Gap analysis (Steps 4–6) and proposal generation (Step 7) use ONLY the adapt set for decisive-action-derived signals.** The DB cohort from Step 2c is always used in full for realized-P&L calculations — it is not split. Do not peek at the hold-out decisive-action records during Steps 4–7; they are reserved for Step 7.5 validation.
 
@@ -174,6 +194,30 @@ For each parameter, compute the following and state the qualitative finding (BIN
 **Limit-order entry cushion (0.5% above last close)**
 - Of entries placed, how many were "missed entry — gap above limit"? If many, the cushion may be too tight; consider 0.75% or 1.0%. If none missed, no signal.
 
+## Step 5.5 — Significance gate (per asset class)
+
+Pipe the **adapt set** (NOT the hold-out) as a JSON array on stdin to:
+
+```
+node scripts/significance-gate.mjs
+```
+
+Defaults: `min_losing_trades = 5`, `min_drawdown_pct = 0.05`. Override via `--min-losses` / `--min-drawdown` if the user requests.
+
+Read the per-category result. Display this table to the user:
+
+```
+Category            Trades  Losses  Drawdown  Gate
+stocks                  N1      L1     dd1%   ✓ PASSED / ✗ BLOCKED
+single_leg_options      N2      L2     dd2%   ...
+iron_condor             N3      L3     dd3%   ...
+penny_stocks            N4      L4     dd4%   ...
+```
+
+For BLOCKED categories, also display the gate's `reason` string.
+
+**Record the per-category gate result in conversation state as `SIGNIFICANCE_GATE`.** Step 7 will use this to decide which proposals are allowed.
+
 ## Step 6 — Universe trim assessment
 
 For each ticker in [TLT, GLD, USO, DBC, UUP, EEM], decide one of:
@@ -223,6 +267,20 @@ Examples of proposals you must NOT make (these are structural, not parametric):
 
 If your evidence points at one of these, do NOT propose a parameter edit. Go to Step 8.
 
+**Asset-class tagging + significance gate check (NEW):** Before emitting each proposed edit, tag it with one or more asset-class categories based on its rule text:
+
+| Proposal text contains | Tagged as |
+|---|---|
+| "iron condor" / "IC" / "4-leg" / "credit spread" | `iron_condor` |
+| "option" / "call" / "put" / "DTE" / "delta" / OCC strike format | `single_leg_options` |
+| "penny" / explicit sub-$5 ticker mention | `penny_stocks` |
+| "stock" / "equity" / share-count language / common ticker mention | `stocks` |
+| Affects all positions equally (e.g., "max concurrent positions ≤10") | All currently-traded categories in the adapt set |
+
+If ALL tagged categories have `cleared: true` in `SIGNIFICANCE_GATE.by_category`, emit the proposal normally. Otherwise, do NOT emit the proposal — instead log:
+
+> Gap [N] skipped — proposal would affect category `<X>` which did not clear significance gate (`<reason>`).
+
 ## Step 7.5 — Validate proposed edits against hold-out (READ-ONLY, NO ITERATION)
 
 For each proposed edit from Step 7, classify it as **mechanical** (the rule maps to a supported predicate) or **qualitative** (everything else).
@@ -239,9 +297,9 @@ For each proposed edit from Step 7, classify it as **mechanical** (the rule maps
 
 For each mechanical edit, invoke the scorer (pipe the hold-out set as a JSON array on stdin):
 
-```
-echo '<HOLDOUT_JSON_ARRAY>' | node scripts/score-rule-against-holdout.mjs --predicate <name> --params '<params>'
-```
+`echo '<HOLDOUT_JSON_ARRAY>' | node scripts/score-rule-against-holdout.mjs --predicate <name> --params '<params>' --regime-history data/reports/regime_history.json --adapt-set-distribution '<ADAPT_SET_REGIME_DISTRIBUTION_JSON>'`
+
+The returned envelope may now contain a `regime_warning` field (when affected trades over-index a regime by ≥25pp vs adapt-set baseline) or `regime_warning_skipped: "insufficient_sample (need >= 5 affected trades; have N)"`. Capture both for Step 7.6.
 
 Capture the returned envelope including `verdict`, `trades_affected`, `net_pl_delta_usd`, and any `limitation_notes`.
 
@@ -251,16 +309,27 @@ For each qualitative edit, read the hold-out trades and write a one-paragraph ju
 
 ## Step 7.6 — Attach hold-out verdicts to proposals
 
-For each proposal, attach a verdict block to its display:
+For each proposal, attach a combined verdict block:
 
-> **HOLD-OUT VERDICT:** APPROVED-BY-HOLDOUT — `review_type: mechanical` — trades_affected: 3 — net_pl_delta_usd: +$145
-> Limitations: (any `limitation_notes` from the scorer)
-> ⚠️ A 12-15 trade hold-out is a sanity check, not a hypothesis test.
+```
+SIGNIFICANCE GATE: PASSED — <category> (<losses> losses, <drawdown>% dd)
+HOLD-OUT VERDICT:  <APPROVED-BY-HOLDOUT|REJECTED-BY-HOLDOUT|INCONCLUSIVE> — review_type: <mechanical|qualitative> — trades_affected: <N> — net_pl_delta_usd: <±$X>
+REGIME WARNING:    <"<text>"|none|"insufficient_sample (need >= 5 affected trades; have N)">
+FINAL:             <APPROVED|NEEDS-OVERRIDE|INCONCLUSIVE>
+```
 
-Application rules to apply in Step 10:
-- **APPROVED-BY-HOLDOUT**: user-approved proposals applied normally.
-- **REJECTED-BY-HOLDOUT**: requires explicit user override before being applied.
-- **INCONCLUSIVE**: user decides as normal — most proposals will land here at current sample size. Do not auto-reject or auto-approve.
+**FINAL precedence (first matching rule wins, evaluated top-down):**
+
+1. If SIGNIFICANCE GATE = BLOCKED → proposal was never generated, no verdict block.
+2. If HOLD-OUT VERDICT = REJECTED-BY-HOLDOUT → `FINAL: NEEDS-OVERRIDE` (user can apply with explicit confirmation).
+3. If REGIME WARNING is present (not "none" and not "insufficient_sample") → `FINAL: NEEDS-OVERRIDE`.
+4. If HOLD-OUT VERDICT = INCONCLUSIVE → `FINAL: INCONCLUSIVE`.
+5. Otherwise (SIGNIFICANCE=PASSED, HOLD-OUT=APPROVED, no regime warning) → `FINAL: APPROVED`.
+
+Application rules in Step 10:
+- `APPROVED`: applied if the user approves it in Step 9.
+- `NEEDS-OVERRIDE`: user must explicitly confirm before it is applied.
+- `INCONCLUSIVE`: user decides as normal.
 
 ## Step 8 — Structural escalation (do NOT silently change structure)
 

@@ -1,5 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { join } from 'node:path';
+import { writeFileSync, rmSync } from 'node:fs';
 
 import { buildVerdict, scoreMaxPositionSizePct, scoreStopAtPct, scoreMaxConcurrentPositions, scoreNoReentryWithinHours, scoreDteBounds } from './score-rule-against-holdout.mjs';
 
@@ -253,4 +255,136 @@ test('SUPPORTED_PREDICATES contains the 5 starter predicates', () => {
     'no_reentry_within_hours',
     'stop_at_pct',
   ]);
+});
+
+import { etDateFromTimestamp, lookupRegime, joinRegimeToTrades, computeRegimeAnnotations } from './score-rule-against-holdout.mjs';
+
+test('etDateFromTimestamp: Friday 17:00 ET in DST -> Friday', () => {
+  // 2026-05-15T21:00:00Z = Friday 17:00 ET (DST is on)
+  assert.equal(etDateFromTimestamp('2026-05-15T21:00:00.000Z'), '2026-05-15');
+});
+
+test('etDateFromTimestamp: Friday 21:00 ET in DST (next UTC day) -> Friday', () => {
+  // 2026-05-16T01:00:00Z = Friday 21:00 ET DST
+  assert.equal(etDateFromTimestamp('2026-05-16T01:00:00.000Z'), '2026-05-15');
+});
+
+test('etDateFromTimestamp: malformed timestamp -> null', () => {
+  assert.equal(etDateFromTimestamp('not-a-date'), null);
+});
+
+test('lookupRegime: direct hit', () => {
+  const labels = { '2026-05-14': 'chop', '2026-05-15': 'bull-trend' };
+  assert.equal(lookupRegime('2026-05-15', labels), 'bull-trend');
+});
+
+test('lookupRegime: walks back across weekend to last trading day', () => {
+  const labels = { '2026-05-15': 'bull-trend' }; // Friday
+  // 2026-05-17 = Sunday; should walk back to Friday
+  assert.equal(lookupRegime('2026-05-17', labels), 'bull-trend');
+});
+
+test('lookupRegime: walk-back limited to 5 calendar days', () => {
+  const labels = { '2026-05-10': 'bull-trend' };
+  // 2026-05-20 is 10 days later -> exceeds 5-day cap -> unknown
+  assert.equal(lookupRegime('2026-05-20', labels), null);
+});
+
+test('joinRegimeToTrades: tags each trade with regime field', () => {
+  const labels = { '2026-05-15': 'bull-trend', '2026-05-14': 'chop' };
+  const trades = [
+    { symbol: 'A', timestamp: '2026-05-15T15:00:00Z', market_data: {} },
+    { symbol: 'B', timestamp: '2026-05-14T19:00:00Z', market_data: {} },
+    { symbol: 'C', timestamp: '2026-04-01T15:00:00Z', market_data: {} }, // unknown
+  ];
+  const out = joinRegimeToTrades(trades, labels);
+  assert.equal(out[0].regime, 'bull-trend');
+  assert.equal(out[1].regime, 'chop');
+  assert.equal(out[2].regime, 'unknown');
+});
+
+test('computeRegimeAnnotations: trades_affected < 5 -> regime_warning_skipped', () => {
+  const affected = [
+    { regime: 'bull-trend' }, { regime: 'bull-trend' }, { regime: 'bull-trend' },
+  ];
+  const result = computeRegimeAnnotations(affected, { 'bull-trend': 0.5, chop: 0.4, 'bear-trend': 0.1 });
+  assert.equal(result.regime_warning_skipped, 'insufficient_sample (need >= 5 affected trades; have 3)');
+  assert.equal(result.regime_warning, undefined);
+});
+
+test('computeRegimeAnnotations: >= 5 affected, over-index >= 25pp -> regime_warning', () => {
+  const affected = [
+    { regime: 'bull-trend' }, { regime: 'bull-trend' }, { regime: 'bull-trend' },
+    { regime: 'bull-trend' }, { regime: 'bull-trend' }, { regime: 'bull-trend' },
+  ];
+  // adapt set is 60% bull, 30% chop, 10% bear; affected is 100% bull -> 40pp over-index
+  const result = computeRegimeAnnotations(affected, { 'bull-trend': 0.6, chop: 0.3, 'bear-trend': 0.1 });
+  assert.match(result.regime_warning, /100% bull-trend/);
+  assert.match(result.regime_warning, /60%/);
+  assert.match(result.regime_warning, /40pp/);
+  assert.equal(result.regime_warning_skipped, undefined);
+});
+
+test('computeRegimeAnnotations: >= 5 affected, no over-index -> neither field present', () => {
+  const affected = [
+    { regime: 'bull-trend' }, { regime: 'bull-trend' }, { regime: 'bull-trend' },
+    { regime: 'bull-trend' }, { regime: 'chop' }, { regime: 'chop' },
+  ];
+  // adapt is 60% bull, 30% chop, 10% bear; affected is 67% bull, 33% chop -> +7pp/+3pp, no warning
+  const result = computeRegimeAnnotations(affected, { 'bull-trend': 0.6, chop: 0.3, 'bear-trend': 0.1 });
+  assert.equal(result.regime_warning, undefined);
+  assert.equal(result.regime_warning_skipped, undefined);
+});
+
+test('computeRegimeAnnotations: unknown regime trades excluded from both sides', () => {
+  const affected = [
+    { regime: 'bull-trend' }, { regime: 'bull-trend' }, { regime: 'bull-trend' },
+    { regime: 'bull-trend' }, { regime: 'bull-trend' }, { regime: 'unknown' },
+  ];
+  // Excluding unknown: 5 bull, denominator 5. adapt-set excluded? No -- we just use the provided baseline.
+  const result = computeRegimeAnnotations(affected, { 'bull-trend': 0.5, chop: 0.5 });
+  // Affected: 100% bull (excluding unknown). adapt: 50% bull -> +50pp.
+  assert.match(result.regime_warning, /50pp/);
+});
+
+test('computeRegimeAnnotations: 0 affected -> no warning either way', () => {
+  const result = computeRegimeAnnotations([], { 'bull-trend': 0.6 });
+  assert.equal(result.regime_warning, undefined);
+  assert.equal(result.regime_warning_skipped, undefined);
+});
+
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { dirname } from 'node:path';
+
+test('CLI: --regime-history + --adapt-set-distribution produce regime_warning when over-indexed', async () => {
+  // Build a 6-trade hold-out where all 6 exceed the position-size limit AND all happen on bull-trend days.
+  const trades = [];
+  for (let i = 0; i < 6; i += 1) {
+    trades.push({
+      action: 'BUY',
+      symbol: 'X', timestamp: `2026-05-1${i}T15:00:00Z`,
+      market_data: { entry_price: 100, size: 100, portfolio_value: 50000, friction_adjusted_pl: -50 },
+    });
+  }
+  const _here = dirname(fileURLToPath(import.meta.url));
+  const regimeFile = join(_here, '__tmp_regime_cli__.json');
+  writeFileSync(regimeFile, JSON.stringify({
+    as_of: '2026-05-15T21:30:00Z',
+    range: { from: '2026-05-10', to: '2026-05-15' },
+    classifier: { version: '2026-05-18.1' },
+    labels: Object.fromEntries(trades.map(t => [t.timestamp.slice(0, 10), 'bull-trend'])),
+  }));
+  const result = spawnSync('node', [
+    'scripts/score-rule-against-holdout.mjs',
+    '--predicate', 'max_position_size_pct',
+    '--params', '{"limit":0.10}',
+    '--regime-history', regimeFile,
+    '--adapt-set-distribution', '{"bull-trend":0.5,"chop":0.4,"bear-trend":0.1}',
+  ], { input: JSON.stringify(trades), encoding: 'utf8' });
+  rmSync(regimeFile, { force: true });
+  assert.equal(result.status, 0, result.stderr);
+  const parsed = JSON.parse(result.stdout);
+  assert.ok(parsed.regime_warning, `expected regime_warning, got envelope: ${JSON.stringify(parsed)}`);
+  assert.match(parsed.regime_warning, /bull-trend/);
 });

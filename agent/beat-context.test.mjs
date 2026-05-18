@@ -17,6 +17,30 @@ test('renders all sections when present', () => {
   assert.match(block, /Segment trend.*deployed 12\.0%/);
 });
 
+// On 2026-05-18 Spark misread an unlabeled "Positions:" header as a generic
+// broker positions list and walked away from LAND, a penny-momentum position
+// it had opened itself. When the request included a strategy filter (visible
+// via segment_pnl.strategy), the rendered header must spell out that the
+// positions list is the agent's OWN strategy-attributed positions.
+test('positions header names the strategy when filter is in effect', () => {
+  const block = renderBeatContextBlock({
+    account: { portfolio_value: 100000 },
+    positions: [{ symbol: 'LAND', qty: 216, unrealized_pnl: 27, unrealized_pnl_pct: 0.01 }],
+    segment_pnl: { unrealized_pnl_percent: 0, deployed_percent: 2.0, strategy: 'penny-momentum' },
+  });
+  assert.match(block, /Positions \(your penny-momentum positions, attributed via order tag\):/);
+  assert.match(block, /LAND.*216/);
+});
+
+test('positions header stays plain when no strategy filter context is present', () => {
+  const block = renderBeatContextBlock({
+    account: { portfolio_value: 100000 },
+    positions: [{ symbol: 'AAPL', qty: 10, unrealized_pnl: 50, unrealized_pnl_pct: 0.5 }],
+  });
+  // Multi-strategy / unfiltered callers don't get the strategy-tagged label.
+  assert.match(block, /^Positions:$/m);
+});
+
 test('renders block when downstream returned errors', () => {
   const block = renderBeatContextBlock({
     account: { portfolio_value: 100000 },

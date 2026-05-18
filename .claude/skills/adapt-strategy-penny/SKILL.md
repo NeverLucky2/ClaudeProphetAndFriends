@@ -16,6 +16,14 @@ Report the resulting `{ processed, skipped, sign_flips, skip_reasons }` stats to
 
 All subsequent data loading reads `*.friction.json` files in each sandbox's `decisive_actions/` directory, NOT the raw `*.json` files. **All P&L-derived metrics (win rate, average win/loss, profit factor) MUST use `market_data.friction_adjusted_pl`. If that field is absent on a record, fall back to the original P&L field and tag the record in any output as "raw-pl-fallback".**
 
+## Step 0.5 — Build regime history
+
+After the friction post-processor completes, run:
+
+`node scripts/build-regime-history.mjs --from <YYYY-MM-DD of oldest loaded trade> --to <today YYYY-MM-DD>`
+
+Report the returned `{ action, path }` to the user. If the script exits non-zero (FMP key missing, network error), continue but tag every trade `regime: "unknown"` in Step 3 and warn the user that regime composition and `regime_warning` will be unavailable this run.
+
 ## Step 1 — Resolve target agent, strategy, and sandboxes
 
 This skill targets the **`penny-prophet`** agent (name "PennyProphet"). Sandboxes are resolved by agent — never by sandbox name. Activity from every sandbox running this agent is aggregated so the strategy is tuned against the full history.
@@ -40,6 +48,8 @@ For each `<DIR>` in `<PENNY_DIRS>`: glob `data/sandboxes/<DIR>/decisive_actions/
 
 Penny generates more decisions per day than Prophet, so 100 files across one sandbox typically covers ~2–4 weeks. Across multiple sandboxes it'll be tighter; that's fine — recency matters more than depth.
 
+**Join regime label:** After loading each `.friction.json`, also load `data/reports/regime_history.json` (if Step 0.5 succeeded). For each trade, convert `action.timestamp` to America/New_York using `Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date(timestamp))` and look up the date in `regime_history.labels`. If the date is a weekend/holiday or otherwise missing, walk back up to 5 calendar days for the previous trading day's label. Still missing → tag the trade `regime: "unknown"`. Add the resolved label as a top-level `regime` field on each loaded record.
+
 ## Step 3.5 — Split into adapt set and hold-out set
 
 Sort all loaded decisions by timestamp ascending. Compute `holdout_size = ceil(N × 0.20)` where N is the number of loaded decisions. The **adapt set** is the oldest `N − holdout_size` decisions; the **hold-out set** is the newest `holdout_size`.
@@ -49,6 +59,15 @@ State both counts and date ranges to the user explicitly, plus symbol concentrat
 > Adapting on N1 decisions (date1 → date2). Holding out N2 decisions (date3 → date4) for validation.
 > Adapt-set top 3 symbols: SYM1 (X%), SYM2 (Y%), SYM3 (Z%).
 > Hold-out-set top 3 symbols: SYM1 (X%), SYM2 (Y%), SYM3 (Z%).
+
+> Adapt set regime composition: X% bull-trend, Y% chop, Z% bear-trend, W% unknown
+> Hold-out set regime composition: …
+
+If any single regime ≥70% in the adapt set, append:
+
+> ⚠️ Adapt set is heavily skewed to <regime>; findings may not generalize.
+
+Compute the adapt-set regime distribution as an object `{ "bull-trend": 0.X, "chop": 0.Y, "bear-trend": 0.Z, "unknown": 0.W }` (proportions summing to 1.0) and **record it in conversation state** as `ADAPT_SET_REGIME_DISTRIBUTION` — Step 6.5 will pass this to the scorer.
 
 **Gap analysis (Step 5) and proposal generation (Step 6) use ONLY the adapt set.** Do not peek at the hold-out set during these steps — it is reserved for Step 6.5 validation.
 
@@ -61,6 +80,30 @@ For each `<DIR>` in `<PENNY_DIRS>`: glob `data/sandboxes/<DIR>/activity_logs/act
 - Tag the row with its sandbox name
 
 Compute aggregate profit factor across all loaded days from all sandboxes combined. Also note per-sandbox profit factor — large divergences (one sandbox profitable, another deeply red) are themselves a finding worth surfacing in Step 5.
+
+## Step 4.5 — Significance gate (per asset class)
+
+Pipe the **adapt set** (NOT the hold-out) as a JSON array on stdin to:
+
+```
+node scripts/significance-gate.mjs
+```
+
+Defaults: `min_losing_trades = 5`, `min_drawdown_pct = 0.05`. Override via `--min-losses` / `--min-drawdown` if the user requests.
+
+Read the per-category result. Display this table to the user:
+
+```
+Category            Trades  Losses  Drawdown  Gate
+stocks                  N1      L1     dd1%   ✓ PASSED / ✗ BLOCKED
+single_leg_options      N2      L2     dd2%   ...
+iron_condor             N3      L3     dd3%   ...
+penny_stocks            N4      L4     dd4%   ...
+```
+
+For BLOCKED categories, also display the gate's `reason` string.
+
+**Record the per-category gate result in conversation state as `SIGNIFICANCE_GATE`.** Step 6 will use this to decide which proposals are allowed.
 
 ## Step 5 — Gap analysis
 
@@ -135,6 +178,20 @@ For each significant gap (ignore one-offs; focus on patterns appearing 2+ times)
 
 If a gap suggests adding a *new* rule rather than changing an existing one, say so explicitly and write the full new rule text.
 
+**Asset-class tagging + significance gate check (NEW):** Before emitting each proposed edit, tag it with one or more asset-class categories based on its rule text:
+
+| Proposal text contains | Tagged as |
+|---|---|
+| "iron condor" / "IC" / "4-leg" / "credit spread" | `iron_condor` |
+| "option" / "call" / "put" / "DTE" / "delta" / OCC strike format | `single_leg_options` |
+| "penny" / explicit sub-$5 ticker mention | `penny_stocks` |
+| "stock" / "equity" / share-count language / common ticker mention | `stocks` |
+| Affects all positions equally (e.g., "max concurrent positions ≤10") | All currently-traded categories in the adapt set |
+
+If ALL tagged categories have `cleared: true` in `SIGNIFICANCE_GATE.by_category`, emit the proposal normally. Otherwise, do NOT emit the proposal — instead log:
+
+> Gap [N] skipped — proposal would affect category `<X>` which did not clear significance gate (`<reason>`).
+
 ## Step 6.5 — Validate proposed edits against hold-out (READ-ONLY, NO ITERATION)
 
 For each proposed edit from Step 6, classify it as **mechanical** (the rule maps to a supported predicate) or **qualitative** (everything else).
@@ -151,9 +208,9 @@ For each proposed edit from Step 6, classify it as **mechanical** (the rule maps
 
 For each mechanical edit, invoke the scorer (pipe the hold-out set as a JSON array on stdin):
 
-```
-echo '<HOLDOUT_JSON_ARRAY>' | node scripts/score-rule-against-holdout.mjs --predicate <name> --params '<params>'
-```
+`echo '<HOLDOUT_JSON_ARRAY>' | node scripts/score-rule-against-holdout.mjs --predicate <name> --params '<params>' --regime-history data/reports/regime_history.json --adapt-set-distribution '<ADAPT_SET_REGIME_DISTRIBUTION_JSON>'`
+
+The returned envelope may now contain a `regime_warning` field (when affected trades over-index a regime by ≥25pp vs adapt-set baseline) or `regime_warning_skipped: "insufficient_sample (need >= 5 affected trades; have N)"`. Capture both for Step 6.6.
 
 Capture the returned envelope including `verdict`, `trades_affected`, `net_pl_delta_usd`, and any `limitation_notes`.
 
@@ -163,16 +220,27 @@ For each qualitative edit, read the hold-out trades and write a one-paragraph ju
 
 ## Step 6.6 — Attach hold-out verdicts to proposals
 
-For each proposal, attach a verdict block to its display:
+For each proposal, attach a combined verdict block:
 
-> **HOLD-OUT VERDICT:** APPROVED-BY-HOLDOUT — `review_type: mechanical` — trades_affected: 3 — net_pl_delta_usd: +$145
-> Limitations: (any `limitation_notes` from the scorer)
-> ⚠️ A 12-15 trade hold-out is a sanity check, not a hypothesis test.
+```
+SIGNIFICANCE GATE: PASSED — <category> (<losses> losses, <drawdown>% dd)
+HOLD-OUT VERDICT:  <APPROVED-BY-HOLDOUT|REJECTED-BY-HOLDOUT|INCONCLUSIVE> — review_type: <mechanical|qualitative> — trades_affected: <N> — net_pl_delta_usd: <±$X>
+REGIME WARNING:    <"<text>"|none|"insufficient_sample (need >= 5 affected trades; have N)">
+FINAL:             <APPROVED|NEEDS-OVERRIDE|INCONCLUSIVE>
+```
 
-Application rules to apply in Step 8:
-- **APPROVED-BY-HOLDOUT**: user-approved proposals applied normally.
-- **REJECTED-BY-HOLDOUT**: requires explicit user override before being applied.
-- **INCONCLUSIVE**: user decides as normal — most proposals will land here at current sample size. Do not auto-reject or auto-approve.
+**FINAL precedence (first matching rule wins, evaluated top-down):**
+
+1. If SIGNIFICANCE GATE = BLOCKED → proposal was never generated, no verdict block.
+2. If HOLD-OUT VERDICT = REJECTED-BY-HOLDOUT → `FINAL: NEEDS-OVERRIDE` (user can apply with explicit confirmation).
+3. If REGIME WARNING is present (not "none" and not "insufficient_sample") → `FINAL: NEEDS-OVERRIDE`.
+4. If HOLD-OUT VERDICT = INCONCLUSIVE → `FINAL: INCONCLUSIVE`.
+5. Otherwise (SIGNIFICANCE=PASSED, HOLD-OUT=APPROVED, no regime warning) → `FINAL: APPROVED`.
+
+Application rules in Step 8:
+- `APPROVED`: applied if the user approves it in Step 7.
+- `NEEDS-OVERRIDE`: user must explicitly confirm before it is applied.
+- `INCONCLUSIVE`: user decides as normal.
 
 ## Step 7 — Present and confirm
 

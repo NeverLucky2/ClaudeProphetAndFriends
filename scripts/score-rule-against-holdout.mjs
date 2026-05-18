@@ -3,6 +3,7 @@
 
 import { fileURLToPath } from 'node:url';
 import { resolve as resolvePath } from 'node:path';
+import { readFileSync as nodeReadFileSync } from 'node:fs';
 
 const MIN_TRADES_FOR_NON_INCONCLUSIVE = 3;
 const MIN_ABS_DELTA_FOR_NON_INCONCLUSIVE = 200;
@@ -10,6 +11,7 @@ const MIN_ABS_DELTA_FOR_NON_INCONCLUSIVE = 200;
 export function buildVerdict({
   predicate, params, holdout_size, trades_affected, net_pl_delta_usd,
   blocked_winners, blocked_losers, details, limitation_notes = [],
+  affected_trades_for_regime, adapt_set_distribution,
 }) {
   let verdict;
   if (trades_affected === 0) {
@@ -24,21 +26,26 @@ export function buildVerdict({
   } else {
     verdict = 'INCONCLUSIVE';
   }
+  const annotations = adapt_set_distribution
+    ? computeRegimeAnnotations(affected_trades_for_regime ?? [], adapt_set_distribution)
+    : {};
   return {
     predicate, params, review_type: 'mechanical',
     holdout_size, trades_affected, net_pl_delta_usd,
     blocked_winners, blocked_losers,
     verdict, limitation_notes, details,
+    ...annotations,
   };
 }
 
-export function scoreMaxPositionSizePct(holdoutTrades, params) {
+export function scoreMaxPositionSizePct(holdoutTrades, params, adaptSetDistribution) {
   const { limit } = params;
   let trades_affected = 0;
   let net_pl_delta_usd = 0;
   let blocked_winners = 0;
   let blocked_losers = 0;
   const details = [];
+  const affected_trades_for_regime = [];
 
   for (const t of holdoutTrades) {
     const md = t.market_data ?? {};
@@ -51,24 +58,27 @@ export function scoreMaxPositionSizePct(holdoutTrades, params) {
       if (pl > 0) blocked_winners += 1;
       if (pl < 0) blocked_losers += 1;
       details.push({ symbol: t.symbol, position_pct: +positionPct.toFixed(4), pl });
+      affected_trades_for_regime.push({ regime: t.regime });
     }
   }
   return buildVerdict({
     predicate: 'max_position_size_pct', params,
     holdout_size: holdoutTrades.length, trades_affected, net_pl_delta_usd,
     blocked_winners, blocked_losers, details,
+    affected_trades_for_regime, adapt_set_distribution: adaptSetDistribution,
   });
 }
 
 const STOP_AT_PCT_LIMITATION = 'stop_at_pct only sees trades that CLOSED past threshold; true firing count likely higher because intra-trade trough is not in the trade schema';
 
-export function scoreStopAtPct(holdoutTrades, params) {
+export function scoreStopAtPct(holdoutTrades, params, adaptSetDistribution) {
   const { stop } = params; // e.g., -0.10
   let trades_affected = 0;
   let net_pl_delta_usd = 0;
   let blocked_winners = 0;
   let blocked_losers = 0;
   const details = [];
+  const affected_trades_for_regime = [];
 
   for (const t of holdoutTrades) {
     const md = t.market_data ?? {};
@@ -85,16 +95,18 @@ export function scoreStopAtPct(holdoutTrades, params) {
     if (delta > 0) blocked_losers += 1; // we'd be cutting losers earlier
     if (delta < 0) blocked_winners += 1; // unusual, but possible
     details.push({ symbol: t.symbol, actual_pl: actualPl, stopped_exit_pl: stoppedExitPl, delta });
+    affected_trades_for_regime.push({ regime: t.regime });
   }
   return buildVerdict({
     predicate: 'stop_at_pct', params,
     holdout_size: holdoutTrades.length, trades_affected, net_pl_delta_usd,
     blocked_winners, blocked_losers, details,
     limitation_notes: [STOP_AT_PCT_LIMITATION],
+    affected_trades_for_regime, adapt_set_distribution: adaptSetDistribution,
   });
 }
 
-export function scoreMaxConcurrentPositions(holdoutTrades, params) {
+export function scoreMaxConcurrentPositions(holdoutTrades, params, adaptSetDistribution) {
   const { limit } = params;
   const open = new Set();
   let trades_affected = 0;
@@ -102,6 +114,7 @@ export function scoreMaxConcurrentPositions(holdoutTrades, params) {
   let blocked_winners = 0;
   let blocked_losers = 0;
   const details = [];
+  const affected_trades_for_regime = [];
 
   const sorted = [...holdoutTrades].sort((a, b) => (a.timestamp ?? '').localeCompare(b.timestamp ?? ''));
 
@@ -116,6 +129,7 @@ export function scoreMaxConcurrentPositions(holdoutTrades, params) {
         if (pl > 0) blocked_winners += 1;
         if (pl < 0) blocked_losers += 1;
         details.push({ symbol: t.symbol, timestamp: t.timestamp, open_count_before_block: open.size, pl });
+        affected_trades_for_regime.push({ regime: t.regime });
       } else {
         open.add(t.symbol);
       }
@@ -127,10 +141,11 @@ export function scoreMaxConcurrentPositions(holdoutTrades, params) {
     predicate: 'max_concurrent_positions', params,
     holdout_size: holdoutTrades.length, trades_affected, net_pl_delta_usd,
     blocked_winners, blocked_losers, details,
+    affected_trades_for_regime, adapt_set_distribution: adaptSetDistribution,
   });
 }
 
-export function scoreNoReentryWithinHours(holdoutTrades, params) {
+export function scoreNoReentryWithinHours(holdoutTrades, params, adaptSetDistribution) {
   const { hours } = params;
   const windowMs = hours * 3600 * 1000;
   const sorted = [...holdoutTrades].sort((a, b) => (a.timestamp ?? '').localeCompare(b.timestamp ?? ''));
@@ -140,6 +155,7 @@ export function scoreNoReentryWithinHours(holdoutTrades, params) {
   let blocked_winners = 0;
   let blocked_losers = 0;
   const details = [];
+  const affected_trades_for_regime = [];
 
   for (const t of sorted) {
     const ts = Date.parse(t.timestamp);
@@ -155,6 +171,7 @@ export function scoreNoReentryWithinHours(holdoutTrades, params) {
         if (pl > 0) blocked_winners += 1;
         if (pl < 0) blocked_losers += 1;
         details.push({ symbol: t.symbol, timestamp: t.timestamp, hours_since_exit: (ts - lastExit) / 3600000, pl });
+        affected_trades_for_regime.push({ regime: t.regime });
       }
     }
   }
@@ -162,6 +179,7 @@ export function scoreNoReentryWithinHours(holdoutTrades, params) {
     predicate: 'no_reentry_within_hours', params,
     holdout_size: holdoutTrades.length, trades_affected, net_pl_delta_usd,
     blocked_winners, blocked_losers, details,
+    affected_trades_for_regime, adapt_set_distribution: adaptSetDistribution,
   });
 }
 
@@ -178,13 +196,14 @@ function parseDteFromOcc(symbol, entryTimestamp) {
   return Math.round((expMs - entryMs) / 86400000);
 }
 
-export function scoreDteBounds(holdoutTrades, params) {
+export function scoreDteBounds(holdoutTrades, params, adaptSetDistribution) {
   const { min, max } = params;
   let trades_affected = 0;
   let net_pl_delta_usd = 0;
   let blocked_winners = 0;
   let blocked_losers = 0;
   const details = [];
+  const affected_trades_for_regime = [];
 
   for (const t of holdoutTrades) {
     if (t.action !== 'BUY') continue;
@@ -197,13 +216,89 @@ export function scoreDteBounds(holdoutTrades, params) {
       if (pl > 0) blocked_winners += 1;
       if (pl < 0) blocked_losers += 1;
       details.push({ symbol: t.symbol, dte, pl });
+      affected_trades_for_regime.push({ regime: t.regime });
     }
   }
   return buildVerdict({
     predicate: 'dte_bounds', params,
     holdout_size: holdoutTrades.length, trades_affected, net_pl_delta_usd,
     blocked_winners, blocked_losers, details,
+    affected_trades_for_regime, adapt_set_distribution: adaptSetDistribution,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Regime joining (Item #3)
+// ---------------------------------------------------------------------------
+
+const ET_DATE_FORMATTER = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'America/New_York',
+  year: 'numeric', month: '2-digit', day: '2-digit',
+});
+
+export function etDateFromTimestamp(ts) {
+  const d = new Date(ts);
+  if (!Number.isFinite(d.getTime())) return null;
+  // 'en-CA' yields YYYY-MM-DD
+  return ET_DATE_FORMATTER.format(d);
+}
+
+export function lookupRegime(dateStr, labels, maxWalkBackDays = 5) {
+  if (!dateStr) return null;
+  let d = new Date(`${dateStr}T12:00:00Z`);
+  for (let i = 0; i <= maxWalkBackDays; i += 1) {
+    const probe = d.toISOString().slice(0, 10);
+    if (labels[probe]) return labels[probe];
+    d = new Date(d.getTime() - 86400_000);
+  }
+  return null;
+}
+
+export function joinRegimeToTrades(trades, labels) {
+  return trades.map(t => {
+    const etDate = etDateFromTimestamp(t.timestamp);
+    const regime = lookupRegime(etDate, labels) ?? 'unknown';
+    return { ...t, regime };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Regime annotations
+// ---------------------------------------------------------------------------
+
+const REGIME_WARNING_MIN_AFFECTED = 5;
+const REGIME_WARNING_OVER_INDEX_PP = 25;
+
+export function computeRegimeAnnotations(affectedTrades, adaptSetDistribution) {
+  if (!Array.isArray(affectedTrades) || affectedTrades.length === 0) return {};
+  if (!adaptSetDistribution || typeof adaptSetDistribution !== 'object') return {};
+  if (affectedTrades.length < REGIME_WARNING_MIN_AFFECTED) {
+    return {
+      regime_warning_skipped: `insufficient_sample (need >= ${REGIME_WARNING_MIN_AFFECTED} affected trades; have ${affectedTrades.length})`,
+    };
+  }
+  // Exclude unknown from numerator (and effective denominator).
+  const known = affectedTrades.filter(t => t.regime && t.regime !== 'unknown');
+  if (known.length === 0) return {};
+  const counts = {};
+  for (const t of known) {
+    counts[t.regime] = (counts[t.regime] ?? 0) + 1;
+  }
+  let worst = null;
+  for (const r of Object.keys(counts)) {
+    const affectedPct = counts[r] / known.length;
+    const baselinePct = adaptSetDistribution[r] ?? 0;
+    const deltaPp = (affectedPct - baselinePct) * 100;
+    if (deltaPp >= REGIME_WARNING_OVER_INDEX_PP) {
+      if (!worst || deltaPp > worst.deltaPp) {
+        worst = { regime: r, affectedPct, baselinePct, deltaPp };
+      }
+    }
+  }
+  if (!worst) return {};
+  return {
+    regime_warning: `affected trades ${Math.round(worst.affectedPct * 100)}% ${worst.regime} vs adapt-set ${Math.round(worst.baselinePct * 100)}% — proposal over-indexes on ${worst.regime} regime by ${Math.round(worst.deltaPp)}pp`,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -220,12 +315,12 @@ const PREDICATE_MAP = {
 
 export const SUPPORTED_PREDICATES = Object.keys(PREDICATE_MAP);
 
-export function dispatchPredicate(name, params, holdoutTrades) {
+export function dispatchPredicate(name, params, holdoutTrades, adaptSetDistribution) {
   const fn = PREDICATE_MAP[name];
   if (!fn) {
     throw new Error(`unknown predicate "${name}". Supported: ${SUPPORTED_PREDICATES.join(', ')}`);
   }
-  return fn(holdoutTrades, params);
+  return fn(holdoutTrades, params, adaptSetDistribution);
 }
 
 // ---------------------------------------------------------------------------
@@ -240,17 +335,35 @@ export function dispatchPredicate(name, params, holdoutTrades) {
     const args = process.argv.slice(2);
     const pIdx = args.indexOf('--predicate');
     const paramsIdx = args.indexOf('--params');
+    const rhIdx = args.indexOf('--regime-history');
+    const adaptIdx = args.indexOf('--adapt-set-distribution');
     if (pIdx === -1 || paramsIdx === -1) {
-      process.stderr.write('Usage: cat holdout.json | node scripts/score-rule-against-holdout.mjs --predicate <name> --params <json>\n');
+      process.stderr.write('Usage: cat holdout.json | node scripts/score-rule-against-holdout.mjs --predicate <name> --params <json> [--regime-history <path>] [--adapt-set-distribution <json>]\n');
       process.exit(2);
     }
     const predicate = args[pIdx + 1];
-    let params;
+    let params, adaptSetDistribution;
     try { params = JSON.parse(args[paramsIdx + 1]); } catch (err) {
       process.stderr.write(`--params is not valid JSON: ${err.message}\n`);
       process.exit(2);
     }
-    // Read trades from stdin (synchronous, small data).
+    if (adaptIdx !== -1) {
+      try { adaptSetDistribution = JSON.parse(args[adaptIdx + 1]); } catch (err) {
+        process.stderr.write(`--adapt-set-distribution is not valid JSON: ${err.message}\n`);
+        process.exit(2);
+      }
+    }
+    let regimeLabels = null;
+    if (rhIdx !== -1) {
+      const rhPath = args[rhIdx + 1];
+      try {
+        const rh = JSON.parse(nodeReadFileSync(rhPath, 'utf8'));
+        regimeLabels = rh.labels ?? {};
+      } catch (err) {
+        process.stderr.write(`could not read --regime-history at ${rhPath}: ${err.message}\n`);
+        // Continue without regime data; envelope simply lacks regime_warning.
+      }
+    }
     let stdin = '';
     process.stdin.on('data', chunk => { stdin += chunk; });
     process.stdin.on('end', () => {
@@ -259,8 +372,11 @@ export function dispatchPredicate(name, params, holdoutTrades) {
         process.stderr.write(`stdin is not valid JSON: ${err.message}\n`);
         process.exit(2);
       }
+      if (regimeLabels) {
+        trades = joinRegimeToTrades(trades, regimeLabels);
+      }
       try {
-        const result = dispatchPredicate(predicate, params, trades);
+        const result = dispatchPredicate(predicate, params, trades, adaptSetDistribution);
         process.stdout.write(JSON.stringify(result, null, 2) + '\n');
       } catch (err) {
         process.stderr.write(`${err.message}\n`);
