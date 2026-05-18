@@ -550,3 +550,80 @@ test('processSandboxes: stale pre-existing .friction.json is overwritten (no mti
 
   rmSync(tmpRoot, { recursive: true, force: true });
 });
+
+test('processSandboxes: respects frictionConfigPath option', () => {
+  const tmpRoot = join(FIX_DIR, '__tmp_alt_config__');
+  rmSync(tmpRoot, { recursive: true, force: true });
+  const { mkdirSync, cpSync, writeFileSync, readFileSync: rfs } = defaultFs;
+  mkdirSync(join(tmpRoot, 'config'), { recursive: true });
+  cpSync(join(FIX_DIR, 'friction-valid.json'), join(tmpRoot, 'config', 'friction.json'));
+  // Alt config: bump stocks slippage 10x → easy to detect in output.
+  const alt = JSON.parse(rfs(join(FIX_DIR, 'friction-valid.json'), 'utf8'));
+  alt.version = 'alt-test';
+  alt.stocks.per_share_slippage_usd = 0.20;
+  writeFileSync(join(tmpRoot, 'config', 'friction-alt.json'), JSON.stringify(alt, null, 2));
+  mkdirSync(join(tmpRoot, 'data'), { recursive: true });
+  cpSync(join(FIX_DIR, 'integration-agent-config.json'), join(tmpRoot, 'data', 'agent-config.json'));
+  cpSync(
+    join(FIX_DIR, 'integration-sandbox'),
+    join(tmpRoot, 'data', 'sandboxes', 'integration-sandbox'),
+    { recursive: true },
+  );
+
+  processSandboxes({
+    agentId: 'default', projectRoot: tmpRoot,
+    frictionConfigPath: join(tmpRoot, 'config', 'friction-alt.json'),
+  });
+
+  const friction = JSON.parse(rfs(
+    join(tmpRoot, 'data', 'sandboxes', 'integration-sandbox', 'decisive_actions', '2026-05-11_SELL_SPY.friction.json'),
+    'utf8',
+  ));
+  assert.equal(friction.friction_meta.friction_config_version, 'alt-test');
+  // Slippage is now 0.20 × 100 × 2 = 40 (vs baseline 0.02 × 100 × 2 = 4)
+  assert.equal(friction.friction_meta.haircut_breakdown.slippage, 40);
+
+  rmSync(tmpRoot, { recursive: true, force: true });
+});
+
+test('processSandboxes: config with output_suffix writes *.friction-stress.json', () => {
+  const tmpRoot = join(FIX_DIR, '__tmp_suffix__');
+  rmSync(tmpRoot, { recursive: true, force: true });
+  const { mkdirSync, cpSync, writeFileSync, existsSync: ex } = defaultFs;
+  mkdirSync(join(tmpRoot, 'config'), { recursive: true });
+  const stressCfg = JSON.parse(defaultFs.readFileSync(join(FIX_DIR, 'friction-valid.json'), 'utf8'));
+  stressCfg.output_suffix = 'friction-stress';
+  stressCfg.version = '2026-05-18.1-stress';
+  writeFileSync(join(tmpRoot, 'config', 'friction-stress.json'), JSON.stringify(stressCfg, null, 2));
+  mkdirSync(join(tmpRoot, 'data'), { recursive: true });
+  cpSync(join(FIX_DIR, 'integration-agent-config.json'), join(tmpRoot, 'data', 'agent-config.json'));
+  cpSync(
+    join(FIX_DIR, 'integration-sandbox'),
+    join(tmpRoot, 'data', 'sandboxes', 'integration-sandbox'),
+    { recursive: true },
+  );
+
+  processSandboxes({
+    agentId: 'default', projectRoot: tmpRoot,
+    frictionConfigPath: join(tmpRoot, 'config', 'friction-stress.json'),
+  });
+
+  const stressPath = join(tmpRoot, 'data', 'sandboxes', 'integration-sandbox', 'decisive_actions', '2026-05-11_SELL_SPY.friction-stress.json');
+  const baselinePath = join(tmpRoot, 'data', 'sandboxes', 'integration-sandbox', 'decisive_actions', '2026-05-11_SELL_SPY.friction.json');
+  assert.equal(ex(stressPath), true, 'stress config must write *.friction-stress.json');
+  assert.equal(ex(baselinePath), false, 'stress config must NOT write *.friction.json');
+
+  rmSync(tmpRoot, { recursive: true, force: true });
+});
+
+test('loadFrictionConfig: accepts optional output_suffix string field', () => {
+  const tmpRoot = join(FIX_DIR, '__tmp_suffix_load__');
+  rmSync(tmpRoot, { recursive: true, force: true });
+  defaultFs.mkdirSync(tmpRoot, { recursive: true });
+  const cfg = JSON.parse(defaultFs.readFileSync(join(FIX_DIR, 'friction-valid.json'), 'utf8'));
+  cfg.output_suffix = 'friction-stress';
+  defaultFs.writeFileSync(join(tmpRoot, 'cfg.json'), JSON.stringify(cfg));
+  const loaded = loadFrictionConfig(join(tmpRoot, 'cfg.json'));
+  assert.equal(loaded.output_suffix, 'friction-stress');
+  rmSync(tmpRoot, { recursive: true, force: true });
+});

@@ -53,3 +53,15 @@ for (const path of REVIEW_SKILLS) {
     assert.doesNotMatch(content, /score-rule-against-holdout\.mjs/);
   });
 }
+
+test('.claude/skills/stress-test-friction/SKILL.md: references friction-stress-compare.mjs', () => {
+  const content = readFileSync('.claude/skills/stress-test-friction/SKILL.md', 'utf8');
+  assert.match(content, /scripts\/friction-stress-compare\.mjs/);
+});
+
+test('.claude/skills/stress-test-friction/SKILL.md: codifies flip-rate thresholds', () => {
+  const content = readFileSync('.claude/skills/stress-test-friction/SKILL.md', 'utf8');
+  assert.match(content, /flip_rate < 0\.05/);
+  assert.match(content, /0\.05 ≤ flip_rate < 0\.20/);
+  assert.match(content, /flip_rate ≥ 0\.20/);
+});

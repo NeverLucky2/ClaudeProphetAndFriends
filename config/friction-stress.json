@@ -1,0 +1,34 @@
+{
+  "version": "2026-05-18.1-stress",
+  "output_suffix": "friction-stress",
+  "stocks": {
+    "per_share_slippage_usd": 0.04,
+    "stop_gap_through_pct": 0.006,
+    "commission_per_share": 0.0,
+    "regulatory_fee_per_share": 0.0001
+  },
+  "penny_stocks": {
+    "per_share_slippage_usd": 0.02,
+    "slippage_pct_of_price_floor": 0.04,
+    "stop_gap_through_pct": 0.03,
+    "commission_per_share": 0.0,
+    "regulatory_fee_per_share": 0.0001
+  },
+  "single_leg_options": {
+    "spread_crossing_pct_open": 0.80,
+    "spread_crossing_pct_close": 0.85,
+    "spread_crossing_pct_close_when_losing": 0.95,
+    "assumed_spread_pct_of_mid": 0.08,
+    "commission_per_contract": 0.65,
+    "regulatory_fee_per_contract": 0.05
+  },
+  "iron_condor": {
+    "spread_crossing_pct_open": 0.75,
+    "spread_crossing_pct_close": 0.85,
+    "spread_crossing_pct_close_when_losing": 0.95,
+    "assumed_spread_pct_of_credit": 0.20,
+    "leg_count": 4,
+    "commission_per_contract": 0.65,
+    "regulatory_fee_per_contract": 0.05
+  }
+}

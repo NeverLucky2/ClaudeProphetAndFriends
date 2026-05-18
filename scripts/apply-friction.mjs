@@ -269,8 +269,8 @@ export function resolveSandboxesForAgent(agentConfigPath, agentId) {
   return ids;
 }
 
-export function processSandboxes({ agentId, projectRoot, fs = defaultFs }) {
-  const configPath = join(projectRoot, 'config', 'friction.json');
+export function processSandboxes({ agentId, projectRoot, frictionConfigPath, fs = defaultFs }) {
+  const configPath = frictionConfigPath ?? join(projectRoot, 'config', 'friction.json');
   const agentCfgPath = join(projectRoot, 'data', 'agent-config.json');
   const config = loadFrictionConfig(configPath);
   const sandboxIds = resolveSandboxesForAgent(agentCfgPath, agentId);
@@ -311,7 +311,10 @@ export function processSandboxes({ agentId, projectRoot, fs = defaultFs }) {
         process.stderr.write(`apply-friction: sign-flip on ${fullPath} (raw ${out.action.market_data.raw_pl} -> adjusted ${out.action.market_data.friction_adjusted_pl})\n`);
         stats.sign_flips += 1;
       }
-      const outPath = join(dir, fname.replace(/\.json$/, '.friction.json'));
+      const suffix = config.output_suffix && config.output_suffix !== 'friction'
+        ? config.output_suffix
+        : 'friction';
+      const outPath = join(dir, fname.replace(/\.json$/, `.${suffix}.json`));
       const content = JSON.stringify(out.action, null, 2);
       writeAtomic(outPath, content, fs);
       stats.processed += 1;
@@ -330,13 +333,15 @@ export function processSandboxes({ agentId, projectRoot, fs = defaultFs }) {
   if (__filename === argv1abs) {
     const args = process.argv.slice(2);
     const agentIdx = args.indexOf('--agent');
+    const configIdx = args.indexOf('--config');
     if (agentIdx === -1 || !args[agentIdx + 1]) {
-      process.stderr.write('Usage: node scripts/apply-friction.mjs --agent <agent-id>\n');
+      process.stderr.write('Usage: node scripts/apply-friction.mjs --agent <agent-id> [--config <path>]\n');
       process.exit(2);
     }
     const agentId = args[agentIdx + 1];
     const projectRoot = process.cwd();
-    const stats = processSandboxes({ agentId, projectRoot });
+    const frictionConfigPath = configIdx !== -1 ? args[configIdx + 1] : undefined;
+    const stats = processSandboxes({ agentId, projectRoot, frictionConfigPath });
     process.stdout.write(JSON.stringify(stats, null, 2) + '\n');
   }
 }
