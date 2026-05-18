@@ -43,25 +43,50 @@ function makeET(year, month, day, hour, minute) {
   return new Date(probe.getTime() + offsetMin * 60_000);
 }
 
+// NYSE full-day market closures for 2026. Intentionally scoped to a single year —
+// when 2027 arrives, extend or replace this set. Not a perpetual calendar.
+const NYSE_HOLIDAYS_2026 = new Set([
+  '2026-01-01', // New Year's Day
+  '2026-01-19', // MLK Day
+  '2026-02-16', // Presidents Day
+  '2026-04-03', // Good Friday
+  '2026-05-25', // Memorial Day
+  '2026-06-19', // Juneteenth
+  '2026-07-03', // Independence Day (observed; Jul 4 falls on Saturday)
+  '2026-09-07', // Labor Day
+  '2026-11-26', // Thanksgiving
+  '2026-12-25', // Christmas
+]);
+
+function isoDate(y, m, d) {
+  return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+}
+
 export function mostRecentSessionClose(now) {
-  // Walk back day-by-day in ET until we hit a weekday whose 4pm ET <= now.
+  // Walk back day-by-day in ET until we hit a trading day (weekday, not a holiday) whose 4pm ET <= now.
   const et = dateInET(now);
   let y = et.year, m = et.month, d = et.day;
-  // If today is a weekday and now >= 4pm ET, return today's close.
+  // If today is a trading day and now >= 4pm ET, return today's close.
   const todayClose = makeET(y, m, d, 16, 0);
-  if (et.weekday >= 1 && et.weekday <= 5 && now >= todayClose) {
+  const todayIso = isoDate(et.year, et.month, et.day);
+  if (
+    et.weekday >= 1 && et.weekday <= 5 &&
+    !NYSE_HOLIDAYS_2026.has(todayIso) &&
+    now >= todayClose
+  ) {
     return todayClose;
   }
-  // Otherwise step back day-by-day (using ET noon as anchor) until we hit a weekday.
-  for (let i = 1; i <= 7; i += 1) {
+  // Otherwise step back day-by-day (using ET noon as anchor) until we hit a trading day.
+  for (let i = 1; i <= 14; i += 1) {
     // Use UTC noon of (ET calendar date - i days) as a safe anchor to stay on the right ET date.
     const probe = makeET(y, m, d - i, 12, 0);
     const etProbe = dateInET(probe);
-    if (etProbe.weekday >= 1 && etProbe.weekday <= 5) {
-      return makeET(etProbe.year, etProbe.month, etProbe.day, 16, 0);
-    }
+    if (etProbe.weekday < 1 || etProbe.weekday > 5) continue;
+    const probeIso = isoDate(etProbe.year, etProbe.month, etProbe.day);
+    if (NYSE_HOLIDAYS_2026.has(probeIso)) continue;
+    return makeET(etProbe.year, etProbe.month, etProbe.day, 16, 0);
   }
-  throw new Error('mostRecentSessionClose: no weekday found in last 7 days (impossible)');
+  throw new Error('mostRecentSessionClose: no trading day found in last 14 days (impossible)');
 }
 
 export function isCacheFresh(cache, requested, now, forceRebuild) {
@@ -82,6 +107,11 @@ function mean(arr) {
 
 export function deriveLabelsFromCloses(closes, fromDate, toDate) {
   // closes: sorted ascending [{ date, close }]
+  for (let i = 1; i < closes.length; i += 1) {
+    if (closes[i].date < closes[i - 1].date) {
+      throw new Error(`deriveLabelsFromCloses: closes not in ascending order at index ${i} (${closes[i - 1].date} > ${closes[i].date})`);
+    }
+  }
   const labels = {};
   for (let i = 0; i < closes.length; i += 1) {
     const { date, close } = closes[i];
@@ -114,10 +144,16 @@ export async function fetchSpyHistorical({ apiKey, from, to, fetchImpl = globalT
   if (!Array.isArray(data?.historical)) {
     throw new Error('FMP response malformed: expected { historical: [...] }');
   }
-  return data.historical
-    .map(r => ({ date: r.date, close: Number(r.close) }))
-    .filter(r => Number.isFinite(r.close))
-    .sort((a, b) => a.date.localeCompare(b.date));
+  if (data.historical.length === 0) {
+    throw new Error(`FMP returned 0 historical rows for SPY in range ${from}..${to} — check date range or FMP status`);
+  }
+  const rows = data.historical.map(r => ({ date: r.date, close: Number(r.close) }));
+  for (const r of rows) {
+    if (!Number.isFinite(r.close)) {
+      throw new Error(`FMP returned non-finite close for SPY on ${r.date}`);
+    }
+  }
+  return rows.sort((a, b) => a.date.localeCompare(b.date));
 }
 
 function writeAtomic(path, content) {

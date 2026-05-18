@@ -77,6 +77,15 @@ test('mostRecentSessionClose: Sunday -> last Friday 4pm ET', () => {
   assert.equal(close.toISOString(), '2026-05-15T20:00:00.000Z');
 });
 
+test('mostRecentSessionClose: day after Christmas (holiday) -> Dec 24 4pm ET', () => {
+  // Sat 2026-12-26 09:00 ET = 14:00Z. Walk back: Fri Dec 25 = Christmas holiday (skip),
+  // Thu Dec 24 = trading day, return its 4pm ET close.
+  const now = new Date('2026-12-26T14:00:00Z');
+  const close = mostRecentSessionClose(now);
+  // 2026-12-24 16:00 ET = 21:00Z (standard time, UTC-5)
+  assert.equal(close.toISOString(), '2026-12-24T21:00:00.000Z');
+});
+
 test('isCacheFresh: all conditions met -> true', () => {
   // Cache built at 5:30pm ET on a Friday, checking on Saturday morning
   const cache = {
@@ -151,6 +160,19 @@ test('deriveLabelsFromCloses: produces a label per date in range, skipping dates
   }
 });
 
+test('deriveLabelsFromCloses: throws on out-of-order input naming the bad index', () => {
+  const closes = [];
+  for (let i = 0; i < 60; i += 1) {
+    const date = new Date(Date.UTC(2026, 1, 1 + i));
+    closes.push({ date: date.toISOString().slice(0, 10), close: 100 + i });
+  }
+  const reversed = closes.slice().reverse();
+  assert.throws(
+    () => deriveLabelsFromCloses(reversed, '2026-03-23', '2026-04-01'),
+    /index 1|out.?of.?order|ascending/i,
+  );
+});
+
 test('deriveLabelsFromCloses: returns empty object when range falls entirely before 50d window', () => {
   const closes = [];
   for (let i = 0; i < 60; i += 1) {
@@ -215,6 +237,33 @@ test('fetchSpyHistorical: malformed response (no historical array) throws clear 
   await assert.rejects(
     fetchSpyHistorical({ apiKey: 'dummy', from: '2026-05-13', to: '2026-05-15', fetchImpl: mockFetch }),
     /malformed/i,
+  );
+});
+
+test('fetchSpyHistorical: NaN close throws naming the bad row date', async () => {
+  const { fetchSpyHistorical } = await import('./build-regime-history.mjs');
+  const mockFetch = async () => ({
+    ok: true,
+    json: async () => ({
+      symbol: 'SPY',
+      historical: [
+        { date: '2026-05-15', close: NaN },
+        { date: '2026-05-14', close: 508.1 },
+      ],
+    }),
+  });
+  await assert.rejects(
+    fetchSpyHistorical({ apiKey: 'dummy', from: '2026-05-14', to: '2026-05-15', fetchImpl: mockFetch }),
+    /2026-05-15/,
+  );
+});
+
+test('fetchSpyHistorical: empty historical array for non-empty range throws naming the range', async () => {
+  const { fetchSpyHistorical } = await import('./build-regime-history.mjs');
+  const mockFetch = async () => ({ ok: true, json: async () => ({ symbol: 'SPY', historical: [] }) });
+  await assert.rejects(
+    fetchSpyHistorical({ apiKey: 'dummy', from: '2026-05-13', to: '2026-05-15', fetchImpl: mockFetch }),
+    /2026-05-13.*2026-05-15|2026-05-15.*2026-05-13/,
   );
 });
 

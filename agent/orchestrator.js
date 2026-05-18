@@ -168,6 +168,13 @@ export class AgentOrchestrator extends EventEmitter {
     // actually runs the penny strategy.
     const resolvedAgent = getResolvedAgentForSandbox(sandboxId);
     const pennyPipelineEnabled = resolvedAgent?.strategyId === 'penny-momentum';
+    // Turtle Go scheduler must only run in the Trend sandbox's bot. The flag
+    // is set unconditionally (not via spread-conditional) so non-Trend bots
+    // get an explicit "false" rather than inheriting "true" from the shared
+    // .env — without this, every spawned bot starts a scheduler against the
+    // shared paper account and 17:00 ET fires duplicate orders.
+    const turtleSchedulerEnabled = resolvedAgent?.strategyId === 'trend'
+      && process.env.TURTLE_SCHEDULER_ENABLED === 'true';
 
     const env = {
       ...process.env,
@@ -182,6 +189,7 @@ export class AgentOrchestrator extends EventEmitter {
       OPENPROPHET_ACCOUNT_ID: account.id,
       ...(Number.isFinite(maxDailyLossPct) && maxDailyLossPct > 0 ? { MAX_DAILY_LOSS_PCT: String(maxDailyLossPct) } : {}),
       ...(pennyPipelineEnabled ? { ENABLE_PENNY_PIPELINE: 'true' } : {}),
+      TURTLE_SCHEDULER_ENABLED: turtleSchedulerEnabled ? 'true' : 'false',
     };
 
     const binaryName = process.platform === 'win32' ? 'prophet_bot.exe' : 'prophet_bot';
