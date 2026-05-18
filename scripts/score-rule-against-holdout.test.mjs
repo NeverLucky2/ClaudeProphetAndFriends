@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildVerdict, scoreMaxPositionSizePct, scoreStopAtPct, scoreMaxConcurrentPositions } from './score-rule-against-holdout.mjs';
+import { buildVerdict, scoreMaxPositionSizePct, scoreStopAtPct, scoreMaxConcurrentPositions, scoreNoReentryWithinHours } from './score-rule-against-holdout.mjs';
 
 test('buildVerdict: trades_affected = 0 -> INCONCLUSIVE', () => {
   const v = buildVerdict({
@@ -161,4 +161,35 @@ test('scoreMaxConcurrentPositions: exceeds limit -> flagged', () => {
   const v = scoreMaxConcurrentPositions(trades, { limit: 2 });
   assert.equal(v.trades_affected, 1); // only the 3rd BUY pushes count to 3 (>2)
   assert.equal(v.net_pl_delta_usd, 200); // -1 × (-200), preventing the loser saves $200
+});
+
+test('scoreNoReentryWithinHours: no reentries -> 0 affected', () => {
+  const trades = [
+    { action: 'BUY', symbol: 'A', timestamp: '2026-05-01T10:00:00Z', market_data: { friction_adjusted_pl: 50 } },
+    { action: 'SELL', symbol: 'A', timestamp: '2026-05-01T11:00:00Z', market_data: { friction_adjusted_pl: 50 } },
+    { action: 'BUY', symbol: 'B', timestamp: '2026-05-01T12:30:00Z', market_data: { friction_adjusted_pl: 100 } },
+  ];
+  const v = scoreNoReentryWithinHours(trades, { hours: 2 });
+  assert.equal(v.trades_affected, 0);
+});
+
+test('scoreNoReentryWithinHours: reentry within window -> flagged', () => {
+  // SELL at 11:00, BUY at 12:30 → 1.5h gap, under 2h window.
+  const trades = [
+    { action: 'BUY', symbol: 'A', timestamp: '2026-05-01T10:00:00Z', market_data: { friction_adjusted_pl: 50 } },
+    { action: 'SELL', symbol: 'A', timestamp: '2026-05-01T11:00:00Z', market_data: { friction_adjusted_pl: 50 } },
+    { action: 'BUY', symbol: 'A', timestamp: '2026-05-01T12:30:00Z', market_data: { friction_adjusted_pl: -75 } },
+  ];
+  const v = scoreNoReentryWithinHours(trades, { hours: 2 });
+  assert.equal(v.trades_affected, 1);
+  assert.equal(v.net_pl_delta_usd, 75); // prevents a $75 loss
+});
+
+test('scoreNoReentryWithinHours: reentry past window -> not flagged', () => {
+  const trades = [
+    { action: 'SELL', symbol: 'A', timestamp: '2026-05-01T11:00:00Z', market_data: { friction_adjusted_pl: 50 } },
+    { action: 'BUY', symbol: 'A', timestamp: '2026-05-01T14:00:00Z', market_data: { friction_adjusted_pl: -75 } },
+  ];
+  const v = scoreNoReentryWithinHours(trades, { hours: 2 });
+  assert.equal(v.trades_affected, 0);
 });

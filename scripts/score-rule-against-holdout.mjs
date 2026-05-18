@@ -126,3 +126,38 @@ export function scoreMaxConcurrentPositions(holdoutTrades, params) {
     blocked_winners, blocked_losers, details,
   });
 }
+
+export function scoreNoReentryWithinHours(holdoutTrades, params) {
+  const { hours } = params;
+  const windowMs = hours * 3600 * 1000;
+  const sorted = [...holdoutTrades].sort((a, b) => (a.timestamp ?? '').localeCompare(b.timestamp ?? ''));
+  const lastExitBySymbol = new Map();
+  let trades_affected = 0;
+  let net_pl_delta_usd = 0;
+  let blocked_winners = 0;
+  let blocked_losers = 0;
+  const details = [];
+
+  for (const t of sorted) {
+    const ts = Date.parse(t.timestamp);
+    if (!Number.isFinite(ts)) continue;
+    if (t.action === 'SELL' || t.action === 'CLOSE') {
+      lastExitBySymbol.set(t.symbol, ts);
+    } else if (t.action === 'BUY') {
+      const lastExit = lastExitBySymbol.get(t.symbol);
+      if (lastExit !== undefined && (ts - lastExit) < windowMs) {
+        trades_affected += 1;
+        const pl = t.market_data?.friction_adjusted_pl ?? 0;
+        net_pl_delta_usd -= pl;
+        if (pl > 0) blocked_winners += 1;
+        if (pl < 0) blocked_losers += 1;
+        details.push({ symbol: t.symbol, timestamp: t.timestamp, hours_since_exit: (ts - lastExit) / 3600000, pl });
+      }
+    }
+  }
+  return buildVerdict({
+    predicate: 'no_reentry_within_hours', params,
+    holdout_size: holdoutTrades.length, trades_affected, net_pl_delta_usd,
+    blocked_winners, blocked_losers, details,
+  });
+}
