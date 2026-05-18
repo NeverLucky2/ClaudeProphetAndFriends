@@ -671,7 +671,7 @@
     .terminal-panel.active { display: flex; height: 100%; }
 
     .terminal-split {
-      display: flex; flex: 1; overflow: hidden; min-height: 0;
+      position: relative; display: flex; flex: 1; overflow: hidden; min-height: 0;
     }
 
     .terminal {
@@ -681,6 +681,31 @@
     }
     .terminal::-webkit-scrollbar { width: 4px; }
     .terminal::-webkit-scrollbar-thumb { background: var(--rule); }
+    .terminal-area {
+      position: relative;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+    .jump-bottom-btn {
+      position: absolute;
+      bottom: 12px;
+      right: 16px;
+      display: none;
+      padding: 6px 12px;
+      font-size: 12px;
+      font-family: inherit;
+      background: var(--accent);
+      color: var(--paper);
+      border: none;
+      border-radius: 14px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.25);
+      cursor: pointer;
+      z-index: 10;
+    }
+    .jump-bottom-btn.visible { display: inline-block; }
+    .jump-bottom-btn:hover { filter: brightness(1.1); }
 
     .log-entry { padding: 3px 0; font-size: 12px; line-height: 1.65; word-break: break-word; overflow-wrap: break-word; }
     .log-entry .time { color: var(--ink-faint); margin-right: 8px; font-size: 10.5px; }
@@ -2741,6 +2766,35 @@ async function submitSandboxFromAccount() {
 
 const sandboxTerminals = {}; // { sandboxId: { el, logs[] } }
 
+function attachTerminalScrollControls(sandboxId) {
+  const t = sandboxTerminals[sandboxId];
+  if (!t || !t.termEl) return;
+
+  t.autoScroll = true;
+
+  const areaEl = t.el.querySelector('.terminal-area');
+  if (!areaEl) return;
+
+  const btn = document.createElement('button');
+  btn.className = 'jump-bottom-btn';
+  btn.type = 'button';
+  btn.title = 'Jump to bottom';
+  btn.innerHTML = '&#8595; Jump to bottom';
+  areaEl.appendChild(btn);
+  t.jumpBtn = btn;
+
+  t.termEl.addEventListener('scroll', () => {
+    const atBottom = t.termEl.scrollHeight - t.termEl.scrollTop - t.termEl.clientHeight < 50;
+    t.autoScroll = atBottom;
+    t.jumpBtn.classList.toggle('visible', !atBottom);
+  });
+
+  btn.addEventListener('click', () => {
+    t.termEl.scrollTop = t.termEl.scrollHeight;
+    // The scroll listener will pick up the at-bottom state and hide the button.
+  });
+}
+
 function ensureSandboxTerminal(sandboxId, label) {
   if (sandboxTerminals[sandboxId]) return sandboxTerminals[sandboxId];
   
@@ -2766,8 +2820,10 @@ function ensureSandboxTerminal(sandboxId, label) {
       <button class="btn-clear" onclick="document.querySelector('[data-search=${sandboxId}]').value='';filterTerminalFor('${sandboxId}')" title="Clear">Clear</button>
     </div>
     <div class="terminal-split">
-      <div class="terminal" data-terminal="${sandboxId}">
-        <div class="log-entry info"><span class="time">--:--:--</span>${esc(label)} ready. Press Start to begin.</div>
+      <div class="terminal-area">
+        <div class="terminal" data-terminal="${sandboxId}">
+          <div class="log-entry info"><span class="time">--:--:--</span>${esc(label)} ready. Press Start to begin.</div>
+        </div>
       </div>
       <div class="sidebar">
         <div class="section">
@@ -2830,6 +2886,7 @@ function ensureSandboxTerminal(sandboxId, label) {
     <div class="sidebar-overlay" data-overlay="${sandboxId}" onclick="toggleMobileSidebar('${sandboxId}')"></div>`;
   container.appendChild(wrapper);
   sandboxTerminals[sandboxId] = { el: wrapper, termEl: wrapper.querySelector('[data-terminal]') };
+  attachTerminalScrollControls(sandboxId);
   return sandboxTerminals[sandboxId];
 }
 
@@ -2894,15 +2951,17 @@ function ensureManagerTerminal() {
     + '<button class="btn sm primary" onclick="saveManagerPrompt()" style="margin-top:4px;font-size:10px">Save</button>'
     + '</div>'
     + '<div class="terminal-split">'
+    + '<div class="terminal-area">'
     + '<div class="terminal" data-terminal="_manager" style="flex:1">'
     + '<div class="log-entry info"><span class="time">--:--:--</span>Manager ready. Configure agents, strategies, and research here.</div>'
-    + '</div></div>'
+    + '</div></div></div>'
     + '<div class="chat-input-bar">'
     + '<input type="text" placeholder="Ask the manager to create agents, strategies, research..." onkeydown="if(event.key===\'Enter\')sendManagerMessage()" autocomplete="off" id="manager-chat-input">'
     + '<button class="btn primary sm" onclick="sendManagerMessage()">Send</button>'
     + '</div>';
   container.appendChild(wrapper);
   sandboxTerminals['_manager'] = { el: wrapper, termEl: wrapper.querySelector('[data-terminal]') };
+  attachTerminalScrollControls('_manager');
 }
 
 function refreshManagerDropdowns() {
@@ -2957,8 +3016,12 @@ async function saveManagerPrompt() {
 
 async function newManagerSession() {
   await fetch('/api/manager/new-session', { method: 'POST' });
-  const term = sandboxTerminals['_manager']?.termEl;
-  if (term) term.innerHTML = '<div class="log-entry info"><span class="time">' + fmtTime() + '</span>New conversation started.</div>';
+  const t = sandboxTerminals['_manager'];
+  if (t && t.termEl) {
+    t.termEl.innerHTML = '<div class="log-entry info"><span class="time">' + fmtTime() + '</span>New conversation started.</div>';
+    t.autoScroll = true;
+    if (t.jumpBtn) t.jumpBtn.classList.remove('visible');
+  }
   showToast('New manager session', 'info');
 }
 
@@ -3053,7 +3116,7 @@ function logToSandbox(sandboxId, html) {
   const t = sandboxTerminals[sandboxId];
   if (!t) return;
   t.termEl.insertAdjacentHTML('beforeend', html);
-  t.termEl.scrollTop = t.termEl.scrollHeight;
+  if (t.autoScroll !== false) t.termEl.scrollTop = t.termEl.scrollHeight; // undefined = uninitialized terminal, treat as "scroll"
 }
 
 function filterTerminalFor(sandboxId) {
