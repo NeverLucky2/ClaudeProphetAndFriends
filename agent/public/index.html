@@ -751,6 +751,10 @@
     .sandbox-tab .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
     .sandbox-tab .dot.running { background: var(--success); box-shadow: 0 0 4px var(--success); }
     .sandbox-tab .dot.stopped { background: var(--ink-faint); }
+    .sandbox-tab .dot.paused { background: var(--warning); }
+    .sandbox-tab[draggable="true"] { cursor: grab; }
+    .sandbox-tab.dragging { opacity: 0.5; cursor: grabbing; }
+    .sandbox-tab.drag-over { box-shadow: inset 2px 0 0 var(--accent); }
     .sandbox-terminal-wrapper { flex: 1; overflow: hidden; }
     .sandbox-page-picker {
       display: flex; gap: 4px; margin-bottom: 16px; padding: 4px;
@@ -1522,10 +1526,60 @@ function getSandboxEntries() {
   return Object.values(config.sandboxes || {});
 }
 
+// Persisted sandbox-tab order: per-browser localStorage, falls back to createdAt.
+const TAB_ORDER_STORAGE_KEY = 'prophet:sandbox-tab-order';
+
+function loadTabOrder() {
+  try {
+    const raw = localStorage.getItem(TAB_ORDER_STORAGE_KEY);
+    const arr = raw ? JSON.parse(raw) : [];
+    return Array.isArray(arr) ? arr.filter(x => typeof x === 'string') : [];
+  } catch { return []; }
+}
+
+function saveTabOrder(ids) {
+  try { localStorage.setItem(TAB_ORDER_STORAGE_KEY, JSON.stringify(ids)); } catch {}
+}
+
+function getSandboxTabOrder() {
+  const all = getSandboxEntries();
+  const byId = new Map(all.map(s => [s.id, s]));
+  const saved = loadTabOrder();
+  const ordered = [];
+  const seen = new Set();
+  for (const id of saved) {
+    if (byId.has(id) && !seen.has(id)) {
+      ordered.push(byId.get(id));
+      seen.add(id);
+    }
+  }
+  const remaining = all
+    .filter(s => !seen.has(s.id))
+    .sort((a, b) =>
+      (a.createdAt || '').localeCompare(b.createdAt || '') || a.id.localeCompare(b.id)
+    );
+  for (const s of remaining) ordered.push(s);
+  return ordered;
+}
+
+function teardownSandboxTerminal(sandboxId) {
+  if (!sandboxId || sandboxId === '_manager') return;
+  const t = sandboxTerminals[sandboxId];
+  if (!t) return;
+  if (t.el && t.el.parentNode) t.el.parentNode.removeChild(t.el);
+  delete sandboxTerminals[sandboxId];
+}
+
+let _draggedSandboxId = null;
+
 function getEffectiveSandboxId() {
   if (selectedSandboxId === '_manager') return '_manager';
-  if (selectedSandboxId && (config.sandboxes || {})[selectedSandboxId]) return selectedSandboxId;
-  return config.activeSandboxId || null;
+  const sandboxes = config.sandboxes || {};
+  if (selectedSandboxId && sandboxes[selectedSandboxId]) return selectedSandboxId;
+  if (config.activeSandboxId && sandboxes[config.activeSandboxId]) return config.activeSandboxId;
+  const ordered = getSandboxTabOrder();
+  if (ordered.length === 0) return '_manager';
+  return ordered[0].id;
 }
 
 function getSelectedSandbox() {
@@ -1770,7 +1824,30 @@ function connectSSE() {
   es.addEventListener('config', e => { config = JSON.parse(e.data); renderAll(); refreshSelectedSandboxConfig(); });
   es.addEventListener('status', e => {
     const d = JSON.parse(e.data);
-    if (selectedSandboxId && d.sandboxId !== selectedSandboxId) return;
+
+    // 1. Patch _healthState for the sandbox whose status changed so both
+    //    renderSandboxTabs and renderSandboxesTab read the new running/paused
+    //    state on the very next render.
+    if (d.sandboxId && window._healthState?.sandboxes) {
+      const entry = window._healthState.sandboxes.find(s => s.sandboxId === d.sandboxId);
+      if (entry) {
+        entry.state = entry.state || {};
+        if (d.status === 'started' || d.status === 'resumed') {
+          entry.state.running = true;
+          entry.state.paused = false;
+        } else if (d.status === 'paused') {
+          entry.state.paused = true;
+        } else if (d.status === 'stopped') {
+          entry.state.running = false;
+          entry.state.paused = false;
+        }
+      }
+      renderSandboxTabs();
+      renderSandboxesTab();
+    }
+
+    // 2. Preserve the top-bar button behavior for the currently selected tab.
+    if (selectedSandboxId && d.sandboxId && d.sandboxId !== selectedSandboxId) return;
     if (!selectedSandboxId || !d.sandboxId || d.sandboxId === getEffectiveSandboxId()) updateButtons(d.status);
   });
   es.addEventListener('agent_log', e => {
@@ -2859,35 +2936,59 @@ function ensureSandboxTerminal(sandboxId, label) {
 function renderSandboxTabs() {
   const el = document.getElementById('sandbox-tabs');
   if (!el) return;
-  const accounts = config.accounts || [];
-  
+
+  const sandboxes = getSandboxTabOrder();
   const currentSid = getEffectiveSandboxId();
-  
-  // Manager tab first
+
+  // Manager tab first (pinned, not draggable)
   ensureManagerTerminal();
   refreshManagerDropdowns();
   let html = '<div class="sandbox-tab ' + (currentSid === '_manager' ? 'active' : '') + '" onclick="switchSandboxTab(\'_manager\')" style="border-right:1px solid var(--border)">'
     + '<span class="dot" style="background:var(--accent)"></span><span>Manager</span></div>';
-  
-  // Account tabs
-  html += accounts.map(a => {
-    const sandboxId = 'sbx_' + a.id;
+
+  // Sandbox tabs (one per sandbox; draggable)
+  html += sandboxes.map(sbx => {
+    const sandboxId = sbx.id;
     const runtime = (window._healthState?.sandboxes || []).find(s => s.sandboxId === sandboxId);
-    const running = runtime?.state?.running;
+    const running = !!(runtime?.state?.running);
+    const paused = !!(runtime?.state?.paused);
     const active = sandboxId === currentSid;
-    const dotClass = running ? 'running' : 'stopped';
-    const label = a.name || (a.paper ? 'Paper' : 'Live');
+    const dotClass = running ? (paused ? 'paused' : 'running') : 'stopped';
+    const label = sbx.name || sbx.id;
     const beats = runtime?.state?.beatCount || 0;
     ensureSandboxTerminal(sandboxId, label);
-    const statusText = running ? 'Beat #' + beats : 'Stopped';
-    return '<div class="sandbox-tab ' + (active ? 'active' : '') + '" onclick="switchSandboxTab(\'' + sandboxId + '\')"><span class="dot ' + dotClass + '"></span><span>' + esc(label) + '</span><span style="font-size:10px;color:var(--ink-faint);margin-left:2px">' + statusText + '</span></div>';
+    const statusText = running ? (paused ? 'Paused' : 'Beat #' + beats) : 'Stopped';
+    return '<div class="sandbox-tab ' + (active ? 'active' : '')
+      + '" draggable="true" data-sandbox-id="' + esc(sandboxId) + '"'
+      + ' ondragstart="onSandboxTabDragStart(event)"'
+      + ' ondragover="onSandboxTabDragOver(event)"'
+      + ' ondragleave="onSandboxTabDragLeave(event)"'
+      + ' ondrop="onSandboxTabDrop(event)"'
+      + ' ondragend="onSandboxTabDragEnd(event)"'
+      + ' onclick="switchSandboxTab(\'' + sandboxId + '\')">'
+      + '<span class="dot ' + dotClass + '"></span><span>' + esc(label) + '</span>'
+      + '<span style="font-size:10px;color:var(--ink-faint);margin-left:2px">' + statusText + '</span></div>';
   }).join('');
-  
+
   el.innerHTML = html;
-  
-  // Show/hide terminals
+
+  // Orphan sweep: tear down cached terminals whose sandbox no longer exists.
+  const liveIds = new Set(['_manager', ...sandboxes.map(s => s.id)]);
+  for (const cachedId of Object.keys(sandboxTerminals)) {
+    if (!liveIds.has(cachedId)) teardownSandboxTerminal(cachedId);
+  }
+
+  // If the active tab was just removed, snap to the new effective sandbox.
+  // switchSandboxTab re-calls renderSandboxTabs; on the second pass currentSid
+  // is valid, so this branch is not re-entered.
+  if (currentSid && !liveIds.has(currentSid)) {
+    switchSandboxTab(getEffectiveSandboxId());
+    return;
+  }
+
+  // Show/hide terminals.
   for (const [sid, t] of Object.entries(sandboxTerminals)) {
-    t.el.style.display = sid === currentSid ? 'flex' : 'none';
+    t.el.style.display = sid === getEffectiveSandboxId() ? 'flex' : 'none';
   }
 }
 
@@ -3033,6 +3134,53 @@ async function sendManagerMessage() {
     if (thinkEl) thinkEl.remove();
     logToSandbox('_manager', '<div class="log-entry error"><span class="time">' + fmtTime() + '</span>Error: ' + esc(e.message) + '</div>');
   }
+}
+
+function onSandboxTabDragStart(e) {
+  const tab = e.currentTarget;
+  _draggedSandboxId = tab.dataset.sandboxId || null;
+  if (!_draggedSandboxId) return;
+  e.dataTransfer.effectAllowed = 'move';
+  try { e.dataTransfer.setData('text/plain', _draggedSandboxId); } catch {}
+  tab.classList.add('dragging');
+}
+
+function onSandboxTabDragOver(e) {
+  if (!_draggedSandboxId) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+  const tab = e.currentTarget;
+  if (tab.dataset.sandboxId && tab.dataset.sandboxId !== _draggedSandboxId) {
+    tab.classList.add('drag-over');
+  }
+}
+
+function onSandboxTabDragLeave(e) {
+  e.currentTarget.classList.remove('drag-over');
+}
+
+function onSandboxTabDrop(e) {
+  e.preventDefault();
+  const tab = e.currentTarget;
+  const targetId = tab.dataset.sandboxId;
+  tab.classList.remove('drag-over');
+  if (!_draggedSandboxId || !targetId || _draggedSandboxId === targetId) return;
+
+  const order = getSandboxTabOrder().map(s => s.id);
+  const fromIdx = order.indexOf(_draggedSandboxId);
+  const toIdx = order.indexOf(targetId);
+  if (fromIdx < 0 || toIdx < 0) return;
+
+  order.splice(fromIdx, 1);
+  order.splice(toIdx, 0, _draggedSandboxId);
+  saveTabOrder(order);
+  renderSandboxTabs();
+}
+
+function onSandboxTabDragEnd(e) {
+  e.currentTarget.classList.remove('dragging');
+  document.querySelectorAll('.sandbox-tab.drag-over').forEach(el => el.classList.remove('drag-over'));
+  _draggedSandboxId = null;
 }
 
 async function switchSandboxTab(sandboxId) {
