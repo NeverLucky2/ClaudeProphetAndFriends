@@ -75,7 +75,7 @@ before(async () => {
   baseUrl = `http://127.0.0.1:${port}`;
   const { spawn } = await import('child_process');
   proc = spawn(process.execPath, [SERVER_ENTRY], {
-    env: { ...process.env, AGENT_PORT: String(port), OPENPROPHET_DATA_ROOT: path.join(tmpDir, 'data') },
+    env: { ...process.env, AGENT_PORT: String(port), OPENPROPHET_DATA_ROOT: path.join(tmpDir, 'data'), AGENT_AUTH_TOKEN: '' },
     cwd: tmpDir,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
