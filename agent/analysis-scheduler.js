@@ -33,6 +33,7 @@ import { EventEmitter } from 'events';
 import {
   DAILY_BRIEF_FILENAME,
   injectFreshnessFields,
+  briefAsOfDate,
 } from './daily-brief-freshness.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -356,14 +357,23 @@ export class AnalysisScheduler extends EventEmitter {
   // Run all startup checks in order. Call once after start() — runs in background.
   async runStartupChecks() {
     const isoDate = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-    const todaySlug = isoDate.replace(/-/g, '');
     const { hour, dayOfWeek } = this._getETInfo();
     const isWeekday = dayOfWeek >= 1 && dayOfWeek <= 5;
     let adaptNeeded = false;
 
-    // 1. Daily briefing (file-based) — skip if market has already closed (≥4 PM ET); will fire at 6 AM ET next weekday
-    try { await fs.access(path.join(REPORTS_DIR, `daily_brief_${todaySlug}.json`)); }
-    catch {
+    // 1. Daily briefing — read the stable daily_brief.json and check its
+    // as_of date. If the file is missing, unreadable, or stamped with a
+    // different UTC date, treat it as "no briefing for today". Skip if
+    // market has already closed (≥4 PM ET); will fire at 6 AM ET next weekday.
+    let briefIsCurrent = false;
+    try {
+      const briefRaw = await fs.readFile(path.join(REPORTS_DIR, DAILY_BRIEF_FILENAME), 'utf-8');
+      const briefJson = JSON.parse(briefRaw);
+      briefIsCurrent = briefAsOfDate(briefJson) === isoDate;
+    } catch {
+      briefIsCurrent = false;
+    }
+    if (!briefIsCurrent) {
       if (await this._isLocked(this._getLockKey('daily_briefing', isoDate))) {
         this._log('Daily briefing already running in another process — skipping startup trigger.', 'info');
       } else if (isWeekday && hour < 16) {
