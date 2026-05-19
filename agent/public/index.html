@@ -1824,7 +1824,30 @@ function connectSSE() {
   es.addEventListener('config', e => { config = JSON.parse(e.data); renderAll(); refreshSelectedSandboxConfig(); });
   es.addEventListener('status', e => {
     const d = JSON.parse(e.data);
-    if (selectedSandboxId && d.sandboxId !== selectedSandboxId) return;
+
+    // 1. Patch _healthState for the sandbox whose status changed so both
+    //    renderSandboxTabs and renderSandboxesTab read the new running/paused
+    //    state on the very next render.
+    if (d.sandboxId && window._healthState?.sandboxes) {
+      const entry = window._healthState.sandboxes.find(s => s.sandboxId === d.sandboxId);
+      if (entry) {
+        entry.state = entry.state || {};
+        if (d.status === 'started' || d.status === 'resumed') {
+          entry.state.running = true;
+          entry.state.paused = false;
+        } else if (d.status === 'paused') {
+          entry.state.paused = true;
+        } else if (d.status === 'stopped') {
+          entry.state.running = false;
+          entry.state.paused = false;
+        }
+      }
+      renderSandboxTabs();
+      renderSandboxesTab();
+    }
+
+    // 2. Preserve the top-bar button behavior for the currently selected tab.
+    if (selectedSandboxId && d.sandboxId && d.sandboxId !== selectedSandboxId) return;
     if (!selectedSandboxId || !d.sandboxId || d.sandboxId === getEffectiveSandboxId()) updateButtons(d.status);
   });
   es.addEventListener('agent_log', e => {
