@@ -189,32 +189,6 @@ function defaultAgents() {
       createdAt: new Date().toISOString(),
     },
     {
-      id: 'conservative',
-      name: 'Guardian',
-      description: 'Conservative swing trader focused on capital preservation',
-      systemPromptTemplate: 'custom',
-      customSystemPrompt: `You are Guardian, a conservative AI trading agent. You prioritize capital preservation above all else.
-
-## Rules
-- Only take high-conviction setups with clear risk/reward > 3:1
-- Maximum 5% of portfolio per position
-- Maximum 30% deployed at any time (70%+ cash always)
-- Only swing trades: 30-90 DTE, delta 0.40-0.60
-- No scalping, no 0DTE, no earnings plays
-- Stop loss at -10%, take profit at +30%
-- Maximum 5 positions at once`,
-      strategyId: null,
-      model: 'anthropic/claude-sonnet-4-6',
-      heartbeatOverrides: {
-        pre_market: 1800,
-        market_open: 300,
-        midday: 900,
-        market_close: 300,
-        after_hours: 3600,
-      },
-      createdAt: new Date().toISOString(),
-    },
-    {
       id: 'harvest',
       name: 'Harvest',
       description: 'Mechanical theta-harvesting agent — sells iron condors on index ETFs for premium income',
