@@ -117,7 +117,7 @@ OpenProphet
 ## Features
 
 ### Automated Analysis Scheduler
-- **Pre-market briefing** — Runs automatically at 6:00 AM ET on weekdays. Calls `run_market_briefing`, `run_ftd_check`, `run_economic_calendar`, and `run_earnings_calendar`, then saves `data/reports/daily_brief_YYYYMMDD.json`
+- **Pre-market briefing** — Runs automatically at 6:00 AM ET on weekdays. Calls `run_market_briefing`, `run_ftd_check`, `run_economic_calendar`, and `run_earnings_calendar`, then saves `data/reports/daily_brief.json` (with `as_of` and `stale_after` ISO-8601 timestamps; reader emits a `STALE_BRIEF:` marker when the 29h window expires)
 - **Weekly screeners** — Runs automatically at 6:00 PM ET on Sundays. Calls `run_market_briefing`, `run_market_top_check`, `run_vcp_screener`, and `run_pead_screener`, then saves `data/reports/weekly_regime_YYYYMMDD.json`
 - **Prophet auto-reads results** — On each pre-market heartbeat Prophet calls `read_latest_report("daily_brief")` before making any trading decisions. On Mondays it also reads `read_latest_report("weekly_regime")` for the Sunday watchlist
 - **Manual trigger** — `POST /api/scheduler/trigger` lets you run either job on demand (see Dashboard API)
@@ -519,7 +519,7 @@ The scheduler runs two recurring jobs automatically whenever the server is runni
 
 | Job | Trigger | Output | Notes |
 |-----|---------|--------|-------|
-| `daily_briefing` | 6:00 AM ET weekdays · startup if file missing | `data/reports/daily_brief_YYYYMMDD.json` | FMP optional |
+| `daily_briefing` | 6:00 AM ET weekdays · startup if as_of ≠ today (ET) | `data/reports/daily_brief.json` | FMP optional |
 | `weekly_screeners` | 6:00 PM ET Sundays | `data/reports/weekly_regime_YYYYMMDD.json` | FMP required for screeners |
 | `scenario_analysis` | Startup if no `scenario_*_YYYYMMDD.md` today | `data/reports/scenario_*.md` + `review_*.md` | Web search required |
 | `review_performance` | 6:05 AM ET Mondays · startup if not run this week | Terminal output only | Reads last 5 sessions + 40 decisions |

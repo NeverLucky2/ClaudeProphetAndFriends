@@ -12,7 +12,7 @@
  *   6:00 PM ET Sundays             → weekly_screeners
  *
  * Startup-based (on server start, if criteria met):
- *   daily_briefing               → data/reports/daily_brief_YYYYMMDD.json missing
+ *   daily_briefing               → data/reports/daily_brief.json missing or stamped with a non-today as_of
  *   scenario_analysis            → no data/reports/scenario_*_YYYYMMDD.md today
  *   review_performance           → not run this ISO week  → then adapt_strategy
  *   review_performance_penny     → not run this ISO week  → then adapt_strategy_penny
@@ -30,6 +30,11 @@ import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { EventEmitter } from 'events';
+import {
+  DAILY_BRIEF_FILENAME,
+  injectFreshnessFields,
+  briefAsOfETDate,
+} from './daily-brief-freshness.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(__dirname, '..');
@@ -352,14 +357,30 @@ export class AnalysisScheduler extends EventEmitter {
   // Run all startup checks in order. Call once after start() — runs in background.
   async runStartupChecks() {
     const isoDate = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-    const todaySlug = isoDate.replace(/-/g, '');
     const { hour, dayOfWeek } = this._getETInfo();
     const isWeekday = dayOfWeek >= 1 && dayOfWeek <= 5;
     let adaptNeeded = false;
 
-    // 1. Daily briefing (file-based) — skip if market has already closed (≥4 PM ET); will fire at 6 AM ET next weekday
-    try { await fs.access(path.join(REPORTS_DIR, `daily_brief_${todaySlug}.json`)); }
-    catch {
+    // 1. Daily briefing — read the stable daily_brief.json and check its
+    // as_of date (ET-local, matching isoDate). If the file is missing,
+    // unreadable, or stamped with a different ET date, treat it as "no
+    // briefing for today". Skip if market has already closed (≥4 PM ET);
+    // will fire at 6 AM ET next weekday.
+    let briefIsCurrent = false;
+    try {
+      const briefRaw = await fs.readFile(path.join(REPORTS_DIR, DAILY_BRIEF_FILENAME), 'utf-8');
+      const briefJson = JSON.parse(briefRaw);
+      briefIsCurrent = briefAsOfETDate(briefJson) === isoDate;
+    } catch (err) {
+      // ENOENT is the expected pre-brief state; everything else (EACCES, EISDIR,
+      // SyntaxError from a corrupt file) deserves an operator signal because
+      // a blind re-trigger would just hit the same error inside _runDailyBriefing.
+      if (err.code !== 'ENOENT') {
+        this._log(`Daily briefing freshness check failed: ${err.code || err.name} — will re-trigger. (${err.message})`, 'warn');
+      }
+      briefIsCurrent = false;
+    }
+    if (!briefIsCurrent) {
       if (await this._isLocked(this._getLockKey('daily_briefing', isoDate))) {
         this._log('Daily briefing already running in another process — skipping startup trigger.', 'info');
       } else if (isWeekday && hour < 16) {
@@ -1091,11 +1112,12 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
   }
 
   async _runDailyBriefing(date) {
-    const dateSlug = date.replace(/-/g, '');
     // Lock is acquired by triggerJob — no per-runner lock needed here.
 
     this._log(`Starting daily briefing for ${date}...`, 'info');
     this.emit('scheduler_job_start', { job: 'daily_briefing', date });
+
+    const briefPath = path.join(REPORTS_DIR, DAILY_BRIEF_FILENAME);
 
     const hasFmp = !!process.env.FMP_API_KEY;
     const fmpNote = hasFmp ? '' : '\nNote: FMP_API_KEY not set — FTD check, economic calendar, earnings calendar, analyst actions, and catalyst news will be skipped.';
@@ -1113,7 +1135,7 @@ ${hasFmp ? `2. run_ftd_check — detects Follow-Through Day signals (requires FM
 3. get_marketwatch_all — fetches all MarketWatch feeds. Scan for market-moving headlines and extract up to 7 that a trader must know about today.`}
 
 After all tools have returned, use the Write tool to save the briefing to exactly this path:
-data/reports/daily_brief_${dateSlug}.json
+data/reports/${DAILY_BRIEF_FILENAME}
 
 The JSON must be exactly this structure (fill all values from tool results):
 {
@@ -1132,11 +1154,27 @@ The JSON must be exactly this structure (fill all values from tool results):
   "summary": "<2-3 sentences describing today's market setup, key risks from headlines, notable analyst actions and ticker catalysts on Prophet's universe, and any sector-specific warnings>"
 }
 
-Use null for any field where the corresponding tool failed. Use [] for analyst_actions and ticker_catalysts if the tools were skipped or returned empty. Write only the JSON — no markdown, no explanation.`;
+Use null for any field where the corresponding tool failed. Use [] for analyst_actions and ticker_catalysts if the tools were skipped or returned empty. Do NOT include "as_of" or "stale_after" fields — the scheduler injects those after you write. Write only the JSON — no markdown, no explanation.`;
 
     await this._runOneshotOpencode(prompt, 'daily_briefing', 10 * 60 * 1000);
-    this._log(`Daily briefing complete → data/reports/daily_brief_${dateSlug}.json`, 'success');
-    this.emit('scheduler_job_end', { job: 'daily_briefing', date, output: `data/reports/daily_brief_${dateSlug}.json` });
+
+    // Post-process: read the LLM-written file, inject as_of + stale_after from
+    // the scheduler's clock (single source of truth), and atomically rewrite.
+    // A failure here leaves the file without freshness fields — the reader
+    // treats that as stale and the next scheduler cycle re-runs the briefing.
+    try {
+      const raw = await fs.readFile(briefPath, 'utf-8');
+      const parsed = JSON.parse(raw);
+      const enriched = injectFreshnessFields(parsed, new Date());
+      const tmpPath = `${briefPath}.tmp`;
+      await fs.writeFile(tmpPath, JSON.stringify(enriched, null, 2), 'utf-8');
+      await fs.rename(tmpPath, briefPath);
+    } catch (err) {
+      this._log(`Daily briefing freshness injection failed: ${err.message}`, 'warn');
+    }
+
+    this._log(`Daily briefing complete → data/reports/${DAILY_BRIEF_FILENAME}`, 'success');
+    this.emit('scheduler_job_end', { job: 'daily_briefing', date, output: `data/reports/${DAILY_BRIEF_FILENAME}` });
   }
 
   async _runWeeklyScreeners(date) {
