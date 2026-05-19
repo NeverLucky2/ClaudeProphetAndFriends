@@ -3615,10 +3615,10 @@ function renderAccounts() {
     return `
       <div class="account-card">
         <div class="account-head">
-          <h3>${escapeHtml(a.name)}</h3>${activeBadge}
+          <h3>${esc(a.name)}</h3>${activeBadge}
         </div>
-        <div class="account-meta">${liveTag} • ${escapeHtml(a.baseUrl || '')}</div>
-        <div class="account-key">Key: ${a.secretKey || '****'}</div>
+        <div class="account-meta">${liveTag} • ${esc(a.baseUrl || '')}</div>
+        <div class="account-key">Key: ${esc(a.secretKey || '****')}</div>
         <div class="account-equity">${equityLine}</div>
         <div class="account-sandboxes">${sbxLine}</div>
         <div class="account-actions">
@@ -3650,7 +3650,6 @@ async function fetchAccountEquity(accountId) {
   } catch { /* swallow — equity is best-effort */ }
 }
 
-function escapeHtml(s) { return String(s || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
 function renderModels() {
   const el = document.getElementById('models-list');
@@ -3772,16 +3771,13 @@ function showModal(type, data) {
       + (profileOpts ? '<div class="form-group"><label>Heartbeat Profile (optional)</label><select id="f-sfa-profile"><option value="">None</option>'+profileOpts+'</select></div>' : '')
       + '<div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn primary" onclick="submitSandboxFromAccount()">Create Sandbox</button></div>';
   }
-  else if(type === 'account-create') {
-    modal.innerHTML = '<h3>Add Trading Account</h3><div class="form-group"><label>Account Name</label><input type="text" id="f-acc-name" placeholder="e.g. Paper Trading"></div><div class="form-row"><div class="form-group"><label>Public Key</label><input type="text" id="f-acc-pk" placeholder="AKXXXXXXXXXX"></div><div class="form-group"><label>Secret Key</label><input type="password" id="f-acc-sk" placeholder="Your secret key"></div></div><div class="form-group"><label>Base URL</label><input type="text" id="f-acc-url" placeholder="https://paper-api.alpaca.markets"><div class="form-hint">Leave blank for auto-detection based on paper/live selection</div></div><div class="form-group"><label><input type="checkbox" id="f-acc-paper" checked> Paper Trading</label></div><div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn primary" onclick="submitAccount()">Add Account</button></div>';
-  }
   else if(type === 'account-edit') {
     const a = data || {};
     modal.innerHTML = `
       <h3>Edit Account</h3>
       <div class="modal-body">
-        <label>Name<input id="m-name" value="${escapeHtml(a.name || '')}"></label>
-        <label>Base URL<input id="m-base" value="${escapeHtml(a.baseUrl || '')}"></label>
+        <label>Name<input id="m-name" value="${esc(a.name || '')}"></label>
+        <label>Base URL<input id="m-base" value="${esc(a.baseUrl || '')}"></label>
         <label><input type="checkbox" id="m-paper" ${a.paper ? 'checked' : ''}> Paper trading</label>
       </div>
       <div class="modal-actions">
@@ -3807,7 +3803,7 @@ function showModal(type, data) {
   else if(type === 'account-rotate') {
     const a = data || {};
     modal.innerHTML = `
-      <h3>Rotate Keys — ${escapeHtml(a.name || '')}</h3>
+      <h3>Rotate Keys — ${esc(a.name || '')}</h3>
       <div class="modal-body">
         <p class="acct-muted">Enter the new full publicKey and secretKey. Both required.</p>
         <label>Public Key<input id="m-pk" placeholder="PK..."></label>
@@ -3848,25 +3844,6 @@ function showModal(type, data) {
 
 function closeModal() { document.getElementById('modal-overlay').classList.remove('visible'); }
 
-async function submitAccount() {
-  const body = { name: v('f-acc-name'), publicKey: v('f-acc-pk'), secretKey: v('f-acc-sk'), baseUrl: v('f-acc-url'), paper: document.getElementById('f-acc-paper').checked };
-  try {
-    const r = await fetch('/api/accounts', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-    const d = await r.json();
-    if (d.error) { alert('Error: ' + d.error); return; }
-    closeModal();
-  } catch (e) { alert('Error: ' + e.message); }
-}
-
-async function submitEditAccount(id) {
-  const body = { name: v('f-eacc-name'), baseUrl: v('f-eacc-url'), paper: document.getElementById('f-eacc-paper').checked };
-  try {
-    const r = await fetch('/api/accounts/' + encodeURIComponent(id), {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-    const d = await r.json();
-    if (d.error) { alert('Error: ' + d.error); return; }
-    closeModal();
-  } catch (e) { alert('Error: ' + e.message); }
-}
 
 async function submitAccountAdd() {
   const body = {
