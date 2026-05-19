@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"prophet-trader/interfaces"
+	"strings"
 	"time"
 
 	"github.com/alpacahq/alpaca-trade-api-go/v3/alpaca"
@@ -16,6 +18,35 @@ import (
 	"github.com/shopspring/decimal"
 	"github.com/sirupsen/logrus"
 )
+
+// snapToTradablePrice rounds a price to Alpaca's minimum increment ($0.01 at
+// or above $1, $0.0001 below) and reports whether the input was modified.
+// Defends the broker boundary against HTTP 422 / 42210000 ("sub-penny
+// increment") rejections — callers that submit unrounded floats get snapped
+// and an info-level log so upstream bugs remain visible rather than masked.
+func snapToTradablePrice(price float64) (snapped float64, changed bool) {
+	snapped = roundToTick(price)
+	changed = math.Abs(snapped-price) > 1e-9
+	return
+}
+
+// snapAndLog applies snapToTradablePrice and emits a warn-level log when the
+// price was modified. Returning the snapped value lets callers both submit
+// the corrected price to the broker and write it back onto their own order
+// struct for persistence — keeping the ledger consistent with what Alpaca
+// actually received.
+func (s *AlpacaTradingService) snapAndLog(symbol, field string, price float64) float64 {
+	snapped, changed := snapToTradablePrice(price)
+	if changed {
+		s.logger.WithFields(logrus.Fields{
+			"symbol":   symbol,
+			"field":    field,
+			"original": price,
+			"snapped":  snapped,
+		}).Warn("Order price snapped to tradable increment; caller submitted sub-penny value")
+	}
+	return snapped
+}
 
 // AlpacaTradingService implements TradingService using Alpaca API
 type AlpacaTradingService struct {
@@ -26,6 +57,14 @@ type AlpacaTradingService struct {
 	baseURL    string
 	logger     *logrus.Logger
 	httpClient *http.Client
+	// brokerPlaceOrder is the broker submission seam. Defaults to
+	// s.client.PlaceOrder; tests inject fakes here so PlaceOrder behavior
+	// (pricing normalization, retry) is verifiable without a network call.
+	brokerPlaceOrder func(alpaca.PlaceOrderRequest) (*alpaca.Order, error)
+	// retryBackoff is the sleep between the first attempt and the single
+	// retry on transient broker errors. Kept short — heartbeat windows are
+	// tight and stale retries add market risk. Tests set to 0.
+	retryBackoff time.Duration
 }
 
 // NewAlpacaTradingService creates a new Alpaca trading service
@@ -47,7 +86,7 @@ func NewAlpacaTradingService(apiKey, secretKey, baseURL string, isPaper bool) (*
 		FullTimestamp: true,
 	})
 
-	return &AlpacaTradingService{
+	s := &AlpacaTradingService{
 		client:     client,
 		dataClient: dataClient,
 		apiKey:     apiKey,
@@ -55,7 +94,48 @@ func NewAlpacaTradingService(apiKey, secretKey, baseURL string, isPaper bool) (*
 		baseURL:    baseURL,
 		logger:     logger,
 		httpClient: &http.Client{Timeout: 30 * time.Second},
-	}, nil
+	}
+	s.brokerPlaceOrder = s.client.PlaceOrder
+	s.retryBackoff = 200 * time.Millisecond
+	return s, nil
+}
+
+// isTransientBrokerError reports whether err should be retried with backoff.
+// True for: 5xx, 429, and network-level timeouts/disconnects. False for any
+// 4xx (validation, auth, conflict) — those are caller bugs that won't fix
+// themselves by re-asking. Errs on the side of NOT retrying when unsure;
+// a missed retry costs a missed signal, but a wrong retry on a validation
+// error just burns the heartbeat window with duplicate failures.
+func isTransientBrokerError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	if strings.Contains(s, "http 5") || strings.Contains(s, "http 429") {
+		return true
+	}
+	for _, marker := range []string{"timeout", "connection reset", "connection refused", "eof", "no such host", "i/o timeout"} {
+		if strings.Contains(s, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// placeOrderWithRetry wraps the broker seam with a single retry on
+// transient errors. Validation/auth failures fail fast. Designed for short
+// outages (broker brief 5xx, transient network hiccup), not full outages —
+// the single-retry budget keeps the heartbeat window bounded.
+func (s *AlpacaTradingService) placeOrderWithRetry(req alpaca.PlaceOrderRequest) (*alpaca.Order, error) {
+	ord, err := s.brokerPlaceOrder(req)
+	if err == nil || !isTransientBrokerError(err) {
+		return ord, err
+	}
+	s.logger.WithError(err).WithField("symbol", req.Symbol).Warn("transient broker error; retrying once after backoff")
+	if s.retryBackoff > 0 {
+		time.Sleep(s.retryBackoff)
+	}
+	return s.brokerPlaceOrder(req)
 }
 
 // PlaceOrder places a new order. If order.Strategy is set, the strategy is
@@ -74,11 +154,13 @@ func (s *AlpacaTradingService) PlaceOrder(ctx context.Context, order *interfaces
 	}
 
 	if order.LimitPrice != nil {
+		*order.LimitPrice = s.snapAndLog(order.Symbol, "limit_price", *order.LimitPrice)
 		limitPrice := decimal.NewFromFloat(*order.LimitPrice)
 		req.LimitPrice = &limitPrice
 	}
 
 	if order.StopPrice != nil {
+		*order.StopPrice = s.snapAndLog(order.Symbol, "stop_price", *order.StopPrice)
 		stopPrice := decimal.NewFromFloat(*order.StopPrice)
 		req.StopPrice = &stopPrice
 	}
@@ -100,7 +182,7 @@ func (s *AlpacaTradingService) PlaceOrder(ctx context.Context, order *interfaces
 		"strategy": order.Strategy,
 	}).Info("Placing order")
 
-	alpacaOrder, err := s.client.PlaceOrder(req)
+	alpacaOrder, err := s.placeOrderWithRetry(req)
 	if err != nil {
 		s.logger.WithError(err).Error("Failed to place order")
 		return nil, fmt.Errorf("failed to place order: %w", err)
@@ -269,6 +351,7 @@ func (s *AlpacaTradingService) PlaceOptionsOrder(ctx context.Context, order *int
 	}
 
 	if order.LimitPrice != nil {
+		*order.LimitPrice = s.snapAndLog(order.Symbol, "limit_price", *order.LimitPrice)
 		limitPrice := decimal.NewFromFloat(*order.LimitPrice)
 		req.LimitPrice = &limitPrice
 	}
@@ -287,7 +370,7 @@ func (s *AlpacaTradingService) PlaceOptionsOrder(ctx context.Context, order *int
 		"strategy": order.Strategy,
 	}).Info("Placing options order")
 
-	alpacaOrder, err := s.client.PlaceOrder(req)
+	alpacaOrder, err := s.placeOrderWithRetry(req)
 	if err != nil {
 		s.logger.WithError(err).Error("Failed to place options order")
 		return nil, fmt.Errorf("failed to place options order: %w", err)
@@ -499,7 +582,8 @@ func (s *AlpacaTradingService) PlaceMultiLegOrder(ctx context.Context, order Mul
 		}
 	}
 	orderType := "limit"
-	limitPriceStr := fmt.Sprintf("%.2f", order.LimitPrice)
+	snappedLimit := s.snapAndLog("mleg", "limit_price", order.LimitPrice)
+	limitPriceStr := fmt.Sprintf("%.2f", snappedLimit)
 	if order.LimitPrice == 0 {
 		orderType = "market"
 		limitPriceStr = "" // omitempty will drop this field

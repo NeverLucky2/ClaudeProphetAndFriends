@@ -69,18 +69,29 @@ type turtleGuard interface {
 // HeartbeatResult is the per-beat outcome returned by RunHeartbeat. Cached
 // by the scheduler and exposed via /api/v1/turtle/status.
 type HeartbeatResult struct {
-	Date           string   `json:"date"`
-	PositionsOpen  int      `json:"positions_open"`
-	Evaluated      []string `json:"evaluated,omitempty"`
-	Entries        []string `json:"entries,omitempty"`
-	Exits          []string `json:"exits,omitempty"`
-	Skips          []string `json:"skips,omitempty"`
-	Errors         []string `json:"errors,omitempty"`
-	CircuitBreaker bool     `json:"circuit_breaker"`
-	SkipEntries    bool     `json:"skip_entries"`
+	Date           string         `json:"date"`
+	PositionsOpen  int            `json:"positions_open"`
+	Evaluated      []string       `json:"evaluated,omitempty"`
+	Entries        []string       `json:"entries,omitempty"`
+	Exits          []string       `json:"exits,omitempty"`
+	Skips          []string       `json:"skips,omitempty"`
+	Errors         []string       `json:"errors,omitempty"`
+	MissedEntries  []MissedEntry  `json:"missed_entries,omitempty"`
+	CircuitBreaker bool           `json:"circuit_breaker"`
+	SkipEntries    bool           `json:"skip_entries"`
 	// Skipped is the top-level early-return skip reason from preloopCheck
 	// (out-of-window or duplicate-heartbeat). Empty if the beat ran.
 	Skipped string `json:"skipped,omitempty"`
+}
+
+// MissedEntry is a structured record of an entry signal that fired and
+// satisfied all preconditions but failed at the broker submission step.
+// Surfaced separately from Errors so monitoring (agent-health) can detect
+// missed breakouts without pattern-matching free-form error strings.
+type MissedEntry struct {
+	Ticker string `json:"ticker"`
+	Stage  string `json:"stage"`
+	Error  string `json:"error"`
 }
 
 // TurtleExecutor runs the full TRADING_RULES_TREND.md heartbeat sequence on
@@ -483,6 +494,11 @@ func (e *TurtleExecutor) runEntries(ctx context.Context, openRows []*models.DBTr
 		if err != nil {
 			e.logger.WithFields(logrus.Fields{"ticker": ticker, "stage": "entry_limit_buy", "shares": proposedShares, "limit_price": limitPrice}).WithError(err).Error("turtle entry: limit buy failed")
 			res.Errors = append(res.Errors, fmt.Sprintf("entry %s: place buy: %v", ticker, err))
+			res.MissedEntries = append(res.MissedEntries, MissedEntry{
+				Ticker: ticker,
+				Stage:  "entry_limit_buy",
+				Error:  err.Error(),
+			})
 			continue
 		}
 		entry := &models.DBTrendLedgerEntry{
