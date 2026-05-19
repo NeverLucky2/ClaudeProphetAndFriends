@@ -3562,7 +3562,7 @@ function renderAccounts() {
   }
   el.innerHTML = config.accounts.map(a => {
     const sbxLine = a.sandboxCount > 0
-      ? `In use by ${a.sandboxCount} sandbox(es): ${(a.sandboxNames || []).map(escapeHtml).join(', ')}`
+      ? `In use by ${a.sandboxCount} sandbox(es): ${(a.sandboxNames || []).map(esc).join(', ')}`
       : `<span style="color: var(--ink-muted)">No sandboxes attached</span>`;
     const equityLine = a.equity != null
       ? `Equity: $${Number(a.equity).toLocaleString()} <span class="acct-muted">(asOf ${new Date(a.equityAsOf).toLocaleTimeString()})</span>`
