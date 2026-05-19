@@ -654,25 +654,30 @@ async function migrateLegacyConfig(config, rawSchemaVersion = 0) {
   config.schemaVersion = 5;  // was 4
   if (!config.sandboxes) config.sandboxes = {};
 
-  for (const account of config.accounts || []) {
-    const sandboxId = `sbx_${account.id}`;
-    if (!config.sandboxes[sandboxId]) {
-      config.sandboxes[sandboxId] = createSandbox(account, {
-        id: sandboxId,
-        name: account.name,
-        activeAgentId: config.activeAgentId,
-        activeModel: config.activeModel,
-        heartbeat: config.heartbeat,
-        permissions: config.permissions,
-        plugins: config.plugins,
-      });
-    } else {
-      config.sandboxes[sandboxId] = mergeSandbox({
-        ...config.sandboxes[sandboxId],
-        id: sandboxId,
-        accountId: account.id,
-        name: config.sandboxes[sandboxId].name || account.name,
-      }, config);
+  // Only auto-create sbx_<accountId> sandboxes during the v4→v5 migration pass.
+  // On v5+ boots this loop must NOT run: accounts added via the UI after migration
+  // should not get ghost sandboxes (spec Decision 3: no auto-sandbox on addAccount).
+  if (rawSchemaVersion < 5) {
+    for (const account of config.accounts || []) {
+      const sandboxId = `sbx_${account.id}`;
+      if (!config.sandboxes[sandboxId]) {
+        config.sandboxes[sandboxId] = createSandbox(account, {
+          id: sandboxId,
+          name: account.name,
+          activeAgentId: config.activeAgentId,
+          activeModel: config.activeModel,
+          heartbeat: config.heartbeat,
+          permissions: config.permissions,
+          plugins: config.plugins,
+        });
+      } else {
+        config.sandboxes[sandboxId] = mergeSandbox({
+          ...config.sandboxes[sandboxId],
+          id: sandboxId,
+          accountId: account.id,
+          name: config.sandboxes[sandboxId].name || account.name,
+        }, config);
+      }
     }
   }
 

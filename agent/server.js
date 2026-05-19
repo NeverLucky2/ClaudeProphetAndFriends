@@ -954,7 +954,10 @@ app.post('/api/agent/heartbeat', (req, res) => {
 function safeConfig() {
   const cfg = { ...getConfig() };
   // Strip secret keys from accounts
-  cfg.accounts = (cfg.accounts || []).map(a => ({ ...a, secretKey: a.secretKey ? '****' + a.secretKey.slice(-4) : '****' }));
+  cfg.accounts = (cfg.accounts || []).map(a => {
+    const full = getAccountById(a.id) || {};
+    return { ...a, secretKey: full.secretKey ? '****' + full.secretKey.slice(-4) : '****' };
+  });
   return cfg;
 }
 

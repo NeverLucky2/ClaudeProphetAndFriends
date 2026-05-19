@@ -66,14 +66,19 @@ function _persist() {
   // Serialize file writes via the same chained-promise lock pattern config-store uses.
   // The chain captures the CURRENT _store snapshot value at the moment the write
   // actually runs, so concurrent setCredentials calls produce a consistent final state.
-  _writeLock = _writeLock.then(async () => {
+  //
+  // Split lock and result so a failed write doesn't poison the lock for future writes.
+  // _writeLock always resolves (never rejects) after this write settles, so future
+  // writes can queue and run regardless of THIS write's outcome.
+  const queue = _writeLock.catch(() => {});  // wait for previous write but ignore its error
+  const result = queue.then(async () => {
     await fs.mkdir(path.dirname(_filePath), { recursive: true });
     await fs.writeFile(_filePath, JSON.stringify(_store, null, 2));
-  }).catch(err => {
-    console.error('credential-store persist error:', err.message);
-    throw err;
   });
-  return _writeLock;
+  _writeLock = result.catch(err => {
+    console.error('credential-store persist error:', err.message);
+  });
+  return result;  // Caller sees the error if THIS write fails
 }
 
 // Test-only: reset internal state. Used by integration tests that re-init.

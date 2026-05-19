@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'fs/promises';
 import path from 'path';
@@ -104,5 +104,37 @@ test('persistence: load → set → re-load round-trips through disk', async () 
     const store2 = await import('./credential-store.js?cachebust=B' + Date.now());
     await store2.loadCredentialStore(file);
     assert.deepEqual(store2.getCredentials('acct-1'), { publicKey: 'PK', secretKey: 'SK' });
+  });
+});
+
+test('write-lock recovery: failed write does not poison lock for subsequent writes', async () => {
+  await withTempFile(async (file) => {
+    const store = await import('./credential-store.js?cachebust=C' + Date.now());
+    await store.loadCredentialStore(file);
+
+    // First write: succeed (establishes file on disk)
+    await store.setCredentials('acct-1', { publicKey: 'PK1', secretKey: 'SK1' });
+
+    // Second write: force a failure by making writeFile throw once
+    const originalWriteFile = fs.writeFile;
+    let callCount = 0;
+    mock.method(fs, 'writeFile', async (...args) => {
+      callCount++;
+      if (callCount === 1) throw new Error('simulated disk error');
+      return originalWriteFile(...args);
+    });
+
+    // This write should reject, but not poison the lock
+    await assert.rejects(
+      () => store.setCredentials('acct-1', { publicKey: 'PK2', secretKey: 'SK2' }),
+      /simulated disk error/
+    );
+
+    // Restore real writeFile
+    mock.restoreAll();
+
+    // Third write: lock must have recovered — this should succeed
+    await store.setCredentials('acct-1', { publicKey: 'PK3', secretKey: 'SK3' });
+    assert.deepEqual(store.getCredentials('acct-1'), { publicKey: 'PK3', secretKey: 'SK3' });
   });
 });
