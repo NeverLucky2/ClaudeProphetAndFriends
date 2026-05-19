@@ -1574,8 +1574,12 @@ let _draggedSandboxId = null;
 
 function getEffectiveSandboxId() {
   if (selectedSandboxId === '_manager') return '_manager';
-  if (selectedSandboxId && (config.sandboxes || {})[selectedSandboxId]) return selectedSandboxId;
-  return config.activeSandboxId || null;
+  const sandboxes = config.sandboxes || {};
+  if (selectedSandboxId && sandboxes[selectedSandboxId]) return selectedSandboxId;
+  if (config.activeSandboxId && sandboxes[config.activeSandboxId]) return config.activeSandboxId;
+  const ordered = getSandboxTabOrder();
+  if (ordered.length === 0) return '_manager';
+  return ordered[0].id;
 }
 
 function getSelectedSandbox() {
