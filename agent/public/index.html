@@ -751,6 +751,10 @@
     .sandbox-tab .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
     .sandbox-tab .dot.running { background: var(--success); box-shadow: 0 0 4px var(--success); }
     .sandbox-tab .dot.stopped { background: var(--ink-faint); }
+    .sandbox-tab .dot.paused { background: var(--warning); }
+    .sandbox-tab[draggable="true"] { cursor: grab; }
+    .sandbox-tab.dragging { opacity: 0.5; cursor: grabbing; }
+    .sandbox-tab.drag-over { box-shadow: inset 2px 0 0 var(--accent); }
     .sandbox-terminal-wrapper { flex: 1; overflow: hidden; }
     .sandbox-page-picker {
       display: flex; gap: 4px; margin-bottom: 16px; padding: 4px;
