@@ -470,7 +470,7 @@ func (e *TurtleExecutor) runEntries(ctx context.Context, openRows []*models.DBTr
 				continue
 			}
 		}
-		limitPrice := sig.LastClose * turtleLimitMultiplier
+		limitPrice := roundToTick(sig.LastClose * turtleLimitMultiplier)
 		ord, err := e.trader.PlaceOrder(ctx, &interfaces.Order{
 			Symbol:      ticker,
 			Qty:         float64(proposedShares),

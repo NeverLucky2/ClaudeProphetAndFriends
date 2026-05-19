@@ -47,16 +47,18 @@ export function renderBeatContextBlock(ctx) {
 }
 
 // fetchBeatContext returns the parsed payload or null on any error / timeout.
-// The 800ms timeout matches agent/harness.js:826-845's intraday-blob fetch
-// pattern — same soft-fail philosophy: a missing block does not block the
-// beat, the LLM can fetch fresh via the underlying MCP tools.
+// The 3000ms timeout matches agent/harness.js's intraday-blob fetch — same
+// soft-fail philosophy: a missing block does not block the beat, the LLM can
+// fetch fresh via the underlying MCP tools. 3000ms gives generous headroom
+// for cold paths (account/positions/regime aggregation) without becoming
+// visible at the 10-min midday beat cadence.
 export async function fetchBeatContext(goAxios, strategyId) {
   if (!goAxios) return null;
   try {
     const url = strategyId
       ? `/api/v1/beat-context?strategy=${encodeURIComponent(strategyId)}`
       : '/api/v1/beat-context';
-    const resp = await goAxios.get(url, { timeout: 800 });
+    const resp = await goAxios.get(url, { timeout: 3000 });
     return resp?.data ?? null;
   } catch (_err) {
     return null;

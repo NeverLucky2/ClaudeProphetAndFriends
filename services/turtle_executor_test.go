@@ -970,6 +970,49 @@ func TestRunEntries_PlacesLimitOrderAtLastClose1005(t *testing.T) {
 	}
 }
 
+// Regression: 2026-05-19 USO entry was rejected by Alpaca with HTTP 422
+// code 42210000 ("sub-penny increment") because 152.96 * 1.005 = 153.7248.
+// Submitted limit price must snap to $0.01 for prices >= $1.
+func TestRunEntries_LimitPriceRoundedToPenny(t *testing.T) {
+	sigs, bars, trader, seg, regime, guard := fullStubs()
+	universeIneligibleExcept(sigs, bars, "USO")
+	usoSig := goodEntrySignal("USO")
+	usoSig.LastClose = 152.96
+	usoSig.Donchian100High = 150.0
+	usoSig.SMA200 = 140.0
+	usoSig.Donchian50Low = 120.0
+	usoSig.ATR20 = 5.0
+	sigs.signals["USO"] = usoSig
+	bars.bars["USO"] = &interfaces.Bar{Open: 152.0, Close: 152.96}
+	exe, _ := newTestExecutor(t, sigs, bars, trader, seg, regime, guard)
+
+	if _, err := exe.RunHeartbeat(context.Background(), at1700(t, "2026-05-15")); err != nil {
+		t.Fatalf("RunHeartbeat: %v", err)
+	}
+
+	var buy *interfaces.Order
+	for _, o := range trader.placedOrders {
+		if o.Symbol == "USO" && o.Side == "buy" {
+			buy = o
+			break
+		}
+	}
+	if buy == nil {
+		t.Fatalf("expected USO buy order, got %d total orders", len(trader.placedOrders))
+	}
+	if buy.LimitPrice == nil {
+		t.Fatalf("LimitPrice must be set")
+	}
+	got := *buy.LimitPrice
+	if got != 153.72 {
+		t.Errorf("LimitPrice: got %.6f, want exactly 153.72 (penny-rounded)", got)
+	}
+	// Defensive: assert no sub-penny precision regardless of value.
+	if math.Abs(got*100-math.Round(got*100)) > 1e-9 {
+		t.Errorf("LimitPrice %.6f has sub-penny precision; Alpaca rejects with HTTP 422 code 42210000", got)
+	}
+}
+
 func TestRunEntries_RegimeBlockSkipsAllEntries(t *testing.T) {
 	sigs, bars, trader, seg, regime, guard := fullStubs()
 	universeIneligibleExcept(sigs, bars, "TLT")

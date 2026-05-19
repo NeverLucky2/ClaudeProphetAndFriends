@@ -827,9 +827,17 @@ ${userBlock}`;
     const runtime = this.getRuntime ? this.getRuntime(this.sandboxId) : null;
 
     // Optional intraday context blob — Prophet only, market-hours phases only.
-    // Soft-fails: if the fetch errors or doesn't complete in 800ms, the beat
+    // Soft-fails: if the fetch errors or doesn't complete in 3000ms, the beat
     // proceeds without the blob and a single-line log entry is emitted. The
     // LLM can still pull the data on-demand via get_intraday_signals.
+    //
+    // Why 3000ms: midday cadence (600s) is well above the 60s per-symbol cache
+    // TTL in services/intraday_signal_service.go, so every midday beat is a
+    // cold cache that pays a sequential 5Min+1Day Alpaca round-trip per symbol
+    // (parallel across symbols). Cold-cache, healthy-network cost is ~1s; tight
+    // upstreams or a hotspot connection push that toward 1.5-2s. 3000ms keeps
+    // ~3x headroom over the observed cold-path cost while staying invisible
+    // relative to the 10-min beat cadence.
     let intradayPrefix = '';
     let beatContextPrefix = '';
     if (shouldInjectIntraday(this._agentConfig?.strategyId, phase)) {
@@ -838,7 +846,7 @@ ${userBlock}`;
           const symbols = PROPHET_INTRADAY_WATCHLIST.join(',');
           const resp = await runtime.goAxios.get(
             `/api/v1/intraday/signals?symbols=${encodeURIComponent(symbols)}`,
-            { timeout: 800 }
+            { timeout: 3000 }
           );
           const block = renderIntradayBlock(resp?.data);
           if (block) intradayPrefix = `\n\n${block}`;
