@@ -330,6 +330,26 @@ func main() {
 	trendController := controllers.NewTrendController(trendSignalSvc)
 	logger.Debug("Trend signal service initialized")
 
+	// Initialize Mean Reversion signal pipeline (used by Coil for RSI(2)-based
+	// pullback entries on S&P 500 large-caps). Universe is curated in the
+	// services package; the candidates service applies entry filters and
+	// surfaces the SPY-based bear-regime flag. Earnings filter is wired only
+	// when the FMP-backed earnings calendar is available — otherwise the
+	// service runs fail-open (no earnings exclusion).
+	meanRevSignalSvc := services.NewMeanRevSignalService(dataService)
+	var meanRevEarningsChecker services.EarningsHorizonChecker
+	if earningsService != nil {
+		meanRevEarningsChecker = earningsService
+	}
+	meanRevCandidatesSvc := services.NewMeanRevCandidatesService(
+		meanRevSignalSvc,
+		meanRevEarningsChecker,
+		nil, // nil universe = use services.MeanRevUniverse default
+		os.Getenv("MEANREV_BEAR_MODE"),
+	)
+	meanRevController := controllers.NewMeanRevController(meanRevCandidatesSvc)
+	logger.Debug("Mean reversion signal service initialized")
+
 	// Initialize Segment P&L service (used by segment-scoped circuit breakers)
 	segmentPnLSvc := services.NewSegmentPnLService(storageService, tradingService)
 	segmentPnLController := controllers.NewSegmentPnLController(segmentPnLSvc)
@@ -404,6 +424,7 @@ func main() {
 		guardController,
 		harvestController,
 		trendController,
+		meanRevController,
 		segmentPnLController,
 		ivController,
 		intradayController,
@@ -451,6 +472,7 @@ func setupRouter(
 	guardController *controllers.GuardController,
 	harvestController *controllers.HarvestController,
 	trendController *controllers.TrendController,
+	meanRevController *controllers.MeanRevController,
 	segmentPnLController *controllers.SegmentPnLController,
 	ivController *controllers.IVController,
 	intradayController *controllers.IntradayController,
@@ -583,6 +605,17 @@ func setupRouter(
 		trend := api.Group("/trend")
 		{
 			trend.GET("/signal/:symbol", trendController.HandleGetSignal)
+		}
+
+		// Coil mean-reversion endpoints (RSI(2) + SMA(200) + SMA(5)).
+		// /candidates: pre-filtered, RSI-sorted list for the daily 15:45 ET beat.
+		// /signal/:symbol: ad-hoc per-symbol lookup for operator inspection.
+		// /universe: introspection of the curated S&P 500 large-cap list.
+		meanrev := api.Group("/meanrev")
+		{
+			meanrev.GET("/candidates", meanRevController.HandleGetCandidates)
+			meanrev.GET("/signal/:symbol", meanRevController.HandleGetSignal)
+			meanrev.GET("/universe", meanRevController.HandleGetUniverse)
 		}
 
 		// Turtle scheduler status endpoint — only registered when the env flag

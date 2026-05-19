@@ -262,6 +262,43 @@ Be decisive. Never ask the user questions. Always log trade reasoning with log_d
       createdAt: new Date().toISOString(),
     },
     {
+      id: 'mean-rev',
+      name: 'Coil',
+      description: 'Mechanical RSI(2) mean reversion on S&P 500 large-caps. Daily 15:45 ET beat; buys oversold pullbacks within long-term uptrends; 5-day max hold.',
+      systemPromptTemplate: 'custom',
+      customSystemPrompt: `You are Coil, a mechanical mean-reversion trading agent. You are not a reasoning agent. You are a rule executor wrapped in a language model.
+
+Your ONLY job is to follow your trading rules exactly. Do not improvise. Do not add commentary. Do not make directional judgments. Helpful improvisation is the failure mode.
+
+Read your Strategy Rules section carefully — it contains your complete heartbeat procedure. Follow it step by step on every heartbeat.
+
+Key tools: get_datetime, get_account, get_positions, get_quote, get_mean_reversion_candidates, get_mean_reversion_signal, place_managed_position, close_managed_position, get_managed_positions, log_decision, log_activity.
+
+Use get_mean_reversion_candidates (no args) to read the pre-filtered, RSI(2)-sorted candidate list for the day. The endpoint surfaces the bear-regime flag and applies the entry filter (RSI(2) < 5 AND last_close > SMA(200) AND last_close < SMA(5) AND no earnings within 5 trading days). Do not compute these values yourself — the endpoint is the single source of truth for signal computation.
+
+For existing positions, use get_mean_reversion_signal({ symbol }) to check the exit conditions (RSI(2) > 70, last_close > SMA(5)).`,
+      strategyId: 'mean-rev-rsi2',
+      model: 'anthropic/claude-sonnet-4-6',
+      heartbeatOverrides: {
+        pre_market: 86400,
+        market_open: 86400,
+        midday: 86400,
+        market_close: 86400,
+        after_hours: 86400,
+        closed: 86400,
+      },
+      // Coil runs once per trading day at 15:45 ET (15 min before market close).
+      // The 5-minute window matches the agent's own accepted-window check
+      // (TRADING_RULES_MEANREV.md "Heartbeat Schedule").
+      scheduledBeats: {
+        times: ['15:45'],
+        weekdaysOnly: true,
+        exclusive: true,
+        windowMinutes: 5,
+      },
+      createdAt: new Date().toISOString(),
+    },
+    {
       id: 'trend-prophet',
       name: 'TrendProphet',
       description: 'Mechanical multi-asset trend-follower on ETFs. Daily Donchian-100 breakout entries; Donchian-50 trailing exits. Universe: TLT, GLD, USO, DBC, UUP, EEM.',
@@ -331,6 +368,14 @@ function defaultStrategies() {
       name: 'Multi-Asset Trend Following',
       description: 'Daily-bar Donchian breakouts on an ETF universe (TLT, GLD, USO, DBC, UUP, EEM). Long-only, mechanical, crisis-alpha sleeve.',
       rulesFile: 'TRADING_RULES_TREND.md',
+      customRules: null,
+      createdAt: new Date().toISOString(),
+    },
+    {
+      id: 'mean-rev-rsi2',
+      name: 'Mean Reversion (Connors RSI(2))',
+      description: 'RSI(2) oversold pullbacks within long-term uptrends. Curated S&P 500 large-cap universe; 5% per position; max 5 concurrent; 5-day timeout; -7% hard stop.',
+      rulesFile: 'TRADING_RULES_MEANREV.md',
       customRules: null,
       createdAt: new Date().toISOString(),
     },
