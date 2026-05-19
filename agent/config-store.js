@@ -623,7 +623,12 @@ async function migrateLegacyConfig(config, rawSchemaVersion = 0) {
         await fs.rename(oldDir, newDir);
         rekeyed++;
       } catch (renameErr) {
-        console.warn(`[migration] v4→v5 rekey: failed to rename ${oldDir} → ${newDir}: ${renameErr.message}`);
+        throw new Error(
+          `v4→v5 migration aborted: cannot rename ${oldDir} → ${newDir}: ${renameErr.message}. ` +
+          `Likely causes: OneDrive sync is holding a file, or a Go bot is running. ` +
+          `Stop any running agent processes, wait for OneDrive sync to settle, ` +
+          `and restart the server. The pre-mutation backup is at ${backupPath}.`
+        );
       }
     }
     console.log(`[migration] v4→v5 rekeyed ${rekeyed} runtime dirs`);
@@ -710,8 +715,12 @@ export async function loadConfig() {
     const raw = await fs.readFile(getConfigPath(), 'utf-8');
     _config = await normalizeConfig(JSON.parse(raw));
   } catch (err) {
-    if (err.code !== 'ENOENT') console.error('Warning: Failed to parse config file:', err.message);
-    _config = createDefaultConfig();
+    if (err.code === 'ENOENT') {
+      _config = createDefaultConfig();
+    } else {
+      console.error('Failed to load config:', err.message);
+      throw err;
+    }
   }
 
   const envPk = process.env.ALPACA_PUBLIC_KEY || process.env.ALPACA_API_KEY;

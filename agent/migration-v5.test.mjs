@@ -1,4 +1,4 @@
-import { test, beforeEach } from 'node:test';
+import { test, beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'fs/promises';
 import path from 'path';
@@ -6,14 +6,17 @@ import os from 'os';
 
 let cfgStore, credStore, tmpDir, configPath, secretsPath, backupDir;
 
+let sandboxesRoot;
+
 beforeEach(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'migrate-v5-'));
   configPath = path.join(tmpDir, 'agent-config.json');
   secretsPath = path.join(tmpDir, 'accounts-secrets.json');
   backupDir = path.join(tmpDir, 'backups');
+  sandboxesRoot = path.join(tmpDir, 'sandboxes');
   cfgStore = await import('./config-store.js?cachebust=' + Math.random());
   credStore = await import('./credential-store.js?cachebust=' + Math.random());
-  cfgStore._setPathsForTests({ configPath, secretsPath, backupDir });
+  cfgStore._setPathsForTests({ configPath, secretsPath, backupDir, sandboxesRoot });
   // See note in config-store.test.mjs about why this matters
   credStore = cfgStore._setCredStoreForTests(credStore);
 });
@@ -175,4 +178,53 @@ test('v4→v5: rekey is a no-op when target dir already exists (idempotency safe
   // Pre-existing marker survives — rekey skipped because target already populated
   const marker = await fs.readFile(path.join(tmpDir, 'sandboxes', 'sbx_6e4f26af', 'marker'), 'utf-8');
   assert.equal(marker, 'preexisting');
+});
+
+test('v4→v5: rename failure aborts migration before secrets are stripped', async () => {
+  // Pre-create a source dir so there is a rename to attempt
+  const sandboxesDir = path.join(tmpDir, 'sandboxes');
+  await fs.mkdir(path.join(sandboxesDir, '6e4f26af'), { recursive: true });
+  await fs.writeFile(path.join(sandboxesDir, '6e4f26af', 'prophet_trader.db'), 'data');
+
+  cfgStore._setPathsForTests({
+    configPath, secretsPath, backupDir,
+    sandboxesRoot: sandboxesDir,
+  });
+
+  const single = {
+    ...v4Fixture,
+    accounts: [v4Fixture.accounts[0]],
+    sandboxes: { sbx_6e4f26af: v4Fixture.sandboxes.sbx_6e4f26af },
+  };
+  await fs.writeFile(configPath, JSON.stringify(single));
+
+  // Patch fs.promises.rename to simulate an OS lock (e.g. OneDrive holding the dir)
+  const renameMock = mock.method(fs, 'rename', async () => {
+    throw new Error('OneDrive locked');
+  });
+
+  let thrown;
+  try {
+    await cfgStore.loadConfig();
+  } catch (err) {
+    thrown = err;
+  } finally {
+    renameMock.mock.restore();
+  }
+
+  // Migration must have thrown with the expected message
+  assert.ok(thrown, 'loadConfig should have thrown when rename fails');
+  assert.ok(
+    thrown.message.includes('v4→v5 migration aborted'),
+    `expected "v4→v5 migration aborted" in error, got: ${thrown.message}`
+  );
+  assert.ok(
+    thrown.message.includes('pre-mutation backup is at'),
+    `expected "pre-mutation backup is at" in error message, got: ${thrown.message}`
+  );
+
+  // The on-disk config must NOT have been mutated — secrets still present, schemaVersion still 4
+  const onDisk = JSON.parse(await fs.readFile(configPath, 'utf-8'));
+  assert.equal(onDisk.schemaVersion, 4, 'schemaVersion must not have been bumped');
+  assert.ok(onDisk.accounts[0].publicKey, 'publicKey must NOT have been stripped');
 });
