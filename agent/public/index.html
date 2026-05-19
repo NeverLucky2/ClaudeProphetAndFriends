@@ -1198,8 +1198,7 @@
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
           <div class="section-title" style="margin:0">Active Sandboxes</div>
           <div style="display:flex;gap:8px">
-            <button class="btn primary sm" onclick="showModal('sandbox-create')">New Sandbox</button>
-            <button class="btn sm" id="btn-from-account" onclick="showModal('sandbox-from-account')">From Account</button>
+            <button class="btn primary sm" onclick="showModal('sandbox-create')">+ New Sandbox</button>
           </div>
         </div>
         <div id="sandboxes-tab-list"></div>
@@ -2536,13 +2535,6 @@ function renderSandboxesTab() {
   const container = document.getElementById('sandboxes-tab-list');
   if (!container) return;
 
-  const btnFromAccount = document.getElementById('btn-from-account');
-  if (btnFromAccount) {
-    const hasAccounts = (config.accounts || []).length > 0;
-    btnFromAccount.disabled = !hasAccounts;
-    btnFromAccount.title = hasAccounts ? '' : 'Add an account first in the Accounts tab';
-  }
-
   const sandboxes = getSandboxEntries();
   if (!sandboxes.length) {
     container.innerHTML = '<div class="no-data">No sandboxes yet. Click "New Sandbox" to create one.</div>';
@@ -2706,71 +2698,36 @@ async function deleteSandboxFromPage(sandboxId) {
   showToast('Sandbox deleted', 'success');
 }
 
-async function submitSandboxCreate() {
-  const agentId = document.getElementById('f-sbx-agent')?.value || '';
-  const profileId = document.getElementById('f-sbx-profile')?.value || '';
-  const body = {
-    name: document.getElementById('f-sbx-name')?.value || '',
-    publicKey: document.getElementById('f-sbx-pk')?.value || '',
-    secretKey: document.getElementById('f-sbx-sk')?.value || '',
-    baseUrl: document.getElementById('f-sbx-url')?.value || '',
-    paper: document.getElementById('f-sbx-paper')?.checked !== false,
-  };
-  if (!body.name || !body.publicKey || !body.secretKey) { showToast('Name and API keys are required', 'error'); return; }
-  try {
-    const r = await fetch('/api/accounts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    const d = await r.json();
-    if (d.error) { showToast('Error: ' + d.error, 'error'); return; }
-    const sandboxId = d.sandboxId || d.id;
-    if (sandboxId && agentId) {
-      await fetch('/api/sandboxes/' + encodeURIComponent(sandboxId) + '/agent', {
-        method: 'PUT', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ activeAgentId: agentId }),
-      });
-    }
-    if (sandboxId && profileId) {
-      await fetch('/api/heartbeat/apply-profile', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sandboxId, profile: profileId }),
-      });
-    }
-    closeModal();
-    showToast('Sandbox created', 'success');
-  } catch (e) { showToast('Error: ' + e.message, 'error'); }
+function updateSandboxCreateWarning() {
+  const sel = document.getElementById('m-account');
+  const warn = document.getElementById('m-warning');
+  if (!sel || !warn) return;
+  const opt = sel.options[sel.selectedIndex];
+  const isPaper = opt.dataset.paper === 'true';
+  const attached = Number(opt.dataset.attached || 0);
+  if (!isPaper && attached > 0) {
+    const acct = config.accounts.find(a => a.id === sel.value);
+    const sbxes = Object.values(config.sandboxes || {}).filter(s => s.accountId === sel.value).map(s => s.name).join(', ');
+    warn.innerHTML = `⚠ Account "${esc(acct?.name || '')}" is already attached to sandbox(es): ${esc(sbxes)}. Multiple sandboxes on one live account compete for buying power.`;
+    warn.style.display = 'block';
+  } else {
+    warn.style.display = 'none';
+  }
 }
 
-async function submitSandboxFromAccount() {
-  const name = document.getElementById('f-sfa-name')?.value?.trim() || '';
-  const accountId = document.getElementById('f-sfa-account')?.value || '';
-  const agentId = document.getElementById('f-sfa-agent')?.value || '';
-  const profileId = document.getElementById('f-sfa-profile')?.value || '';
-  if (!name || !accountId) { showToast('Name and account are required', 'error'); return; }
-  try {
-    const r = await fetch('/api/accounts/' + encodeURIComponent(accountId) + '/clone', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name }),
-    });
-    const d = await r.json();
-    if (d.error) { showToast('Error: ' + d.error, 'error'); return; }
-    const sandboxId = d.sandboxId;
-    if (sandboxId && agentId) {
-      await fetch('/api/sandboxes/' + encodeURIComponent(sandboxId) + '/agent', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ activeAgentId: agentId }),
-      });
-    }
-    if (sandboxId && profileId) {
-      await fetch('/api/heartbeat/apply-profile', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sandboxId, profile: profileId }),
-      });
-    }
-    closeModal();
-    showToast('Sandbox created', 'success');
-  } catch (e) { showToast('Error: ' + e.message, 'error'); }
+async function submitSandboxCreate() {
+  const body = {
+    name: document.getElementById('m-name').value.trim(),
+    accountId: document.getElementById('m-account').value,
+    agentId: document.getElementById('m-agent').value,
+  };
+  if (!body.name) return showToast('Name is required', 'error');
+  if (!body.accountId) return showToast('Account is required', 'error');
+  const r = await fetch('/api/sandboxes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const j = await r.json();
+  if (!r.ok) return showToast(j.error || 'Failed to create sandbox', 'error');
+  closeModal();
+  showToast('Sandbox created', 'success');
 }
 
 const sandboxTerminals = {}; // { sandboxId: { el, logs[] } }
@@ -3743,33 +3700,52 @@ function showModal(type, data) {
   const overlay = document.getElementById('modal-overlay');
 
   if(type === 'sandbox-create') {
-    const agentOpts = (config.agents || []).map(a => '<option value="'+esc(a.id)+'">'+esc(a.name)+'</option>').join('');
-    const profiles = Array.isArray(window._hbProfiles) ? window._hbProfiles : [];
-    const profileOpts = profiles.map(p => '<option value="'+esc(p.id)+'">'+esc(p.name)+'</option>').join('');
-    modal.innerHTML = '<h3>New Sandbox</h3>'
-      + '<div class="form-group"><label>Sandbox Name</label><input type="text" id="f-sbx-name" placeholder="e.g. PennyProphet"></div>'
-      + '<div class="form-row"><div class="form-group"><label>Public Key</label><input type="text" id="f-sbx-pk" placeholder="AKXXXXXXXXXX"></div>'
-      + '<div class="form-group"><label>Secret Key</label><input type="password" id="f-sbx-sk" placeholder="Your secret key"></div></div>'
-      + '<div class="form-group"><label>Base URL</label><input type="text" id="f-sbx-url" placeholder="https://paper-api.alpaca.markets"><div class="form-hint">Leave blank for auto-detection</div></div>'
-      + '<div class="form-group"><label><input type="checkbox" id="f-sbx-paper" checked> Paper Trading</label></div>'
-      + (agentOpts ? '<div class="form-group"><label>Assign Agent (optional)</label><select id="f-sbx-agent"><option value="">None</option>'+agentOpts+'</select></div>' : '')
-      + (profileOpts ? '<div class="form-group"><label>Heartbeat Profile (optional)</label><select id="f-sbx-profile"><option value="">None</option>'+profileOpts+'</select></div>' : '')
-      + '<div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn primary" onclick="submitSandboxCreate()">Create Sandbox</button></div>';
-  }
-  else if(type === 'sandbox-from-account') {
     const accounts = config.accounts || [];
-    const agentOpts = (config.agents || []).map(a => '<option value="'+esc(a.id)+'">'+esc(a.name)+'</option>').join('');
-    const profiles = Array.isArray(window._hbProfiles) ? window._hbProfiles : [];
-    const profileOpts = profiles.map(p => '<option value="'+esc(p.id)+'">'+esc(p.name)+'</option>').join('');
-    const accountOpts = accounts.map(a =>
-      '<option value="'+esc(a.id)+'">' + esc(a.name) + ' (' + (a.paper !== false ? 'Paper' : 'Live') + ')</option>'
-    ).join('');
-    modal.innerHTML = '<h3>New Sandbox from Account</h3>'
-      + '<div class="form-group"><label>Sandbox Name</label><input type="text" id="f-sfa-name" placeholder="e.g. PennyProphet Paper"></div>'
-      + '<div class="form-group"><label>Account</label><select id="f-sfa-account"><option value="">-- select account --</option>'+accountOpts+'</select></div>'
-      + (agentOpts ? '<div class="form-group"><label>Assign Agent (optional)</label><select id="f-sfa-agent"><option value="">None</option>'+agentOpts+'</select></div>' : '')
-      + (profileOpts ? '<div class="form-group"><label>Heartbeat Profile (optional)</label><select id="f-sfa-profile"><option value="">None</option>'+profileOpts+'</select></div>' : '')
-      + '<div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn primary" onclick="submitSandboxFromAccount()">Create Sandbox</button></div>';
+    if (accounts.length === 0) {
+      modal.innerHTML = `
+        <h3>New Sandbox</h3>
+        <div class="modal-body">
+          <p>You need to add a trading account first.</p>
+        </div>
+        <div class="modal-actions">
+          <button class="btn" onclick="closeModal()">Cancel</button>
+          <button class="btn primary" onclick="closeModal(); showModal('account-add')">+ Add Account</button>
+        </div>`;
+      overlay.classList.add('visible');
+      return;
+    }
+
+    // Sandbox count per account, for the "already has N attached" warning
+    const sbxByAcct = {};
+    for (const s of Object.values(config.sandboxes || {})) {
+      sbxByAcct[s.accountId] = (sbxByAcct[s.accountId] || 0) + 1;
+    }
+
+    const acctOpts = accounts.map(a => {
+      const equityStr = a.equity != null ? `$${Number(a.equity).toLocaleString()}` : '$—';
+      const liveTag = a.paper ? '' : ' ⚠ live';
+      return `<option value="${esc(a.id)}" data-paper="${a.paper}" data-attached="${sbxByAcct[a.id] || 0}">${esc(a.name)} — ${equityStr}${liveTag}</option>`;
+    }).join('');
+
+    const agentOpts = (config.agents || []).map(ag => `<option value="${esc(ag.id)}">${esc(ag.name)}</option>`).join('');
+
+    modal.innerHTML = `
+      <h3>New Sandbox</h3>
+      <div class="modal-body">
+        <label>Name<input id="m-name" placeholder="e.g. Harvest #2"></label>
+        <label>Account
+          <select id="m-account" onchange="updateSandboxCreateWarning()">${acctOpts}</select>
+        </label>
+        <label>Agent<select id="m-agent">${agentOpts}</select></label>
+        <div id="m-warning" style="display: none; padding: 8px; background: #fff8c4; color: #5c4d00; border-radius: 4px; margin-top: 8px; font-size: 0.9em;"></div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn" onclick="closeModal()">Cancel</button>
+        <button class="btn primary" onclick="submitSandboxCreate()">Create</button>
+      </div>`;
+    overlay.classList.add('visible');
+    updateSandboxCreateWarning();
+    return;
   }
   else if(type === 'account-edit') {
     const a = data || {};
