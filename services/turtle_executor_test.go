@@ -1013,6 +1013,50 @@ func TestRunEntries_LimitPriceRoundedToPenny(t *testing.T) {
 	}
 }
 
+// When the broker rejects an entry order (validation error, transient,
+// or anything else), a structured MissedEntry record is added to the
+// heartbeat result so /api/v1/turtle/status surfaces the miss without
+// requiring callers to pattern-match the Errors string array.
+func TestRunEntries_PlaceOrderFailureRecordedInMissedEntries(t *testing.T) {
+	sigs, bars, trader, seg, regime, guard := fullStubs()
+	universeIneligibleExcept(sigs, bars, "TLT")
+	sigs.signals["TLT"] = goodEntrySignal("TLT")
+	bars.bars["TLT"] = &interfaces.Bar{Open: 99, Close: 100}
+	trader.placeErrs = map[string]error{
+		"TLT": fmt.Errorf("invalid limit_price: sub-penny increment"),
+	}
+	exe, _ := newTestExecutor(t, sigs, bars, trader, seg, regime, guard)
+
+	res, err := exe.RunHeartbeat(context.Background(), at1700(t, "2026-05-15"))
+	if err != nil {
+		t.Fatalf("RunHeartbeat: %v", err)
+	}
+	if len(res.MissedEntries) != 1 {
+		t.Fatalf("MissedEntries: got %d, want 1 (Errors=%v)", len(res.MissedEntries), res.Errors)
+	}
+	me := res.MissedEntries[0]
+	if me.Ticker != "TLT" {
+		t.Errorf("Ticker: got %q, want TLT", me.Ticker)
+	}
+	if me.Stage != "entry_limit_buy" {
+		t.Errorf("Stage: got %q, want entry_limit_buy", me.Stage)
+	}
+	if !strings.Contains(me.Error, "sub-penny") {
+		t.Errorf("Error: got %q, want contains 'sub-penny'", me.Error)
+	}
+	// Backward-compat: Errors still includes the human-readable entry.
+	foundInErrors := false
+	for _, e := range res.Errors {
+		if strings.Contains(e, "TLT") && strings.Contains(e, "place buy") {
+			foundInErrors = true
+			break
+		}
+	}
+	if !foundInErrors {
+		t.Errorf("Errors should still include the entry-failure string; got %v", res.Errors)
+	}
+}
+
 func TestRunEntries_RegimeBlockSkipsAllEntries(t *testing.T) {
 	sigs, bars, trader, seg, regime, guard := fullStubs()
 	universeIneligibleExcept(sigs, bars, "TLT")
