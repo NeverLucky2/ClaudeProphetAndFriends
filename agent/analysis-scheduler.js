@@ -12,7 +12,7 @@
  *   6:00 PM ET Sundays             → weekly_screeners
  *
  * Startup-based (on server start, if criteria met):
- *   daily_briefing               → data/reports/daily_brief_YYYYMMDD.json missing
+ *   daily_briefing               → data/reports/daily_brief.json missing or stamped with a non-today as_of
  *   scenario_analysis            → no data/reports/scenario_*_YYYYMMDD.md today
  *   review_performance           → not run this ISO week  → then adapt_strategy
  *   review_performance_penny     → not run this ISO week  → then adapt_strategy_penny
