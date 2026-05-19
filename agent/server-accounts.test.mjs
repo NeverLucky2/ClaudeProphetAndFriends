@@ -113,3 +113,26 @@ test('POST /api/sandboxes without accountId returns 400', async () => {
   const r = await req('POST', '/api/sandboxes', { name: 'X' });
   assert.equal(r.status, 400);
 });
+
+test('GET /api/accounts/:id/equity returns equity or null+error', async () => {
+  const r = await req('GET', '/api/accounts/acc1/equity');
+  // With test creds PK/SK against real Alpaca, the call will fail with 401.
+  // Either way, the endpoint shape is { equity, asOf } | { equity: null, error }.
+  assert.equal(r.status, 200);
+  assert.ok('equity' in r.body, 'response has equity field');
+  // Equity is null (auth failed) — that's the expected response shape in this test
+  assert.equal(r.body.equity, null);
+  assert.ok(r.body.error, 'error field populated');
+});
+
+test('GET /api/accounts/:id/equity returns 404 for unknown account', async () => {
+  const r = await req('GET', '/api/accounts/no-such/equity');
+  assert.equal(r.status, 404);
+});
+
+test('GET /api/accounts/:id/equity is cached: 2nd call within 60s does not refetch', async () => {
+  // First call populates cache; second call should return the same asOf timestamp.
+  const r1 = await req('GET', '/api/accounts/acc1/equity');
+  const r2 = await req('GET', '/api/accounts/acc1/equity');
+  assert.equal(r1.body.asOf, r2.body.asOf);
+});

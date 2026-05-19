@@ -1089,6 +1089,49 @@ app.post('/api/accounts/:id/clone', async (req, res) => {
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
+const _equityCache = new Map();  // accountId -> { equity, asOf, fetchedAtMs, error }
+const EQUITY_CACHE_MS = 60_000;
+
+app.get('/api/accounts/:id/equity', async (req, res) => {
+  const account = getAccountById(req.params.id);
+  if (!account) return res.status(404).json({ error: 'Account not found' });
+
+  const cached = _equityCache.get(account.id);
+  if (cached && (Date.now() - cached.fetchedAtMs) < EQUITY_CACHE_MS) {
+    return res.json({ equity: cached.equity, asOf: cached.asOf, error: cached.error || null });
+  }
+
+  try {
+    const baseUrl = account.baseUrl || (account.paper ? 'https://paper-api.alpaca.markets' : 'https://api.alpaca.markets');
+    const client = axios.create({
+      baseURL: baseUrl,
+      headers: {
+        'APCA-API-KEY-ID': account.publicKey,
+        'APCA-API-SECRET-KEY': account.secretKey,
+      },
+      timeout: 3000,
+    });
+    const { data } = await client.get('/v2/account');
+    const entry = {
+      equity: Number(data.equity),
+      asOf: new Date().toISOString(),
+      fetchedAtMs: Date.now(),
+      error: null,
+    };
+    _equityCache.set(account.id, entry);
+    res.json({ equity: entry.equity, asOf: entry.asOf, error: null });
+  } catch (err) {
+    const entry = {
+      equity: null,
+      asOf: new Date().toISOString(),
+      fetchedAtMs: Date.now(),
+      error: err.response?.status ? `Alpaca ${err.response.status}` : err.message,
+    };
+    _equityCache.set(account.id, entry);
+    res.json({ equity: null, asOf: entry.asOf, error: entry.error });
+  }
+});
+
 // Agents
 app.get('/api/agents', (req, res) => {
   const config = getConfig();
