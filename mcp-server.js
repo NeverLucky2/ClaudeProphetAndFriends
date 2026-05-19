@@ -1371,6 +1371,28 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: 'get_mean_reversion_candidates',
+        description: 'Get Coil mean-reversion candidates: S&P 500 large-cap stocks with RSI(2) < 5 AND last_close > SMA(200) AND last_close < SMA(5) AND no earnings within the next 5 trading days. Response includes bear_regime (true when SPY < SMA200) and bear_mode (normal/halfsize/halt, controlled by MEANREV_BEAR_MODE env var). Candidates are sorted by RSI(2) ascending (most oversold first). Returns full per-candidate signal payload (ticker, rsi_2, sma_200, sma_5, last_close, earnings_within_5d, entry_signal). Use this once per beat — the endpoint caches for 5 minutes.',
+        inputSchema: {
+          type: 'object',
+          properties: {},
+        },
+      },
+      {
+        name: 'get_mean_reversion_signal',
+        description: 'Get Coil per-symbol RSI(2)/SMA(200)/SMA(5) signal. Used to look up signal state for tickers Coil already holds (so the agent can apply the RSI > 70 / SMA-5 cross exit rules). Returns 422 if bars_count < 210 (insufficient history). Accepts any symbol — not restricted to the candidates universe.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            symbol: {
+              type: 'string',
+              description: 'Stock ticker (e.g. AAPL, MSFT)',
+            },
+          },
+          required: ['symbol'],
+        },
+      },
+      {
         name: 'get_segment_pnl',
         description: 'Get live unrealized P&L, deployed dollars, and deployed percent for the calling agent\'s strategy. Used by segment-scoped circuit breakers to decide whether the strategy has tripped its loss threshold. v1 limitation: unrealized P&L only (intraday realized closes not yet included). Strategy is auto-resolved from the agent\'s configuration; pass `strategy` to override (rare).',
         inputSchema: {
@@ -2989,6 +3011,16 @@ Worst Trade: ${stats.worst_result_pct.toFixed(1)}% ($${stats.worst_result_dollar
 
       case 'get_trend_signal': {
         const data = await callTradingBot(`/trend/signal/${encodeURIComponent(args.symbol)}`);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'get_mean_reversion_candidates': {
+        const data = await callTradingBot('/meanrev/candidates');
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'get_mean_reversion_signal': {
+        const data = await callTradingBot(`/meanrev/signal/${encodeURIComponent(args.symbol)}`);
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 

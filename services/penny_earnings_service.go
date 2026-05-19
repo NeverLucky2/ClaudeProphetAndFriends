@@ -152,6 +152,43 @@ func (s *EarningsCalendarService) IsExcluded(ticker string, now time.Time) bool 
 	}
 	return distance <= earningsExclusionDays
 }
+
+// HasEarningsWithinTradingDays returns true if `ticker` has an effective
+// earnings date within the next `days` trading days. Fail-open semantics
+// match IsExcluded — returns false when the cache is unpopulated, when the
+// trading-day calendar is empty, or when the ticker has no scheduled
+// earnings on file.
+//
+// This is the variant Coil (and any other caller with a non-3-day horizon)
+// uses; IsExcluded keeps its hard-coded earningsExclusionDays for Spark's
+// existing universe filter.
+func (s *EarningsCalendarService) HasEarningsWithinTradingDays(ticker string, days int, now time.Time) bool {
+	if days <= 0 {
+		return false
+	}
+	s.mu.RLock()
+	entry, hasEntry := s.entries[ticker]
+	calendar := s.calendar
+	lastRefresh := s.lastRefresh
+	s.mu.RUnlock()
+
+	if lastRefresh.IsZero() || !hasEntry || len(calendar) == 0 {
+		return false
+	}
+	loc := nyLoc
+	if loc == nil {
+		loc = time.UTC
+	}
+	nowET := now.In(loc)
+	nowDate := time.Date(nowET.Year(), nowET.Month(), nowET.Day(), 0, 0, 0, 0, loc)
+	effective := s.effectiveDate(entry, calendar)
+	distance := tradingDayDistance(nowDate, effective, calendar)
+	if distance < 0 {
+		return false
+	}
+	return distance <= days
+}
+
 // WaitForFirstRefresh blocks until the first successful refresh has signaled
 // firstRefreshDone, or the timeout elapses. Returns true if the signal arrived first.
 func (s *EarningsCalendarService) WaitForFirstRefresh(timeout time.Duration) bool {
