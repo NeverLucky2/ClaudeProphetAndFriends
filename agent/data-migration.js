@@ -39,10 +39,10 @@ async function copyFileIfNeeded(sourcePath, targetPath) {
   return true;
 }
 
-export async function migrateLegacyDataForAccount(accountId) {
-  if (!accountId) return { migrated: false, copied: [] };
+export async function migrateLegacyDataForSandbox(sandboxId) {
+  if (!sandboxId) return { migrated: false, copied: [] };
 
-  const sandboxRoot = path.join(PROJECT_ROOT, 'data', 'sandboxes', accountId);
+  const sandboxRoot = path.join(PROJECT_ROOT, 'data', 'sandboxes', sandboxId);
   const markerPath = path.join(sandboxRoot, '.migrated-from-root.json');
   if (await exists(markerPath)) {
     return { migrated: false, copied: [] };
@@ -78,5 +78,5 @@ export async function migrateLegacyDataForAccount(accountId) {
 }
 
 export default {
-  migrateLegacyDataForAccount,
+  migrateLegacyDataForSandbox,
 };

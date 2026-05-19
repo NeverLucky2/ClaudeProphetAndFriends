@@ -35,7 +35,9 @@ main
 .idea/
 
 # Data (contains account secrets, databases, chat history)
-data/
+data/**
+# Force-include the example file so the secrets-file shape is discoverable
+!data/accounts-secrets.example.json
 
 # Node
 node_modules/

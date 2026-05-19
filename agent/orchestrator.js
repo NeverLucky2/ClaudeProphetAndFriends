@@ -16,6 +16,7 @@ import {
   getStrategyById,
   getHeartbeatForSandboxPhase,
   getPermissionsForSandbox,
+  getSandboxRuntimeDir,
 } from './config-store.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -52,9 +53,7 @@ export class AgentOrchestrator extends EventEmitter {
   }
 
   getSandboxDbPath(sandboxId) {
-    const sandbox = getSandbox(sandboxId);
-    const accountId = sandbox?.accountId || sandboxId;
-    return path.join(this.projectRoot, 'data', 'sandboxes', accountId, 'prophet_trader.db');
+    return path.join(getSandboxRuntimeDir(sandboxId), 'prophet_trader.db');
   }
 
   getSandboxRuntime(sandboxId) {
@@ -184,7 +183,7 @@ export class AgentOrchestrator extends EventEmitter {
       ALPACA_PAPER: account.paper ? 'true' : 'false',
       PORT: String(runtime.port),
       DATABASE_PATH: this.getSandboxDbPath(sandboxId),
-      ACTIVITY_LOG_DIR: path.join(this.projectRoot, 'data', 'sandboxes', account.id, 'activity_logs'),
+      ACTIVITY_LOG_DIR: path.join(getSandboxRuntimeDir(sandboxId), 'activity_logs'),
       OPENPROPHET_SANDBOX_ID: sandboxId,
       OPENPROPHET_ACCOUNT_ID: account.id,
       ...(Number.isFinite(maxDailyLossPct) && maxDailyLossPct > 0 ? { MAX_DAILY_LOSS_PCT: String(maxDailyLossPct) } : {}),

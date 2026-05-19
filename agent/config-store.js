@@ -5,9 +5,70 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 import { execSync } from 'child_process';
+import * as _credStore from './credential-store.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const CONFIG_PATH = path.join(__dirname, '..', 'data', 'agent-config.json');
+
+// Test override paths (null = use real paths)
+let CONFIG_PATH_OVERRIDE = null;
+let SECRETS_PATH_OVERRIDE = null;
+let BACKUP_DIR_OVERRIDE = null;
+let SANDBOXES_ROOT_OVERRIDE = null;
+
+export function _setPathsForTests({ configPath, secretsPath, backupDir, sandboxesRoot } = {}) {
+  CONFIG_PATH_OVERRIDE = configPath ?? null;
+  SECRETS_PATH_OVERRIDE = secretsPath ?? null;
+  BACKUP_DIR_OVERRIDE = backupDir ?? null;
+  SANDBOXES_ROOT_OVERRIDE = sandboxesRoot ?? null;
+  // Force re-init on next loadConfig
+  _config = null;
+}
+
+function _dataRoot() {
+  return process.env.OPENPROPHET_DATA_ROOT || path.join(__dirname, '..', 'data');
+}
+
+function getBackupDir() {
+  return BACKUP_DIR_OVERRIDE || path.join(_dataRoot(), 'backups');
+}
+
+function getSandboxesRoot() {
+  return SANDBOXES_ROOT_OVERRIDE || path.join(_dataRoot(), 'sandboxes');
+}
+
+export function getSandboxRuntimeDir(sandboxId) {
+  return path.join(getSandboxesRoot(), sandboxId);
+}
+
+// Test hook: replace the bound credential-store module (lets tests inject failures).
+// Returns a mutable proxy wrapper so tests can monkey-patch individual methods
+// (ESM namespace objects are sealed; the proxy allows writes while forwarding
+// reads to the underlying module for methods the test hasn't patched).
+let _credStoreOverride = null;
+export function _setCredStoreForTests(mod) {
+  // Wrap in a plain-object proxy so tests can assign properties (e.g. setCredentials).
+  const wrapper = new Proxy(Object.create(null), {
+    get(target, prop) {
+      return prop in target ? target[prop] : mod[prop];
+    },
+    set(target, prop, value) {
+      target[prop] = value;
+      return true;
+    },
+  });
+  _credStoreOverride = wrapper;
+  return wrapper; // Return so tests can reassign their local credStore reference.
+}
+function credStore() {
+  return _credStoreOverride || _credStore;
+}
+
+function getConfigPath() {
+  return CONFIG_PATH_OVERRIDE || path.join(_dataRoot(), 'agent-config.json');
+}
+function getSecretsPath() {
+  return SECRETS_PATH_OVERRIDE || path.join(_dataRoot(), 'accounts-secrets.json');
+}
 
 const DEFAULT_HEARTBEAT = {
   pre_market: 900,
@@ -451,7 +512,7 @@ function mergeSandbox(sandbox, fallback = {}) {
   };
 }
 
-function normalizeConfig(raw = {}) {
+async function normalizeConfig(raw = {}) {
   const rawSchemaVersion = Number(raw.schemaVersion) || 0;
   const defaults = createDefaultConfig();
   const config = {
@@ -471,10 +532,10 @@ function normalizeConfig(raw = {}) {
     config.sandboxes[sandboxId] = mergeSandbox({ id: sandboxId, ...sandbox }, config);
   }
 
-  return migrateLegacyConfig(config, rawSchemaVersion);
+  return await migrateLegacyConfig(config, rawSchemaVersion);
 }
 
-function migrateLegacyConfig(config, rawSchemaVersion = 0) {
+async function migrateLegacyConfig(config, rawSchemaVersion = 0) {
   // v2 → v3: bump default `closed` heartbeat from 3600s to 14400s.
   // Only matches the OLD default exactly so user customizations (e.g. 7200, 10800) are preserved.
   if (rawSchemaVersion < 3) {
@@ -492,28 +553,131 @@ function migrateLegacyConfig(config, rawSchemaVersion = 0) {
       if (sandbox?.heartbeat?.closed === 14400) sandbox.heartbeat.closed = 28800;
     }
   }
-  config.schemaVersion = 4;
+
+  // v4 → v5: dedup accounts sharing the same (publicKey, baseUrl, paper) triple,
+  // rewrite sandbox.accountId pointers, extract secrets into the credential store,
+  // and strip publicKey/secretKey from accounts[]. Backup is written before mutation.
+  if (rawSchemaVersion < 5) {
+    // Step 1: backup
+    const backupDir = getBackupDir();
+    await fs.mkdir(backupDir, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const backupPath = path.join(backupDir, `agent-config.v4.${stamp}.json`);
+    await fs.writeFile(backupPath, JSON.stringify(config, null, 2));
+
+    // Step 2: dedup accounts
+    const groups = new Map();
+    for (const acct of config.accounts || []) {
+      const key = `${acct.publicKey}|${acct.baseUrl}|${acct.paper}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(acct);
+    }
+    const idRemap = new Map(); // oldId -> survivorId
+    const survivors = [];
+    for (const group of groups.values()) {
+      const survivor = group.find(a => /\(from \.env\)$/.test(a.name))
+        || [...group].sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || '') || a.id.localeCompare(b.id))[0];
+      survivors.push(survivor);
+      for (const a of group) {
+        idRemap.set(a.id, survivor.id);
+      }
+    }
+    const beforeCount = config.accounts.length;
+    config.accounts = survivors;
+
+    // Step 3: rewrite sandbox.accountId pointers
+    let pointerRewrites = 0;
+    for (const sbx of Object.values(config.sandboxes || {})) {
+      const next = idRemap.get(sbx.accountId);
+      if (next && next !== sbx.accountId) {
+        sbx.accountId = next;
+        pointerRewrites++;
+      }
+    }
+
+    // Step 3b: rekey runtime dirs from data/sandboxes/<oldAccountId>/ to data/sandboxes/<sandboxId>/
+    const sandboxesRoot = getSandboxesRoot();
+    let rekeyed = 0;
+    for (const sbx of Object.values(config.sandboxes || {})) {
+      // The OLD dir is whatever accountId the sandbox pointed at BEFORE rewrite.
+      // The reverse-map: find the original accountId via idRemap inverse (the sandbox's
+      // current accountId is the survivor; the original is its sbx_<id> suffix when
+      // ids were 1:1 in v4 — true for any sandbox the system created itself).
+      const originalAccountIdFromSbxId = sbx.id.startsWith('sbx_') ? sbx.id.slice(4) : null;
+      const candidates = [
+        originalAccountIdFromSbxId,   // most common case under v4's 1:1 convention
+        sbx.accountId,                 // post-rewrite survivor dir, if it exists
+      ].filter(Boolean);
+      const oldDir = (await Promise.all(candidates.map(async c => {
+        const p = path.join(sandboxesRoot, c);
+        try { await fs.access(p); return p; } catch { return null; }
+      }))).find(Boolean);
+      if (!oldDir) continue;  // nothing to move (sandbox never had a runtime dir yet)
+
+      const newDir = path.join(sandboxesRoot, sbx.id);
+      // Skip if target already populated — caller intentionally pre-staged it
+      try {
+        const entries = await fs.readdir(newDir);
+        if (entries.length > 0) continue;
+      } catch { /* newDir doesn't exist, good */ }
+
+      if (oldDir === newDir) continue;  // already correctly keyed
+      await fs.mkdir(path.dirname(newDir), { recursive: true });
+      try {
+        await fs.rename(oldDir, newDir);
+        rekeyed++;
+      } catch (renameErr) {
+        throw new Error(
+          `v4→v5 migration aborted: cannot rename ${oldDir} → ${newDir}: ${renameErr.message}. ` +
+          `Likely causes: OneDrive sync is holding a file, or a Go bot is running. ` +
+          `Stop any running agent processes, wait for OneDrive sync to settle, ` +
+          `and restart the server. The pre-mutation backup is at ${backupPath}.`
+        );
+      }
+    }
+    console.log(`[migration] v4→v5 rekeyed ${rekeyed} runtime dirs`);
+
+    // Step 4: extract secrets to credential store, strip from accounts[]
+    let extracted = 0;
+    for (const acct of config.accounts) {
+      if (acct.publicKey && acct.secretKey) {
+        await credStore().setCredentials(acct.id, { publicKey: acct.publicKey, secretKey: acct.secretKey });
+        delete acct.publicKey;
+        delete acct.secretKey;
+        extracted++;
+      }
+    }
+
+    console.log(`[migration] v4→v5: deduped ${beforeCount} accounts → ${survivors.length}, rewrote ${pointerRewrites} sandbox pointers, extracted ${extracted} credential sets, backup at ${backupPath}`);
+  }
+
+  config.schemaVersion = 5;  // was 4
   if (!config.sandboxes) config.sandboxes = {};
 
-  for (const account of config.accounts || []) {
-    const sandboxId = `sbx_${account.id}`;
-    if (!config.sandboxes[sandboxId]) {
-      config.sandboxes[sandboxId] = createSandbox(account, {
-        id: sandboxId,
-        name: account.name,
-        activeAgentId: config.activeAgentId,
-        activeModel: config.activeModel,
-        heartbeat: config.heartbeat,
-        permissions: config.permissions,
-        plugins: config.plugins,
-      });
-    } else {
-      config.sandboxes[sandboxId] = mergeSandbox({
-        ...config.sandboxes[sandboxId],
-        id: sandboxId,
-        accountId: account.id,
-        name: config.sandboxes[sandboxId].name || account.name,
-      }, config);
+  // Only auto-create sbx_<accountId> sandboxes during the v4→v5 migration pass.
+  // On v5+ boots this loop must NOT run: accounts added via the UI after migration
+  // should not get ghost sandboxes (spec Decision 3: no auto-sandbox on addAccount).
+  if (rawSchemaVersion < 5) {
+    for (const account of config.accounts || []) {
+      const sandboxId = `sbx_${account.id}`;
+      if (!config.sandboxes[sandboxId]) {
+        config.sandboxes[sandboxId] = createSandbox(account, {
+          id: sandboxId,
+          name: account.name,
+          activeAgentId: config.activeAgentId,
+          activeModel: config.activeModel,
+          heartbeat: config.heartbeat,
+          permissions: config.permissions,
+          plugins: config.plugins,
+        });
+      } else {
+        config.sandboxes[sandboxId] = mergeSandbox({
+          ...config.sandboxes[sandboxId],
+          id: sandboxId,
+          accountId: account.id,
+          name: config.sandboxes[sandboxId].name || account.name,
+        }, config);
+      }
     }
   }
 
@@ -555,42 +719,16 @@ let _config = null;
 let _writeLock = Promise.resolve();
 
 export async function loadConfig() {
+  await credStore().loadCredentialStore(getSecretsPath());
   try {
-    const raw = await fs.readFile(CONFIG_PATH, 'utf-8');
-    _config = normalizeConfig(JSON.parse(raw));
+    const raw = await fs.readFile(getConfigPath(), 'utf-8');
+    _config = await normalizeConfig(JSON.parse(raw));
   } catch (err) {
-    if (err.code !== 'ENOENT') console.error('Warning: Failed to parse config file:', err.message);
-    _config = createDefaultConfig();
-  }
-
-  const envPk = process.env.ALPACA_PUBLIC_KEY || process.env.ALPACA_API_KEY;
-  const envSk = process.env.ALPACA_SECRET_KEY;
-  const envBaseUrl = process.env.ALPACA_BASE_URL || process.env.ALPACA_ENDPOINT || '';
-
-  if (_config.accounts.length === 0) {
-    if (envPk && envSk) {
-      const isPaper = envBaseUrl.includes('paper') || process.env.ALPACA_PAPER === 'true';
-      const id = crypto.randomUUID().slice(0, 8);
-      const account = {
-        id,
-        name: isPaper ? 'Paper (from .env)' : 'Live (from .env)',
-        publicKey: envPk,
-        secretKey: envSk,
-        baseUrl: envBaseUrl || (isPaper ? 'https://paper-api.alpaca.markets' : 'https://api.alpaca.markets'),
-        paper: isPaper,
-        createdAt: new Date().toISOString(),
-      };
-      _config.accounts.push(account);
-      _config.sandboxes[`sbx_${id}`] = createSandbox(account);
-      _config.activeAccountId = id;
-      _config.activeSandboxId = `sbx_${id}`;
-      console.log(`  Auto-imported Alpaca account from .env (${isPaper ? 'paper' : 'live'})`);
-    }
-  } else if (envBaseUrl) {
-    const envAccount = _config.accounts.find(a => a.name.includes('(from .env)'));
-    if (envAccount && envAccount.baseUrl !== envBaseUrl) {
-      envAccount.baseUrl = envBaseUrl;
-      console.log(`  Synced baseUrl for "${envAccount.name}" from .env`);
+    if (err.code === 'ENOENT') {
+      _config = createDefaultConfig();
+    } else {
+      console.error('Failed to load config:', err.message);
+      throw err;
     }
   }
 
@@ -602,8 +740,9 @@ export async function loadConfig() {
 export async function saveConfig() {
   _writeLock = _writeLock.then(async () => {
     syncLegacyAliases(_config);
-    await fs.mkdir(path.dirname(CONFIG_PATH), { recursive: true });
-    await fs.writeFile(CONFIG_PATH, JSON.stringify(_config, null, 2));
+    const cfgPath = getConfigPath();
+    await fs.mkdir(path.dirname(cfgPath), { recursive: true });
+    await fs.writeFile(cfgPath, JSON.stringify(_config, null, 2));
   }).catch(err => console.error('Config save error:', err.message));
   return _writeLock;
 }
@@ -652,42 +791,55 @@ function updateSandbox(accountId, updater) {
 // ── Accounts ───────────────────────────────────────────────────────
 
 export async function addAccount({ name, publicKey, secretKey, baseUrl, paper }) {
+  if (!publicKey || !secretKey) throw new Error('publicKey and secretKey are required');
   const id = crypto.randomUUID().slice(0, 8);
   const account = {
     id,
     name: name || `Account ${_config.accounts.length + 1}`,
-    publicKey,
-    secretKey,
     baseUrl: baseUrl || (paper ? 'https://paper-api.alpaca.markets' : 'https://api.alpaca.markets'),
     paper: paper !== false,
     createdAt: new Date().toISOString(),
   };
   _config.accounts.push(account);
-  _config.sandboxes[`sbx_${id}`] = createSandbox(account, {
-    activeAgentId: _config.activeAgentId,
-    activeModel: _config.activeModel,
-    heartbeat: _config.heartbeat,
-    permissions: _config.permissions,
-    plugins: _config.plugins,
-  });
-  if (!_config.activeAccountId) {
-    _config.activeAccountId = id;
-    _config.activeSandboxId = `sbx_${id}`;
+  await saveConfig();
+  try {
+    await credStore().setCredentials(id, { publicKey, secretKey });
+  } catch (err) {
+    // Roll back the metadata push so we never persist an account without creds.
+    _config.accounts = _config.accounts.filter(a => a.id !== id);
+    await saveConfig();
+    throw err;
   }
   syncLegacyAliases(_config);
   await saveConfig();
-  return account;
+  return { ...account, publicKey, secretKey };
 }
 
-export async function updateAccount(id, { name, baseUrl, paper }) {
+export async function updateAccount(id, { name, baseUrl, paper, publicKey, secretKey }) {
   const account = _config.accounts.find(a => a.id === id);
   if (!account) throw new Error('Account not found');
   if (name !== undefined && name.trim()) account.name = name.trim();
   if (baseUrl !== undefined) account.baseUrl = baseUrl.trim() || (account.paper ? 'https://paper-api.alpaca.markets' : 'https://api.alpaca.markets');
   if (paper !== undefined) account.paper = paper;
-  // Keep sandbox name in sync when account name changes
-  const sandbox = _config.sandboxes[`sbx_${id}`];
-  if (sandbox && name !== undefined && name.trim()) sandbox.name = name.trim();
+
+  const hasPk = publicKey !== undefined && publicKey !== '';
+  const hasSk = secretKey !== undefined && secretKey !== '';
+  if (hasPk !== hasSk) {
+    throw new Error('Rotation requires both publicKey and secretKey (or neither)');
+  }
+  if (hasPk && hasSk) {
+    await credStore().setCredentials(id, { publicKey, secretKey });
+  }
+
+  // Keep sandbox name in sync when account name changes — but only sandboxes
+  // that still carry the legacy 1:1 default sandbox name.
+  if (name !== undefined && name.trim()) {
+    for (const sandbox of Object.values(_config.sandboxes || {})) {
+      if (sandbox.accountId === id && sandbox.name === account.name) {
+        sandbox.name = name.trim();
+      }
+    }
+  }
   syncLegacyAliases(_config);
   await saveConfig();
   return account;
@@ -695,11 +847,15 @@ export async function updateAccount(id, { name, baseUrl, paper }) {
 
 export async function removeAccount(id) {
   _config.accounts = _config.accounts.filter(a => a.id !== id);
-  delete _config.sandboxes[`sbx_${id}`];
+  await credStore().deleteCredentials(id);
+  // Sandbox cleanup is the API layer's job — under the new model, the API
+  // returns 409 if any sandbox references this account, so we only get here
+  // when no sandboxes remain. Defensive deletion of any sbx_<id> orphan:
+  if (_config.sandboxes[`sbx_${id}`]) delete _config.sandboxes[`sbx_${id}`];
   if (_config.activeAccountId === id) {
     const next = _config.accounts[0]?.id || null;
     _config.activeAccountId = next;
-    _config.activeSandboxId = next ? `sbx_${next}` : null;
+    _config.activeSandboxId = next ? Object.values(_config.sandboxes).find(s => s.accountId === next)?.id || null : null;
   }
   syncLegacyAliases(_config);
   await saveConfig();
@@ -713,12 +869,40 @@ export async function setActiveAccount(id) {
   await saveConfig();
 }
 
+export async function createSandboxForAccount(accountId, { name, agentId } = {}) {
+  const account = _config.accounts.find(a => a.id === accountId);
+  if (!account) throw new Error('Account not found');
+  const sandboxId = `sbx_${crypto.randomUUID().slice(0, 8)}`;
+  const sandbox = createSandbox(account, {
+    id: sandboxId,
+    name: name || account.name,
+    activeAgentId: agentId || _config.activeAgentId,
+    activeModel: _config.activeModel,
+    heartbeat: _config.heartbeat,
+    permissions: _config.permissions,
+    plugins: _config.plugins,
+  });
+  _config.sandboxes[sandboxId] = sandbox;
+  if (!_config.activeSandboxId) {
+    _config.activeSandboxId = sandboxId;
+    _config.activeAccountId = accountId;
+  }
+  syncLegacyAliases(_config);
+  await saveConfig();
+  return sandbox;
+}
+
 export function getActiveAccount() {
   return _config.accounts.find(a => a.id === _config.activeAccountId) || null;
 }
 
 export function getAccountById(id) {
-  return _config.accounts.find(a => a.id === id) || null;
+  const meta = _config.accounts.find(a => a.id === id);
+  if (!meta) return null;
+  const creds = credStore().getCredentials(id) || { publicKey: null, secretKey: null };
+  // Metadata may still carry publicKey/secretKey on a v4 config (pre-migration).
+  // Spread order: meta first, creds second — credential-store wins when present.
+  return { ...meta, ...creds };
 }
 
 // ── Agents ─────────────────────────────────────────────────────────

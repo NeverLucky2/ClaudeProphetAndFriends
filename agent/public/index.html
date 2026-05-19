@@ -966,6 +966,16 @@
       font-family: 'IBM Plex Mono', monospace;
     }
 
+    /* ── Account Cards ───────────────────── */
+    .account-card { background: var(--bg-panel); border-radius: 8px; padding: 16px; display: flex; flex-direction: column; gap: 8px; }
+    .account-head { display: flex; justify-content: space-between; align-items: center; }
+    .account-head h3 { margin: 0; font-size: 1rem; }
+    .account-meta, .account-key, .account-equity, .account-sandboxes { font-size: 0.9rem; color: var(--text); }
+    .account-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+    .badge { font-size: 0.75rem; padding: 2px 6px; border-radius: 4px; background: var(--accent); color: white; }
+    .badge.live { background: #c84a4a; }
+    .acct-muted { color: var(--ink-muted); font-size: 0.85em; }
+
     /* ── Mobile ──────────────────────────── */
     @media (max-width: 768px) {
       .topbar { padding: 8px 10px; gap: 6px; flex-wrap: wrap; }
@@ -1188,8 +1198,7 @@
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
           <div class="section-title" style="margin:0">Active Sandboxes</div>
           <div style="display:flex;gap:8px">
-            <button class="btn primary sm" onclick="showModal('sandbox-create')">New Sandbox</button>
-            <button class="btn sm" id="btn-from-account" onclick="showModal('sandbox-from-account')">From Account</button>
+            <button class="btn primary sm" onclick="showModal('sandbox-create')">+ New Sandbox</button>
           </div>
         </div>
         <div id="sandboxes-tab-list"></div>
@@ -1199,14 +1208,13 @@
     <!-- Accounts Panel -->
     <div class="panel" id="panel-accounts">
       <div class="settings-content">
-        <h2>Trading Accounts</h2>
-        <p class="subtitle">Manage independent agent instances per account</p>
-        
-        <div id="accounts-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; margin-top: 20px;"></div>
-        
-        <div class="btn-group" style="margin-top: 20px">
-          <button class="btn primary sm" onclick="showModal('account-create')">Add Account</button>
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+          <h2 style="margin: 0;">Trading Accounts</h2>
+          <button class="btn primary sm" onclick="showModal('account-add')">+ Add Account</button>
         </div>
+        <p class="subtitle">Manage independent agent instances per account</p>
+
+        <div id="accounts-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; margin-top: 20px;"></div>
       </div>
     </div>
 
@@ -2527,13 +2535,6 @@ function renderSandboxesTab() {
   const container = document.getElementById('sandboxes-tab-list');
   if (!container) return;
 
-  const btnFromAccount = document.getElementById('btn-from-account');
-  if (btnFromAccount) {
-    const hasAccounts = (config.accounts || []).length > 0;
-    btnFromAccount.disabled = !hasAccounts;
-    btnFromAccount.title = hasAccounts ? '' : 'Add an account first in the Accounts tab';
-  }
-
   const sandboxes = getSandboxEntries();
   if (!sandboxes.length) {
     container.innerHTML = '<div class="no-data">No sandboxes yet. Click "New Sandbox" to create one.</div>';
@@ -2697,71 +2698,36 @@ async function deleteSandboxFromPage(sandboxId) {
   showToast('Sandbox deleted', 'success');
 }
 
-async function submitSandboxCreate() {
-  const agentId = document.getElementById('f-sbx-agent')?.value || '';
-  const profileId = document.getElementById('f-sbx-profile')?.value || '';
-  const body = {
-    name: document.getElementById('f-sbx-name')?.value || '',
-    publicKey: document.getElementById('f-sbx-pk')?.value || '',
-    secretKey: document.getElementById('f-sbx-sk')?.value || '',
-    baseUrl: document.getElementById('f-sbx-url')?.value || '',
-    paper: document.getElementById('f-sbx-paper')?.checked !== false,
-  };
-  if (!body.name || !body.publicKey || !body.secretKey) { showToast('Name and API keys are required', 'error'); return; }
-  try {
-    const r = await fetch('/api/accounts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    const d = await r.json();
-    if (d.error) { showToast('Error: ' + d.error, 'error'); return; }
-    const sandboxId = d.sandboxId || d.id;
-    if (sandboxId && agentId) {
-      await fetch('/api/sandboxes/' + encodeURIComponent(sandboxId) + '/agent', {
-        method: 'PUT', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ activeAgentId: agentId }),
-      });
-    }
-    if (sandboxId && profileId) {
-      await fetch('/api/heartbeat/apply-profile', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sandboxId, profile: profileId }),
-      });
-    }
-    closeModal();
-    showToast('Sandbox created', 'success');
-  } catch (e) { showToast('Error: ' + e.message, 'error'); }
+function updateSandboxCreateWarning() {
+  const sel = document.getElementById('m-account');
+  const warn = document.getElementById('m-warning');
+  if (!sel || !warn) return;
+  const opt = sel.options[sel.selectedIndex];
+  const isPaper = opt.dataset.paper === 'true';
+  const attached = Number(opt.dataset.attached || 0);
+  if (!isPaper && attached > 0) {
+    const acct = config.accounts.find(a => a.id === sel.value);
+    const sbxes = Object.values(config.sandboxes || {}).filter(s => s.accountId === sel.value).map(s => s.name).join(', ');
+    warn.innerHTML = `⚠ Account "${esc(acct?.name || '')}" is already attached to sandbox(es): ${esc(sbxes)}. Multiple sandboxes on one live account compete for buying power.`;
+    warn.style.display = 'block';
+  } else {
+    warn.style.display = 'none';
+  }
 }
 
-async function submitSandboxFromAccount() {
-  const name = document.getElementById('f-sfa-name')?.value?.trim() || '';
-  const accountId = document.getElementById('f-sfa-account')?.value || '';
-  const agentId = document.getElementById('f-sfa-agent')?.value || '';
-  const profileId = document.getElementById('f-sfa-profile')?.value || '';
-  if (!name || !accountId) { showToast('Name and account are required', 'error'); return; }
-  try {
-    const r = await fetch('/api/accounts/' + encodeURIComponent(accountId) + '/clone', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name }),
-    });
-    const d = await r.json();
-    if (d.error) { showToast('Error: ' + d.error, 'error'); return; }
-    const sandboxId = d.sandboxId;
-    if (sandboxId && agentId) {
-      await fetch('/api/sandboxes/' + encodeURIComponent(sandboxId) + '/agent', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ activeAgentId: agentId }),
-      });
-    }
-    if (sandboxId && profileId) {
-      await fetch('/api/heartbeat/apply-profile', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sandboxId, profile: profileId }),
-      });
-    }
-    closeModal();
-    showToast('Sandbox created', 'success');
-  } catch (e) { showToast('Error: ' + e.message, 'error'); }
+async function submitSandboxCreate() {
+  const body = {
+    name: document.getElementById('m-name').value.trim(),
+    accountId: document.getElementById('m-account').value,
+    agentId: document.getElementById('m-agent').value,
+  };
+  if (!body.name) return showToast('Name is required', 'error');
+  if (!body.accountId) return showToast('Account is required', 'error');
+  const r = await fetch('/api/sandboxes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const j = await r.json();
+  if (!r.ok) return showToast(j.error || 'Failed to create sandbox', 'error');
+  closeModal();
+  showToast('Sandbox created', 'success');
 }
 
 const sandboxTerminals = {}; // { sandboxId: { el, logs[] } }
@@ -3584,41 +3550,63 @@ function getSandboxPort(sandboxId) {
 
 function renderAccounts() {
   const el = document.getElementById('accounts-grid');
-  if (!config.accounts?.length) { 
-    el.innerHTML = '<div class="no-data">No accounts. Add an Alpaca API key pair to get started.</div>'; 
-    return; 
+  if (!el) return;
+  if (!config.accounts?.length) {
+    el.innerHTML = `
+      <div class="no-data" style="grid-column: 1 / -1;">
+        <h3>No trading accounts configured</h3>
+        <p>Add your Alpaca paper or live API keys to get started.</p>
+        <button class="btn primary" onclick="showModal('account-add')">+ Add Account</button>
+      </div>`;
+    return;
   }
   el.innerHTML = config.accounts.map(a => {
-    const viewing = getEffectiveSandboxId() === 'sbx_' + a.id;
-    const badge = a.paper ? '<span class="badge paper">Paper</span>' : '<span class="badge live">Live</span>';
-    const sandboxId = 'sbx_' + a.id;
-    const runtime = (window._healthState?.sandboxes || []).find(s => s.sandboxId === sandboxId);
-    const running = runtime?.state?.running;
-    const goReady = runtime?.goReady;
-    const port = runtime?.port || getSandboxPort(sandboxId);
-    const agentId = runtime?.state?.activeAgentId || '--';
-    const beatCount = runtime?.state?.beatCount || 0;
-    const phase = runtime?.state?.phase || 'stopped';
-    
-    const statusBadge = running
-      ? '<span class="badge active">Running</span>'
-      : goReady
-        ? '<span class="badge" style="border-color:var(--warning);color:var(--warning)">Ready</span>'
-        : '<span class="badge">Stopped</span>';
-
-    return '<div class="config-card ' + (viewing ? 'active-card' : '') + '" style="border-left:4px solid ' + (a.paper ? 'var(--accent)' : 'var(--error)') + '">'
-      + '<div class="config-card-header"><span class="config-card-title">' + esc(a.name) + '</span><div>' + badge + ' ' + (viewing ? '<span class="badge active">Viewing</span>' : '') + ' ' + statusBadge + '</div></div>'
-      + '<div class="config-card-meta">Key: ' + (a.publicKey ? a.publicKey.substring(0, 8) + '...' : '??') + ' | ' + (a.baseUrl || '') + '</div>'
-      + '<div class="config-card-meta">Port: ' + port + ' | Agent: ' + agentId + (goReady ? ' | Backend: ok' : '') + '</div>'
-      + (running ? '<div class="config-card-desc">Phase: ' + phase + ' | Beats: ' + beatCount + '</div>' : '')
-      + '<div class="config-card-actions" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px">'
-      + '<button class="btn sm" onclick="switchSandboxTab(\'' + sandboxId + '\');switchTab(\'terminal\')">View</button>'
-      + '<button class="btn sm" onclick="configureSandbox(\'' + sandboxId + '\')">Configure</button>'
-      + '<button class="btn sm" onclick="showModal(\'account-edit\', config.accounts.find(x=>x.id===\'' + a.id + '\'))">Edit</button>'
-      + '<button class="btn sm danger" onclick="deleteAccount(\'' + a.id + '\')">Delete</button>'
-      + '</div></div>';
+    const sbxLine = a.sandboxCount > 0
+      ? `In use by ${a.sandboxCount} sandbox(es): ${(a.sandboxNames || []).map(esc).join(', ')}`
+      : `<span style="color: var(--ink-muted)">No sandboxes attached</span>`;
+    const equityLine = a.equity != null
+      ? `Equity: $${Number(a.equity).toLocaleString()} <span class="acct-muted">(asOf ${new Date(a.equityAsOf).toLocaleTimeString()})</span>`
+      : (a.equity === null && a.equityAsOf ? `Equity: <span class="acct-muted">unavailable</span>` : `Equity: <span class="acct-muted">loading…</span>`);
+    const activeBadge = config.activeAccountId === a.id ? '<span class="badge">Active ●</span>' : '';
+    const liveTag = a.paper ? '<span class="acct-muted">paper</span>' : '<span class="badge live">⚠ live</span>';
+    return `
+      <div class="account-card">
+        <div class="account-head">
+          <h3>${esc(a.name)}</h3>${activeBadge}
+        </div>
+        <div class="account-meta">${liveTag} • ${esc(a.baseUrl || '')}</div>
+        <div class="account-key">Key: ${esc(a.secretKey || '****')}</div>
+        <div class="account-equity">${equityLine}</div>
+        <div class="account-sandboxes">${sbxLine}</div>
+        <div class="account-actions">
+          <button class="btn sm" onclick="activateAccount('${a.id}')" ${a.sandboxCount === 0 ? 'disabled title="Account has no sandboxes"' : ''}>Activate</button>
+          <button class="btn sm" onclick="showModal('account-edit', config.accounts.find(x=>x.id==='${a.id}'))">Edit</button>
+          <button class="btn sm" onclick="showModal('account-rotate', config.accounts.find(x=>x.id==='${a.id}'))">Rotate Keys</button>
+          <button class="btn sm danger" onclick="deleteAccount('${a.id}')">Delete</button>
+        </div>
+      </div>`;
   }).join('');
+
+  // Lazy-fetch equity for any account without a cached value (cache lives server-side too).
+  for (const a of config.accounts) {
+    if (a.equity == null && !a.equityAsOf) fetchAccountEquity(a.id);
+  }
 }
+
+async function fetchAccountEquity(accountId) {
+  try {
+    const r = await fetch('/api/accounts/' + encodeURIComponent(accountId) + '/equity');
+    if (!r.ok) return;
+    const data = await r.json();
+    const acct = config.accounts.find(a => a.id === accountId);
+    if (acct) {
+      acct.equity = data.equity;
+      acct.equityAsOf = data.asOf;
+      renderAccounts();
+    }
+  } catch { /* swallow — equity is best-effort */ }
+}
+
 
 function renderModels() {
   const el = document.getElementById('models-list');
@@ -3679,7 +3667,18 @@ async function activateAccount(id) {
   await fetch('/api/accounts/'+id+'/activate',{method:'POST'});
   selectedSandboxId = null;
 }
-async function deleteAccount(id) { if(confirm('Delete this account?')) await fetch('/api/accounts/'+id,{method:'DELETE'}); }
+async function deleteAccount(id) {
+  const account = (config.accounts || []).find(a => a.id === id);
+  if (!confirm(`Delete account "${account?.name || id}"?`)) return;
+  const r = await fetch('/api/accounts/' + encodeURIComponent(id), { method: 'DELETE' });
+  const j = await r.json();
+  if (r.status === 409) {
+    alert(`Cannot delete: account has ${j.sandboxIds.length} sandbox(es) attached:\n\n  - ${j.sandboxNames.join('\n  - ')}\n\nDetach or delete them first.`);
+    return;
+  }
+  if (!r.ok) return showToast(j.error || 'Failed to delete', 'error');
+  showToast('Account deleted', 'success');
+}
 async function deleteStrategy(id) { if(confirm('Delete this strategy?')) await fetch('/api/strategies/'+id,{method:'DELETE'}); }
 async function activateModel(id) {
   const sid = getEffectiveSandboxId();
@@ -3701,44 +3700,95 @@ function showModal(type, data) {
   const overlay = document.getElementById('modal-overlay');
 
   if(type === 'sandbox-create') {
-    const agentOpts = (config.agents || []).map(a => '<option value="'+esc(a.id)+'">'+esc(a.name)+'</option>').join('');
-    const profiles = Array.isArray(window._hbProfiles) ? window._hbProfiles : [];
-    const profileOpts = profiles.map(p => '<option value="'+esc(p.id)+'">'+esc(p.name)+'</option>').join('');
-    modal.innerHTML = '<h3>New Sandbox</h3>'
-      + '<div class="form-group"><label>Sandbox Name</label><input type="text" id="f-sbx-name" placeholder="e.g. PennyProphet"></div>'
-      + '<div class="form-row"><div class="form-group"><label>Public Key</label><input type="text" id="f-sbx-pk" placeholder="AKXXXXXXXXXX"></div>'
-      + '<div class="form-group"><label>Secret Key</label><input type="password" id="f-sbx-sk" placeholder="Your secret key"></div></div>'
-      + '<div class="form-group"><label>Base URL</label><input type="text" id="f-sbx-url" placeholder="https://paper-api.alpaca.markets"><div class="form-hint">Leave blank for auto-detection</div></div>'
-      + '<div class="form-group"><label><input type="checkbox" id="f-sbx-paper" checked> Paper Trading</label></div>'
-      + (agentOpts ? '<div class="form-group"><label>Assign Agent (optional)</label><select id="f-sbx-agent"><option value="">None</option>'+agentOpts+'</select></div>' : '')
-      + (profileOpts ? '<div class="form-group"><label>Heartbeat Profile (optional)</label><select id="f-sbx-profile"><option value="">None</option>'+profileOpts+'</select></div>' : '')
-      + '<div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn primary" onclick="submitSandboxCreate()">Create Sandbox</button></div>';
-  }
-  else if(type === 'sandbox-from-account') {
     const accounts = config.accounts || [];
-    const agentOpts = (config.agents || []).map(a => '<option value="'+esc(a.id)+'">'+esc(a.name)+'</option>').join('');
-    const profiles = Array.isArray(window._hbProfiles) ? window._hbProfiles : [];
-    const profileOpts = profiles.map(p => '<option value="'+esc(p.id)+'">'+esc(p.name)+'</option>').join('');
-    const accountOpts = accounts.map(a =>
-      '<option value="'+esc(a.id)+'">' + esc(a.name) + ' (' + (a.paper !== false ? 'Paper' : 'Live') + ')</option>'
-    ).join('');
-    modal.innerHTML = '<h3>New Sandbox from Account</h3>'
-      + '<div class="form-group"><label>Sandbox Name</label><input type="text" id="f-sfa-name" placeholder="e.g. PennyProphet Paper"></div>'
-      + '<div class="form-group"><label>Account</label><select id="f-sfa-account"><option value="">-- select account --</option>'+accountOpts+'</select></div>'
-      + (agentOpts ? '<div class="form-group"><label>Assign Agent (optional)</label><select id="f-sfa-agent"><option value="">None</option>'+agentOpts+'</select></div>' : '')
-      + (profileOpts ? '<div class="form-group"><label>Heartbeat Profile (optional)</label><select id="f-sfa-profile"><option value="">None</option>'+profileOpts+'</select></div>' : '')
-      + '<div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn primary" onclick="submitSandboxFromAccount()">Create Sandbox</button></div>';
-  }
-  else if(type === 'account-create') {
-    modal.innerHTML = '<h3>Add Trading Account</h3><div class="form-group"><label>Account Name</label><input type="text" id="f-acc-name" placeholder="e.g. Paper Trading"></div><div class="form-row"><div class="form-group"><label>Public Key</label><input type="text" id="f-acc-pk" placeholder="AKXXXXXXXXXX"></div><div class="form-group"><label>Secret Key</label><input type="password" id="f-acc-sk" placeholder="Your secret key"></div></div><div class="form-group"><label>Base URL</label><input type="text" id="f-acc-url" placeholder="https://paper-api.alpaca.markets"><div class="form-hint">Leave blank for auto-detection based on paper/live selection</div></div><div class="form-group"><label><input type="checkbox" id="f-acc-paper" checked> Paper Trading</label></div><div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn primary" onclick="submitAccount()">Add Account</button></div>';
+    if (accounts.length === 0) {
+      modal.innerHTML = `
+        <h3>New Sandbox</h3>
+        <div class="modal-body">
+          <p>You need to add a trading account first.</p>
+        </div>
+        <div class="modal-actions">
+          <button class="btn" onclick="closeModal()">Cancel</button>
+          <button class="btn primary" onclick="closeModal(); showModal('account-add')">+ Add Account</button>
+        </div>`;
+      overlay.classList.add('visible');
+      return;
+    }
+
+    // Sandbox count per account, for the "already has N attached" warning
+    const sbxByAcct = {};
+    for (const s of Object.values(config.sandboxes || {})) {
+      sbxByAcct[s.accountId] = (sbxByAcct[s.accountId] || 0) + 1;
+    }
+
+    const acctOpts = accounts.map(a => {
+      const equityStr = a.equity != null ? `$${Number(a.equity).toLocaleString()}` : '$—';
+      const liveTag = a.paper ? '' : ' ⚠ live';
+      return `<option value="${esc(a.id)}" data-paper="${a.paper}" data-attached="${sbxByAcct[a.id] || 0}">${esc(a.name)} — ${equityStr}${liveTag}</option>`;
+    }).join('');
+
+    const agentOpts = (config.agents || []).map(ag => `<option value="${esc(ag.id)}">${esc(ag.name)}</option>`).join('');
+
+    modal.innerHTML = `
+      <h3>New Sandbox</h3>
+      <div class="modal-body">
+        <label>Name<input id="m-name" placeholder="e.g. Harvest #2"></label>
+        <label>Account
+          <select id="m-account" onchange="updateSandboxCreateWarning()">${acctOpts}</select>
+        </label>
+        <label>Agent<select id="m-agent">${agentOpts}</select></label>
+        <div id="m-warning" style="display: none; padding: 8px; background: #fff8c4; color: #5c4d00; border-radius: 4px; margin-top: 8px; font-size: 0.9em;"></div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn" onclick="closeModal()">Cancel</button>
+        <button class="btn primary" onclick="submitSandboxCreate()">Create</button>
+      </div>`;
+    overlay.classList.add('visible');
+    updateSandboxCreateWarning();
+    return;
   }
   else if(type === 'account-edit') {
     const a = data || {};
-    modal.innerHTML = '<h3>Edit Account</h3>'
-      + '<div class="form-group"><label>Account Name</label><input type="text" id="f-eacc-name" value="'+esc(a.name||'')+'"></div>'
-      + '<div class="form-group"><label>API Endpoint (Base URL)</label><input type="text" id="f-eacc-url" value="'+esc(a.baseUrl||'')+'" placeholder="https://paper-api.alpaca.markets"></div>'
-      + '<div class="form-group"><label><input type="checkbox" id="f-eacc-paper"'+(a.paper?' checked':'')+'> Paper Trading</label></div>'
-      + '<div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn primary" onclick="submitEditAccount(\''+esc(a.id||'')+'\')">Save</button></div>';
+    modal.innerHTML = `
+      <h3>Edit Account</h3>
+      <div class="modal-body">
+        <label>Name<input id="m-name" value="${esc(a.name || '')}"></label>
+        <label>Base URL<input id="m-base" value="${esc(a.baseUrl || '')}"></label>
+        <label><input type="checkbox" id="m-paper" ${a.paper ? 'checked' : ''}> Paper trading</label>
+      </div>
+      <div class="modal-actions">
+        <button class="btn" onclick="closeModal()">Cancel</button>
+        <button class="btn primary" onclick="submitAccountEdit('${a.id}')">Save</button>
+      </div>`;
+  }
+  else if(type === 'account-add') {
+    modal.innerHTML = `
+      <h3>Add Account</h3>
+      <div class="modal-body">
+        <label>Name<input id="m-name" placeholder="e.g. Paper #1"></label>
+        <label>Public Key<input id="m-pk" placeholder="PK..."></label>
+        <label>Secret Key<input id="m-sk" type="password" placeholder="..."></label>
+        <label>Base URL<input id="m-base" value="https://paper-api.alpaca.markets"></label>
+        <label><input type="checkbox" id="m-paper" checked onchange="document.getElementById('m-base').value = this.checked ? 'https://paper-api.alpaca.markets' : 'https://api.alpaca.markets'"> Paper trading</label>
+      </div>
+      <div class="modal-actions">
+        <button class="btn" onclick="closeModal()">Cancel</button>
+        <button class="btn primary" onclick="submitAccountAdd()">Add Account</button>
+      </div>`;
+  }
+  else if(type === 'account-rotate') {
+    const a = data || {};
+    modal.innerHTML = `
+      <h3>Rotate Keys — ${esc(a.name || '')}</h3>
+      <div class="modal-body">
+        <p class="acct-muted">Enter the new full publicKey and secretKey. Both required.</p>
+        <label>Public Key<input id="m-pk" placeholder="PK..."></label>
+        <label>Secret Key<input id="m-sk" type="password" placeholder="..."></label>
+      </div>
+      <div class="modal-actions">
+        <button class="btn" onclick="closeModal()">Cancel</button>
+        <button class="btn primary" onclick="submitAccountRotate('${a.id}')">Rotate</button>
+      </div>`;
   }
   else if(type === 'agent-create' || type === 'agent-edit') {
     const a = data || { name:'', description:'', systemPromptTemplate:'default', customSystemPrompt:'', strategyId:'v2-options', model: config.activeModel, heartbeatOverrides:{} };
@@ -3770,24 +3820,47 @@ function showModal(type, data) {
 
 function closeModal() { document.getElementById('modal-overlay').classList.remove('visible'); }
 
-async function submitAccount() {
-  const body = { name: v('f-acc-name'), publicKey: v('f-acc-pk'), secretKey: v('f-acc-sk'), baseUrl: v('f-acc-url'), paper: document.getElementById('f-acc-paper').checked };
-  try {
-    const r = await fetch('/api/accounts', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-    const d = await r.json();
-    if (d.error) { alert('Error: ' + d.error); return; }
-    closeModal();
-  } catch (e) { alert('Error: ' + e.message); }
+
+async function submitAccountAdd() {
+  const body = {
+    name: document.getElementById('m-name').value.trim(),
+    publicKey: document.getElementById('m-pk').value.trim(),
+    secretKey: document.getElementById('m-sk').value.trim(),
+    baseUrl: document.getElementById('m-base').value.trim(),
+    paper: document.getElementById('m-paper').checked,
+  };
+  if (!body.name || !body.publicKey || !body.secretKey) {
+    return showToast('Name, publicKey, and secretKey are required', 'error');
+  }
+  const r = await fetch('/api/accounts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const j = await r.json();
+  if (!r.ok) return showToast(j.error || 'Failed to add account', 'error');
+  closeModal();
+  showToast('Account added', 'success');
 }
 
-async function submitEditAccount(id) {
-  const body = { name: v('f-eacc-name'), baseUrl: v('f-eacc-url'), paper: document.getElementById('f-eacc-paper').checked };
-  try {
-    const r = await fetch('/api/accounts/' + encodeURIComponent(id), {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-    const d = await r.json();
-    if (d.error) { alert('Error: ' + d.error); return; }
-    closeModal();
-  } catch (e) { alert('Error: ' + e.message); }
+async function submitAccountEdit(id) {
+  const body = {
+    name: document.getElementById('m-name').value.trim(),
+    baseUrl: document.getElementById('m-base').value.trim(),
+    paper: document.getElementById('m-paper').checked,
+  };
+  const r = await fetch('/api/accounts/' + encodeURIComponent(id), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const j = await r.json();
+  if (!r.ok) return showToast(j.error || 'Failed to save', 'error');
+  closeModal();
+  showToast('Account updated', 'success');
+}
+
+async function submitAccountRotate(id) {
+  const pk = document.getElementById('m-pk').value.trim();
+  const sk = document.getElementById('m-sk').value.trim();
+  if (!pk || !sk) return showToast('Both publicKey and secretKey are required', 'error');
+  const r = await fetch('/api/accounts/' + encodeURIComponent(id), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ publicKey: pk, secretKey: sk }) });
+  const j = await r.json();
+  if (!r.ok) return showToast(j.error || 'Failed to rotate', 'error');
+  closeModal();
+  showToast('Keys rotated', 'success');
 }
 
 async function submitAgent(id) {

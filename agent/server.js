@@ -15,7 +15,7 @@ import { buildSystemPrompt } from './harness.js';
 import { AnalysisScheduler } from './analysis-scheduler.js';
 import ChatStore from './chat-store.js';
 import AgentOrchestrator from './orchestrator.js';
-import { migrateLegacyDataForAccount } from './data-migration.js';
+import { migrateLegacyDataForSandbox } from './data-migration.js';
 import {
   loadConfig, getConfig, saveConfig,
   addAccount, updateAccount, removeAccount, setActiveAccount, setActiveSandbox, getActiveAccount, getAccountById,
@@ -28,6 +28,7 @@ import {
   updatePlugin, updatePluginForSandbox, getPlugin, getPluginForSandbox,
   getActiveSandbox, getSandbox, getHeartbeatForSandboxPhase, getSandboxes,
   getHeartbeatProfiles, getPhaseTimeRanges, applyHeartbeatProfile, updatePhaseTimeRange,
+  createSandboxForAccount,
 } from './config-store.js';
 import { appendTrade, readTrades } from './trades-store.js';
 
@@ -58,29 +59,11 @@ app.use('/api', authMiddleware);
 
 // ── Load Config ────────────────────────────────────────────────────
 await loadConfig();
-const initialActiveAccount = getActiveAccount();
-if (initialActiveAccount?.id) {
-  const migration = await migrateLegacyDataForAccount(initialActiveAccount.id);
+const initialActiveSandbox = getActiveSandbox();
+if (initialActiveSandbox?.id) {
+  const migration = await migrateLegacyDataForSandbox(initialActiveSandbox.id);
   if (migration.migrated) {
-    console.log(`  Migrated legacy data into sandbox for account ${initialActiveAccount.id}: ${migration.copied.join(', ')}`);
-  }
-}
-
-// Seed second account from env vars if configured
-{
-  const pk2 = process.env.ALPACA_PUBLIC_KEY_2;
-  const sk2 = process.env.ALPACA_SECRET_KEY_2;
-  if (pk2 && sk2) {
-    const cfg = getConfig();
-    const alreadyExists = (cfg.accounts || []).some(a => a.publicKey === pk2);
-    if (!alreadyExists) {
-      const paper2 = process.env.ALPACA_PAPER_2 !== 'false';
-      const name2 = process.env.ALPACA_NAME_2 || 'Account 2';
-      const baseUrl2 = process.env.ALPACA_ENDPOINT_2 ||
-        (paper2 ? 'https://paper-api.alpaca.markets' : 'https://api.alpaca.markets');
-      await addAccount({ name: name2, publicKey: pk2, secretKey: sk2, baseUrl: baseUrl2, paper: paper2 });
-      console.log(`  Seeded second account "${name2}" from env vars`);
-    }
+    console.log(`  Migrated legacy data into sandbox ${initialActiveSandbox.id}: ${migration.copied.join(', ')}`);
   }
 }
 
@@ -701,6 +684,20 @@ app.get('/api/sandboxes', (req, res) => {
   res.json({ sandboxes });
 });
 
+app.post('/api/sandboxes', async (req, res) => {
+  try {
+    const { accountId, name, agentId } = req.body || {};
+    if (!accountId) return res.status(400).json({ error: 'accountId is required' });
+    if (!name || !String(name).trim()) return res.status(400).json({ error: 'name is required' });
+    const sandbox = await createSandboxForAccount(accountId, { name: String(name).trim(), agentId });
+    broadcast('config', safeConfig());
+    res.json({ ok: true, sandbox });
+  } catch (err) {
+    const code = /account not found/i.test(err.message) ? 400 : 500;
+    res.status(code).json({ error: err.message });
+  }
+});
+
 // ── Trade history ──────────────────────────────────────────────────
 // Reads NDJSON files written by the per-runtime trade listener. Defaults to
 // today (ET). Hard caps: max 90-day range, max 2000 trades returned.
@@ -878,9 +875,9 @@ app.post('/api/sandboxes/:id/activate', async (req, res) => {
     // not stop any harness here. We just ensure the newly-focused sandbox
     // has a runtime and its Go backend is up so the dashboard renders data.
     await setActiveSandbox(req.params.id);
-    const account = getActiveAccount();
-    if (account) {
-      await migrateLegacyDataForAccount(account.id);
+    const activeSandbox = getActiveSandbox();
+    if (activeSandbox?.id) {
+      await migrateLegacyDataForSandbox(activeSandbox.id);
       const runtime = getRuntimeForSandbox(req.params.id);
       if (runtime && !runtime.goReady) {
         await orchestrator.startGoBackend(req.params.id);
@@ -957,7 +954,10 @@ app.post('/api/agent/heartbeat', (req, res) => {
 function safeConfig() {
   const cfg = { ...getConfig() };
   // Strip secret keys from accounts
-  cfg.accounts = (cfg.accounts || []).map(a => ({ ...a, secretKey: a.secretKey ? '****' + a.secretKey.slice(-4) : '****' }));
+  cfg.accounts = (cfg.accounts || []).map(a => {
+    const full = getAccountById(a.id) || {};
+    return { ...a, secretKey: full.secretKey ? '****' + full.secretKey.slice(-4) : '****' };
+  });
   return cfg;
 }
 
@@ -1018,10 +1018,30 @@ app.delete('/api/chats/:sessionId', async (req, res) => {
 });
 
 // Accounts
+const _equityCache = new Map();  // accountId -> { equity, asOf, fetchedAtMs, error }
+const EQUITY_CACHE_MS = 60_000;
+
 app.get('/api/accounts', (req, res) => {
   const config = getConfig();
-  // Don't expose secret keys to frontend
-  const safe = config.accounts.map(a => ({ ...a, secretKey: '****' + a.secretKey.slice(-4) }));
+  const sandboxesByAccount = new Map();
+  for (const s of Object.values(config.sandboxes || {})) {
+    if (!sandboxesByAccount.has(s.accountId)) sandboxesByAccount.set(s.accountId, []);
+    sandboxesByAccount.get(s.accountId).push(s);
+  }
+  const safe = config.accounts.map(a => {
+    const cached = _equityCache.get(a.id);
+    const sbxs = sandboxesByAccount.get(a.id) || [];
+    const creds = getAccountById(a.id);
+    return {
+      ...a,
+      secretKey: creds?.secretKey ? '****' + creds.secretKey.slice(-4) : '****',
+      publicKey: creds?.publicKey || null,
+      equity: cached?.equity ?? null,
+      equityAsOf: cached?.asOf ?? null,
+      sandboxCount: sbxs.length,
+      sandboxNames: sbxs.map(s => s.name),
+    };
+  });
   res.json({ accounts: safe, activeId: config.activeAccountId });
 });
 
@@ -1029,20 +1049,31 @@ app.post('/api/accounts', async (req, res) => {
   try {
     const account = await addAccount(req.body);
     broadcast('config', safeConfig());
-    res.json({ ok: true, account: { ...account, secretKey: '****' } });
+    res.json({ ok: true, account: { ...account, secretKey: '****' + (account.secretKey || '').slice(-4) } });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
 app.put('/api/accounts/:id', async (req, res) => {
   try {
     const account = await updateAccount(req.params.id, req.body);
+    const creds = getAccountById(req.params.id);
     broadcast('config', safeConfig());
-    res.json({ ok: true, account: { ...account, secretKey: '****' + account.secretKey.slice(-4) } });
+    res.json({ ok: true, account: { ...account, secretKey: '****' + (creds?.secretKey || '').slice(-4) } });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
 app.delete('/api/accounts/:id', async (req, res) => {
   try {
+    const cfg = getConfig();
+    const attached = Object.values(cfg.sandboxes || {})
+      .filter(s => s.accountId === req.params.id);
+    if (attached.length > 0) {
+      return res.status(409).json({
+        error: `Account has ${attached.length} sandbox(es) attached. Detach or delete them before removing the account.`,
+        sandboxIds: attached.map(s => s.id),
+        sandboxNames: attached.map(s => s.name),
+      });
+    }
     await removeAccount(req.params.id);
     broadcast('config', safeConfig());
     res.json({ ok: true });
@@ -1051,42 +1082,71 @@ app.delete('/api/accounts/:id', async (req, res) => {
 
 app.post('/api/accounts/:id/activate', async (req, res) => {
   try {
-    const nextSandboxId = `sbx_${req.params.id}`;
+    const cfg = getConfig();
+    const sandboxes = Object.values(cfg.sandboxes || {})
+      .filter(s => s.accountId === req.params.id)
+      .sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''));
+    if (sandboxes.length === 0) {
+      return res.status(400).json({ error: 'Account has no sandboxes — create one first' });
+    }
     await setActiveAccount(req.params.id);
-    const account = getActiveAccount();
+    await setActiveSandbox(sandboxes[0].id);
+    const activeSandbox = getActiveSandbox();
     broadcast('config', safeConfig());
-    if (account) {
-      await migrateLegacyDataForAccount(account.id);
+    if (activeSandbox?.id) {
+      await migrateLegacyDataForSandbox(activeSandbox.id);
       broadcast('agent_log', {
-        message: `Switching to account "${account.name}"... ensuring trading backend.`,
+        message: `Switching to account "${getActiveAccount()?.name}"... ensuring trading backend.`,
         level: 'info',
         timestamp: new Date().toISOString(),
       });
-      const runtime = getRuntimeForSandbox(nextSandboxId);
+      const runtime = getRuntimeForSandbox(activeSandbox.id);
       if (runtime && !runtime.goReady) {
-        await orchestrator.startGoBackend(nextSandboxId);
+        await orchestrator.startGoBackend(activeSandbox.id);
       }
     }
     res.json({ ok: true });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
-app.post('/api/accounts/:id/clone', async (req, res) => {
+app.get('/api/accounts/:id/equity', async (req, res) => {
+  const account = getAccountById(req.params.id);
+  if (!account) return res.status(404).json({ error: 'Account not found' });
+
+  const cached = _equityCache.get(account.id);
+  if (cached && (Date.now() - cached.fetchedAtMs) < EQUITY_CACHE_MS) {
+    return res.json({ equity: cached.equity, asOf: cached.asOf, error: cached.error || null });
+  }
+
   try {
-    const source = getAccountById(req.params.id);
-    if (!source) return res.status(404).json({ error: 'Account not found' });
-    const { name } = req.body;
-    if (!name?.trim()) return res.status(400).json({ error: 'Name is required' });
-    const account = await addAccount({
-      name: name.trim(),
-      publicKey: source.publicKey,
-      secretKey: source.secretKey,
-      baseUrl: source.baseUrl,
-      paper: source.paper,
+    const baseUrl = account.baseUrl || (account.paper ? 'https://paper-api.alpaca.markets' : 'https://api.alpaca.markets');
+    const client = axios.create({
+      baseURL: baseUrl,
+      headers: {
+        'APCA-API-KEY-ID': account.publicKey,
+        'APCA-API-SECRET-KEY': account.secretKey,
+      },
+      timeout: 3000,
     });
-    broadcast('config', safeConfig());
-    res.json({ ok: true, sandboxId: `sbx_${account.id}`, account: { ...account, secretKey: '****' + account.secretKey.slice(-4) } });
-  } catch (err) { res.status(400).json({ error: err.message }); }
+    const { data } = await client.get('/v2/account');
+    const entry = {
+      equity: Number(data.equity),
+      asOf: new Date().toISOString(),
+      fetchedAtMs: Date.now(),
+      error: null,
+    };
+    _equityCache.set(account.id, entry);
+    res.json({ equity: entry.equity, asOf: entry.asOf, error: null });
+  } catch (err) {
+    const entry = {
+      equity: null,
+      asOf: new Date().toISOString(),
+      fetchedAtMs: Date.now(),
+      error: err.response?.status ? `Alpaca ${err.response.status}` : err.message,
+    };
+    _equityCache.set(account.id, entry);
+    res.json({ equity: null, asOf: entry.asOf, error: entry.error });
+  }
 });
 
 // Agents
