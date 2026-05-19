@@ -1526,6 +1526,52 @@ function getSandboxEntries() {
   return Object.values(config.sandboxes || {});
 }
 
+// Persisted sandbox-tab order: per-browser localStorage, falls back to createdAt.
+const TAB_ORDER_STORAGE_KEY = 'prophet:sandbox-tab-order';
+
+function loadTabOrder() {
+  try {
+    const raw = localStorage.getItem(TAB_ORDER_STORAGE_KEY);
+    const arr = raw ? JSON.parse(raw) : [];
+    return Array.isArray(arr) ? arr.filter(x => typeof x === 'string') : [];
+  } catch { return []; }
+}
+
+function saveTabOrder(ids) {
+  try { localStorage.setItem(TAB_ORDER_STORAGE_KEY, JSON.stringify(ids)); } catch {}
+}
+
+function getSandboxTabOrder() {
+  const all = getSandboxEntries();
+  const byId = new Map(all.map(s => [s.id, s]));
+  const saved = loadTabOrder();
+  const ordered = [];
+  const seen = new Set();
+  for (const id of saved) {
+    if (byId.has(id) && !seen.has(id)) {
+      ordered.push(byId.get(id));
+      seen.add(id);
+    }
+  }
+  const remaining = all
+    .filter(s => !seen.has(s.id))
+    .sort((a, b) =>
+      (a.createdAt || '').localeCompare(b.createdAt || '') || a.id.localeCompare(b.id)
+    );
+  for (const s of remaining) ordered.push(s);
+  return ordered;
+}
+
+function teardownSandboxTerminal(sandboxId) {
+  if (!sandboxId || sandboxId === '_manager') return;
+  const t = sandboxTerminals[sandboxId];
+  if (!t) return;
+  if (t.el && t.el.parentNode) t.el.parentNode.removeChild(t.el);
+  delete sandboxTerminals[sandboxId];
+}
+
+let _draggedSandboxId = null;
+
 function getEffectiveSandboxId() {
   if (selectedSandboxId === '_manager') return '_manager';
   if (selectedSandboxId && (config.sandboxes || {})[selectedSandboxId]) return selectedSandboxId;
