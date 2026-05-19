@@ -1015,10 +1015,30 @@ app.delete('/api/chats/:sessionId', async (req, res) => {
 });
 
 // Accounts
+const _equityCache = new Map();  // accountId -> { equity, asOf, fetchedAtMs, error }
+const EQUITY_CACHE_MS = 60_000;
+
 app.get('/api/accounts', (req, res) => {
   const config = getConfig();
-  // Don't expose secret keys to frontend
-  const safe = config.accounts.map(a => ({ ...a, secretKey: '****' + a.secretKey.slice(-4) }));
+  const sandboxesByAccount = new Map();
+  for (const s of Object.values(config.sandboxes || {})) {
+    if (!sandboxesByAccount.has(s.accountId)) sandboxesByAccount.set(s.accountId, []);
+    sandboxesByAccount.get(s.accountId).push(s);
+  }
+  const safe = config.accounts.map(a => {
+    const cached = _equityCache.get(a.id);
+    const sbxs = sandboxesByAccount.get(a.id) || [];
+    const creds = getAccountById(a.id);
+    return {
+      ...a,
+      secretKey: creds?.secretKey ? '****' + creds.secretKey.slice(-4) : '****',
+      publicKey: creds?.publicKey || null,
+      equity: cached?.equity ?? null,
+      equityAsOf: cached?.asOf ?? null,
+      sandboxCount: sbxs.length,
+      sandboxNames: sbxs.map(s => s.name),
+    };
+  });
   res.json({ accounts: safe, activeId: config.activeAccountId });
 });
 
@@ -1026,20 +1046,31 @@ app.post('/api/accounts', async (req, res) => {
   try {
     const account = await addAccount(req.body);
     broadcast('config', safeConfig());
-    res.json({ ok: true, account: { ...account, secretKey: '****' } });
+    res.json({ ok: true, account: { ...account, secretKey: '****' + (account.secretKey || '').slice(-4) } });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
 app.put('/api/accounts/:id', async (req, res) => {
   try {
     const account = await updateAccount(req.params.id, req.body);
+    const creds = getAccountById(req.params.id);
     broadcast('config', safeConfig());
-    res.json({ ok: true, account: { ...account, secretKey: '****' + account.secretKey.slice(-4) } });
+    res.json({ ok: true, account: { ...account, secretKey: '****' + (creds?.secretKey || '').slice(-4) } });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
 app.delete('/api/accounts/:id', async (req, res) => {
   try {
+    const cfg = getConfig();
+    const attached = Object.values(cfg.sandboxes || {})
+      .filter(s => s.accountId === req.params.id);
+    if (attached.length > 0) {
+      return res.status(409).json({
+        error: `Account has ${attached.length} sandbox(es) attached. Detach or delete them before removing the account.`,
+        sandboxIds: attached.map(s => s.id),
+        sandboxNames: attached.map(s => s.name),
+      });
+    }
     await removeAccount(req.params.id);
     broadcast('config', safeConfig());
     res.json({ ok: true });
@@ -1048,49 +1079,32 @@ app.delete('/api/accounts/:id', async (req, res) => {
 
 app.post('/api/accounts/:id/activate', async (req, res) => {
   try {
-    const nextSandboxId = `sbx_${req.params.id}`;
+    const cfg = getConfig();
+    const sandboxes = Object.values(cfg.sandboxes || {})
+      .filter(s => s.accountId === req.params.id)
+      .sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''));
+    if (sandboxes.length === 0) {
+      return res.status(400).json({ error: 'Account has no sandboxes — create one first' });
+    }
     await setActiveAccount(req.params.id);
-    const account = getActiveAccount();
+    await setActiveSandbox(sandboxes[0].id);
+    const activeSandbox = getActiveSandbox();
     broadcast('config', safeConfig());
-    if (account) {
-      const activeSandbox = getActiveSandbox();
-      if (activeSandbox?.id) {
-        await migrateLegacyDataForSandbox(activeSandbox.id);
-      }
+    if (activeSandbox?.id) {
+      await migrateLegacyDataForSandbox(activeSandbox.id);
       broadcast('agent_log', {
-        message: `Switching to account "${account.name}"... ensuring trading backend.`,
+        message: `Switching to account "${getActiveAccount()?.name}"... ensuring trading backend.`,
         level: 'info',
         timestamp: new Date().toISOString(),
       });
-      const runtime = getRuntimeForSandbox(nextSandboxId);
+      const runtime = getRuntimeForSandbox(activeSandbox.id);
       if (runtime && !runtime.goReady) {
-        await orchestrator.startGoBackend(nextSandboxId);
+        await orchestrator.startGoBackend(activeSandbox.id);
       }
     }
     res.json({ ok: true });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
-
-app.post('/api/accounts/:id/clone', async (req, res) => {
-  try {
-    const source = getAccountById(req.params.id);
-    if (!source) return res.status(404).json({ error: 'Account not found' });
-    const { name } = req.body;
-    if (!name?.trim()) return res.status(400).json({ error: 'Name is required' });
-    const account = await addAccount({
-      name: name.trim(),
-      publicKey: source.publicKey,
-      secretKey: source.secretKey,
-      baseUrl: source.baseUrl,
-      paper: source.paper,
-    });
-    broadcast('config', safeConfig());
-    res.json({ ok: true, sandboxId: `sbx_${account.id}`, account: { ...account, secretKey: '****' + account.secretKey.slice(-4) } });
-  } catch (err) { res.status(400).json({ error: err.message }); }
-});
-
-const _equityCache = new Map();  // accountId -> { equity, asOf, fetchedAtMs, error }
-const EQUITY_CACHE_MS = 60_000;
 
 app.get('/api/accounts/:id/equity', async (req, res) => {
   const account = getAccountById(req.params.id);

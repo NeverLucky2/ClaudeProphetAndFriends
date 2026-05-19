@@ -136,3 +136,43 @@ test('GET /api/accounts/:id/equity is cached: 2nd call within 60s does not refet
   const r2 = await req('GET', '/api/accounts/acc1/equity');
   assert.equal(r1.body.asOf, r2.body.asOf);
 });
+
+test('GET /api/accounts includes sandboxCount per account', async () => {
+  const r = await req('GET', '/api/accounts');
+  assert.equal(r.status, 200);
+  const acc1 = r.body.accounts.find(a => a.id === 'acc1');
+  assert.ok(typeof acc1.sandboxCount === 'number', 'sandboxCount field present');
+});
+
+test('DELETE /api/accounts/:id with attached sandbox returns 409 with sandboxIds list', async () => {
+  // acc1 has sbx_acc1aaaa attached from seed
+  const r = await req('DELETE', '/api/accounts/acc1');
+  assert.equal(r.status, 409);
+  assert.ok(Array.isArray(r.body.sandboxIds));
+  assert.ok(r.body.sandboxIds.includes('sbx_acc1aaaa'));
+});
+
+test('PUT /api/accounts/:id with only publicKey returns 400', async () => {
+  const r = await req('PUT', '/api/accounts/acc1', { publicKey: 'NEW_PK' });
+  assert.equal(r.status, 400);
+});
+
+test('PUT /api/accounts/:id with both publicKey + secretKey rotates', async () => {
+  const r = await req('PUT', '/api/accounts/acc1', { publicKey: 'NEW_PK', secretKey: 'NEW_SK' });
+  assert.equal(r.status, 200);
+  // The masked-secret response should show last-4 of the NEW secret ('NEW_SK'.slice(-4) === 'W_SK')
+  assert.match(r.body.account.secretKey, /W_SK$/);
+});
+
+test('POST /api/accounts/:id/clone is removed (returns 404)', async () => {
+  const r = await req('POST', '/api/accounts/acc1/clone', { name: 'X' });
+  assert.equal(r.status, 404);
+});
+
+test('POST /api/accounts no longer creates a sandbox', async () => {
+  const before = await req('GET', '/api/sandboxes');
+  const ar = await req('POST', '/api/accounts', { name: 'NoSandbox', publicKey: 'PK_NEW', secretKey: 'SK_NEW', baseUrl: 'https://paper-api.alpaca.markets', paper: true });
+  assert.equal(ar.status, 200);
+  const after = await req('GET', '/api/sandboxes');
+  assert.equal(after.body.sandboxes.length, before.body.sandboxes.length, 'sandbox count unchanged');
+});
