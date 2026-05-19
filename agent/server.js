@@ -15,7 +15,7 @@ import { buildSystemPrompt } from './harness.js';
 import { AnalysisScheduler } from './analysis-scheduler.js';
 import ChatStore from './chat-store.js';
 import AgentOrchestrator from './orchestrator.js';
-import { migrateLegacyDataForAccount } from './data-migration.js';
+import { migrateLegacyDataForSandbox } from './data-migration.js';
 import {
   loadConfig, getConfig, saveConfig,
   addAccount, updateAccount, removeAccount, setActiveAccount, setActiveSandbox, getActiveAccount, getAccountById,
@@ -58,11 +58,11 @@ app.use('/api', authMiddleware);
 
 // ── Load Config ────────────────────────────────────────────────────
 await loadConfig();
-const initialActiveAccount = getActiveAccount();
-if (initialActiveAccount?.id) {
-  const migration = await migrateLegacyDataForAccount(initialActiveAccount.id);
+const initialActiveSandbox = getActiveSandbox();
+if (initialActiveSandbox?.id) {
+  const migration = await migrateLegacyDataForSandbox(initialActiveSandbox.id);
   if (migration.migrated) {
-    console.log(`  Migrated legacy data into sandbox for account ${initialActiveAccount.id}: ${migration.copied.join(', ')}`);
+    console.log(`  Migrated legacy data into sandbox ${initialActiveSandbox.id}: ${migration.copied.join(', ')}`);
   }
 }
 
@@ -878,9 +878,9 @@ app.post('/api/sandboxes/:id/activate', async (req, res) => {
     // not stop any harness here. We just ensure the newly-focused sandbox
     // has a runtime and its Go backend is up so the dashboard renders data.
     await setActiveSandbox(req.params.id);
-    const account = getActiveAccount();
-    if (account) {
-      await migrateLegacyDataForAccount(account.id);
+    const activeSandbox = getActiveSandbox();
+    if (activeSandbox?.id) {
+      await migrateLegacyDataForSandbox(activeSandbox.id);
       const runtime = getRuntimeForSandbox(req.params.id);
       if (runtime && !runtime.goReady) {
         await orchestrator.startGoBackend(req.params.id);
@@ -1056,7 +1056,10 @@ app.post('/api/accounts/:id/activate', async (req, res) => {
     const account = getActiveAccount();
     broadcast('config', safeConfig());
     if (account) {
-      await migrateLegacyDataForAccount(account.id);
+      const activeSandbox = getActiveSandbox();
+      if (activeSandbox?.id) {
+        await migrateLegacyDataForSandbox(activeSandbox.id);
+      }
       broadcast('agent_log', {
         message: `Switching to account "${account.name}"... ensuring trading backend.`,
         level: 'info',

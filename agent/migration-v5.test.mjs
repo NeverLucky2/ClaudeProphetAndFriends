@@ -123,3 +123,56 @@ test('v4→v5: single-account v4 config still extracts secrets, no merge happens
   const onDiskSecrets = JSON.parse(await fs.readFile(secretsPath, 'utf-8'));
   assert.deepEqual(onDiskSecrets['6e4f26af'], { publicKey: 'PK_SHARED', secretKey: 'SK_SHARED' });
 });
+
+test('v4→v5: runtime dirs rekey from accountId to sandboxId', async () => {
+  // Pre-create one runtime dir per old accountId
+  for (const acctId of ['6e4f26af', '449fedf6', 'f015e4df', '1b6dc838']) {
+    const dir = path.join(tmpDir, 'sandboxes', acctId);
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, 'prophet_trader.db'), `db for ${acctId}`);
+    await fs.mkdir(path.join(dir, 'activity_logs'), { recursive: true });
+    await fs.writeFile(path.join(dir, 'activity_logs', 'sample.log'), `log for ${acctId}`);
+  }
+
+  cfgStore._setPathsForTests({
+    configPath, secretsPath, backupDir,
+    sandboxesRoot: path.join(tmpDir, 'sandboxes'),
+  });
+  await fs.writeFile(configPath, JSON.stringify(v4Fixture));
+  await cfgStore.loadConfig();
+
+  // After rekey, dirs live under sandboxId
+  for (const sbxId of ['sbx_6e4f26af', 'sbx_449fedf6', 'sbx_f015e4df', 'sbx_1b6dc838']) {
+    const newDir = path.join(tmpDir, 'sandboxes', sbxId);
+    await fs.access(newDir);  // throws if missing
+    const dbContents = await fs.readFile(path.join(newDir, 'prophet_trader.db'), 'utf-8');
+    assert.ok(dbContents.startsWith('db for '), 'db file was moved, not overwritten');
+  }
+
+  // Old dirs no longer exist
+  for (const acctId of ['6e4f26af', '449fedf6', 'f015e4df', '1b6dc838']) {
+    await assert.rejects(
+      fs.access(path.join(tmpDir, 'sandboxes', acctId)),
+      /ENOENT/,
+      `old dir for ${acctId} should be gone`
+    );
+  }
+});
+
+test('v4→v5: rekey is a no-op when target dir already exists (idempotency safety)', async () => {
+  await fs.mkdir(path.join(tmpDir, 'sandboxes', 'sbx_6e4f26af'), { recursive: true });
+  await fs.writeFile(path.join(tmpDir, 'sandboxes', 'sbx_6e4f26af', 'marker'), 'preexisting');
+  await fs.mkdir(path.join(tmpDir, 'sandboxes', '6e4f26af'), { recursive: true });
+
+  cfgStore._setPathsForTests({
+    configPath, secretsPath, backupDir,
+    sandboxesRoot: path.join(tmpDir, 'sandboxes'),
+  });
+  const single = { ...v4Fixture, accounts: [v4Fixture.accounts[0]], sandboxes: { sbx_6e4f26af: v4Fixture.sandboxes.sbx_6e4f26af } };
+  await fs.writeFile(configPath, JSON.stringify(single));
+  await cfgStore.loadConfig();
+
+  // Pre-existing marker survives — rekey skipped because target already populated
+  const marker = await fs.readFile(path.join(tmpDir, 'sandboxes', 'sbx_6e4f26af', 'marker'), 'utf-8');
+  assert.equal(marker, 'preexisting');
+});

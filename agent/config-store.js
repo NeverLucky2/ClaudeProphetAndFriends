@@ -13,17 +13,27 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 let CONFIG_PATH_OVERRIDE = null;
 let SECRETS_PATH_OVERRIDE = null;
 let BACKUP_DIR_OVERRIDE = null;
+let SANDBOXES_ROOT_OVERRIDE = null;
 
-export function _setPathsForTests({ configPath, secretsPath, backupDir } = {}) {
+export function _setPathsForTests({ configPath, secretsPath, backupDir, sandboxesRoot } = {}) {
   CONFIG_PATH_OVERRIDE = configPath ?? null;
   SECRETS_PATH_OVERRIDE = secretsPath ?? null;
   BACKUP_DIR_OVERRIDE = backupDir ?? null;
+  SANDBOXES_ROOT_OVERRIDE = sandboxesRoot ?? null;
   // Force re-init on next loadConfig
   _config = null;
 }
 
 function getBackupDir() {
   return BACKUP_DIR_OVERRIDE || path.join(__dirname, '..', 'data', 'backups');
+}
+
+function getSandboxesRoot() {
+  return SANDBOXES_ROOT_OVERRIDE || path.join(__dirname, '..', 'data', 'sandboxes');
+}
+
+export function getSandboxRuntimeDir(sandboxId) {
+  return path.join(getSandboxesRoot(), sandboxId);
 }
 
 // Test hook: replace the bound credential-store module (lets tests inject failures).
@@ -580,6 +590,43 @@ async function migrateLegacyConfig(config, rawSchemaVersion = 0) {
         pointerRewrites++;
       }
     }
+
+    // Step 3b: rekey runtime dirs from data/sandboxes/<oldAccountId>/ to data/sandboxes/<sandboxId>/
+    const sandboxesRoot = getSandboxesRoot();
+    let rekeyed = 0;
+    for (const sbx of Object.values(config.sandboxes || {})) {
+      // The OLD dir is whatever accountId the sandbox pointed at BEFORE rewrite.
+      // The reverse-map: find the original accountId via idRemap inverse (the sandbox's
+      // current accountId is the survivor; the original is its sbx_<id> suffix when
+      // ids were 1:1 in v4 — true for any sandbox the system created itself).
+      const originalAccountIdFromSbxId = sbx.id.startsWith('sbx_') ? sbx.id.slice(4) : null;
+      const candidates = [
+        originalAccountIdFromSbxId,   // most common case under v4's 1:1 convention
+        sbx.accountId,                 // post-rewrite survivor dir, if it exists
+      ].filter(Boolean);
+      const oldDir = (await Promise.all(candidates.map(async c => {
+        const p = path.join(sandboxesRoot, c);
+        try { await fs.access(p); return p; } catch { return null; }
+      }))).find(Boolean);
+      if (!oldDir) continue;  // nothing to move (sandbox never had a runtime dir yet)
+
+      const newDir = path.join(sandboxesRoot, sbx.id);
+      // Skip if target already populated — caller intentionally pre-staged it
+      try {
+        const entries = await fs.readdir(newDir);
+        if (entries.length > 0) continue;
+      } catch { /* newDir doesn't exist, good */ }
+
+      if (oldDir === newDir) continue;  // already correctly keyed
+      await fs.mkdir(path.dirname(newDir), { recursive: true });
+      try {
+        await fs.rename(oldDir, newDir);
+        rekeyed++;
+      } catch (renameErr) {
+        console.warn(`[migration] v4→v5 rekey: failed to rename ${oldDir} → ${newDir}: ${renameErr.message}`);
+      }
+    }
+    console.log(`[migration] v4→v5 rekeyed ${rekeyed} runtime dirs`);
 
     // Step 4: extract secrets to credential store, strip from accounts[]
     let extracted = 0;
