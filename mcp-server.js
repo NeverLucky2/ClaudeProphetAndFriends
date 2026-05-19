@@ -2896,7 +2896,13 @@ Worst Trade: ${stats.worst_result_pct.toFixed(1)}% ($${stats.worst_result_dollar
           let content;
           try {
             content = await fs.readFile(filePath, 'utf-8');
-          } catch {
+          } catch (err) {
+            // ENOENT is the expected pre-brief state. Everything else (EACCES,
+            // EISDIR, I/O errors) deserves an operator signal because a blind
+            // "no report found" message would otherwise hide a real failure.
+            if (err && err.code !== 'ENOENT') {
+              console.error(`[read_latest_report] daily_brief read failed: ${err.code || err.name} — ${err.message}`);
+            }
             // Lock-file check preserves the BRIEFING_IN_PROGRESS signal during
             // generation. We check both the new `.running` name and the old
             // prefixed name so a transitional in-flight job is still surfaced.
@@ -2916,6 +2922,10 @@ Worst Trade: ${stats.worst_result_pct.toFixed(1)}% ($${stats.worst_result_dollar
             const ageNote = staleness.hasFields
               ? ` (as_of=${staleness.asOf}, stale_after=${staleness.staleAfter}, now=${new Date().toISOString()})`
               : ' (as_of/stale_after fields missing or malformed)';
+            // Operator signal: a stale brief usually means the scheduler is
+            // stuck producing fresh ones. Without this log the degradation
+            // only shows up in individual agent transcripts.
+            console.error(`[read_latest_report] serving stale daily_brief${ageNote}`);
             prefixMessage = `STALE_BRIEF: Daily brief is older than its staleness window${ageNote}. Treat the content below as historical context only; do not rely on it for today's pre-market reasoning.\n\n`;
           }
 
