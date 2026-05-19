@@ -57,13 +57,17 @@ export function parseBriefStaleness(brief, now) {
   };
 }
 
-// briefAsOfDate returns the UTC date portion (YYYY-MM-DD) of `as_of` for the
-// scheduler's "have we run today?" comparison. Returns null on any parse
-// failure so the scheduler treats it as "no brief today" and triggers.
-export function briefAsOfDate(brief) {
+// briefAsOfETDate returns the America/New_York calendar date (YYYY-MM-DD) of
+// `as_of`. The scheduler's "have we run today?" check uses ET-local dates
+// throughout (lock keys, _lastFooDate trackers), so this must match — using
+// the UTC date instead would mis-compare on manual reruns after 8 PM ET
+// (which roll into the next UTC day) and on pre-dawn restarts. Returns null
+// on any parse failure so the scheduler treats it as "no brief today" and
+// triggers a fresh run.
+export function briefAsOfETDate(brief) {
   const asOf = brief && typeof brief === 'object' ? brief.as_of : undefined;
   if (typeof asOf !== 'string') return null;
   const d = new Date(asOf);
   if (Number.isNaN(d.getTime())) return null;
-  return d.toISOString().slice(0, 10);
+  return d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
 }

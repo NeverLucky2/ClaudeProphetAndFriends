@@ -33,7 +33,7 @@ import { EventEmitter } from 'events';
 import {
   DAILY_BRIEF_FILENAME,
   injectFreshnessFields,
-  briefAsOfDate,
+  briefAsOfETDate,
 } from './daily-brief-freshness.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -369,8 +369,14 @@ export class AnalysisScheduler extends EventEmitter {
     try {
       const briefRaw = await fs.readFile(path.join(REPORTS_DIR, DAILY_BRIEF_FILENAME), 'utf-8');
       const briefJson = JSON.parse(briefRaw);
-      briefIsCurrent = briefAsOfDate(briefJson) === isoDate;
-    } catch {
+      briefIsCurrent = briefAsOfETDate(briefJson) === isoDate;
+    } catch (err) {
+      // ENOENT is the expected pre-brief state; everything else (EACCES, EISDIR,
+      // SyntaxError from a corrupt file) deserves an operator signal because
+      // a blind re-trigger would just hit the same error inside _runDailyBriefing.
+      if (err.code !== 'ENOENT') {
+        this._log(`Daily briefing freshness check failed: ${err.code || err.name} — will re-trigger. (${err.message})`, 'warn');
+      }
       briefIsCurrent = false;
     }
     if (!briefIsCurrent) {

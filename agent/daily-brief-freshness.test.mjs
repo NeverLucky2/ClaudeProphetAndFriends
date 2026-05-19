@@ -11,7 +11,7 @@ import {
   DAILY_BRIEF_FILENAME,
   injectFreshnessFields,
   parseBriefStaleness,
-  briefAsOfDate,
+  briefAsOfETDate,
 } from './daily-brief-freshness.js';
 
 test('STALE_AFTER_HOURS matches regime_gate 29h window', () => {
@@ -105,15 +105,23 @@ test('parseBriefStaleness: malformed stale_after is treated as stale', () => {
   assert.equal(r.hasFields, false);
 });
 
-test('briefAsOfDate extracts UTC YYYY-MM-DD', () => {
-  // Scheduler "have we run today?" compares this to today's ISO date slug.
-  // Must be UTC date — using local time would cause double-runs near midnight.
-  const brief = { as_of: '2026-05-19T23:45:00.000Z' };
-  assert.equal(briefAsOfDate(brief), '2026-05-19');
+test('briefAsOfETDate extracts America/New_York calendar date', () => {
+  // Scheduler "have we run today?" compares this to today's ET-local ISO date.
+  // 13:30Z = 09:30 ET on 2026-05-19 — both UTC and ET agree on the date here.
+  const brief = { as_of: '2026-05-19T13:30:00.000Z' };
+  assert.equal(briefAsOfETDate(brief), '2026-05-19');
 });
 
-test('briefAsOfDate returns null when as_of missing or malformed', () => {
-  assert.equal(briefAsOfDate({}), null);
-  assert.equal(briefAsOfDate({ as_of: 'garbage' }), null);
-  assert.equal(briefAsOfDate(null), null);
+test('briefAsOfETDate disagrees with UTC at day boundaries (the bug we are fixing)', () => {
+  // 01:00Z on 2026-05-20 = 21:00 ET on 2026-05-19. UTC date would be 2026-05-20,
+  // but the scheduler considers this to still be 2026-05-19's trading day.
+  // Returning the ET date prevents a spurious "no brief for today" re-trigger.
+  const brief = { as_of: '2026-05-20T01:00:00.000Z' };
+  assert.equal(briefAsOfETDate(brief), '2026-05-19');
+});
+
+test('briefAsOfETDate returns null when as_of missing or malformed', () => {
+  assert.equal(briefAsOfETDate({}), null);
+  assert.equal(briefAsOfETDate({ as_of: 'garbage' }), null);
+  assert.equal(briefAsOfETDate(null), null);
 });
