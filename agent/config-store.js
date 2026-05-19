@@ -24,12 +24,16 @@ export function _setPathsForTests({ configPath, secretsPath, backupDir, sandboxe
   _config = null;
 }
 
+function _dataRoot() {
+  return process.env.OPENPROPHET_DATA_ROOT || path.join(__dirname, '..', 'data');
+}
+
 function getBackupDir() {
-  return BACKUP_DIR_OVERRIDE || path.join(__dirname, '..', 'data', 'backups');
+  return BACKUP_DIR_OVERRIDE || path.join(_dataRoot(), 'backups');
 }
 
 function getSandboxesRoot() {
-  return SANDBOXES_ROOT_OVERRIDE || path.join(__dirname, '..', 'data', 'sandboxes');
+  return SANDBOXES_ROOT_OVERRIDE || path.join(_dataRoot(), 'sandboxes');
 }
 
 export function getSandboxRuntimeDir(sandboxId) {
@@ -60,10 +64,10 @@ function credStore() {
 }
 
 function getConfigPath() {
-  return CONFIG_PATH_OVERRIDE || path.join(__dirname, '..', 'data', 'agent-config.json');
+  return CONFIG_PATH_OVERRIDE || path.join(_dataRoot(), 'agent-config.json');
 }
 function getSecretsPath() {
-  return SECRETS_PATH_OVERRIDE || path.join(__dirname, '..', 'data', 'accounts-secrets.json');
+  return SECRETS_PATH_OVERRIDE || path.join(_dataRoot(), 'accounts-secrets.json');
 }
 
 const DEFAULT_HEARTBEAT = {

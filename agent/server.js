@@ -28,6 +28,7 @@ import {
   updatePlugin, updatePluginForSandbox, getPlugin, getPluginForSandbox,
   getActiveSandbox, getSandbox, getHeartbeatForSandboxPhase, getSandboxes,
   getHeartbeatProfiles, getPhaseTimeRanges, applyHeartbeatProfile, updatePhaseTimeRange,
+  createSandboxForAccount,
 } from './config-store.js';
 import { appendTrade, readTrades } from './trades-store.js';
 
@@ -681,6 +682,20 @@ app.get('/api/sandboxes', (req, res) => {
     };
   });
   res.json({ sandboxes });
+});
+
+app.post('/api/sandboxes', async (req, res) => {
+  try {
+    const { accountId, name, agentId } = req.body || {};
+    if (!accountId) return res.status(400).json({ error: 'accountId is required' });
+    if (!name || !String(name).trim()) return res.status(400).json({ error: 'name is required' });
+    const sandbox = await createSandboxForAccount(accountId, { name: String(name).trim(), agentId });
+    broadcast('config', safeConfig());
+    res.json({ ok: true, sandbox });
+  } catch (err) {
+    const code = /account not found/i.test(err.message) ? 400 : 500;
+    res.status(code).json({ error: err.message });
+  }
 });
 
 // ── Trade history ──────────────────────────────────────────────────
