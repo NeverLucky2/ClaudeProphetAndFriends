@@ -2936,6 +2936,10 @@ function ensureSandboxTerminal(sandboxId, label) {
 function renderSandboxTabs() {
   const el = document.getElementById('sandbox-tabs');
   if (!el) return;
+  // Skip re-render while a drag is in flight: replacing el.innerHTML
+  // would detach the source node and strip its .dragging feedback.
+  // The next status/config event after dragend will catch us up.
+  if (_draggedSandboxId) return;
 
   const sandboxes = getSandboxTabOrder();
   const currentSid = getEffectiveSandboxId();
