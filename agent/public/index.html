@@ -2913,35 +2913,59 @@ function ensureSandboxTerminal(sandboxId, label) {
 function renderSandboxTabs() {
   const el = document.getElementById('sandbox-tabs');
   if (!el) return;
-  const accounts = config.accounts || [];
-  
+
+  const sandboxes = getSandboxTabOrder();
   const currentSid = getEffectiveSandboxId();
-  
-  // Manager tab first
+
+  // Manager tab first (pinned, not draggable)
   ensureManagerTerminal();
   refreshManagerDropdowns();
   let html = '<div class="sandbox-tab ' + (currentSid === '_manager' ? 'active' : '') + '" onclick="switchSandboxTab(\'_manager\')" style="border-right:1px solid var(--border)">'
     + '<span class="dot" style="background:var(--accent)"></span><span>Manager</span></div>';
-  
-  // Account tabs
-  html += accounts.map(a => {
-    const sandboxId = 'sbx_' + a.id;
+
+  // Sandbox tabs (one per sandbox; draggable)
+  html += sandboxes.map(sbx => {
+    const sandboxId = sbx.id;
     const runtime = (window._healthState?.sandboxes || []).find(s => s.sandboxId === sandboxId);
-    const running = runtime?.state?.running;
+    const running = !!(runtime?.state?.running);
+    const paused = !!(runtime?.state?.paused);
     const active = sandboxId === currentSid;
-    const dotClass = running ? 'running' : 'stopped';
-    const label = a.name || (a.paper ? 'Paper' : 'Live');
+    const dotClass = running ? (paused ? 'paused' : 'running') : 'stopped';
+    const label = sbx.name || sbx.id;
     const beats = runtime?.state?.beatCount || 0;
     ensureSandboxTerminal(sandboxId, label);
-    const statusText = running ? 'Beat #' + beats : 'Stopped';
-    return '<div class="sandbox-tab ' + (active ? 'active' : '') + '" onclick="switchSandboxTab(\'' + sandboxId + '\')"><span class="dot ' + dotClass + '"></span><span>' + esc(label) + '</span><span style="font-size:10px;color:var(--ink-faint);margin-left:2px">' + statusText + '</span></div>';
+    const statusText = running ? (paused ? 'Paused' : 'Beat #' + beats) : 'Stopped';
+    return '<div class="sandbox-tab ' + (active ? 'active' : '')
+      + '" draggable="true" data-sandbox-id="' + esc(sandboxId) + '"'
+      + ' ondragstart="onSandboxTabDragStart(event)"'
+      + ' ondragover="onSandboxTabDragOver(event)"'
+      + ' ondragleave="onSandboxTabDragLeave(event)"'
+      + ' ondrop="onSandboxTabDrop(event)"'
+      + ' ondragend="onSandboxTabDragEnd(event)"'
+      + ' onclick="switchSandboxTab(\'' + sandboxId + '\')">'
+      + '<span class="dot ' + dotClass + '"></span><span>' + esc(label) + '</span>'
+      + '<span style="font-size:10px;color:var(--ink-faint);margin-left:2px">' + statusText + '</span></div>';
   }).join('');
-  
+
   el.innerHTML = html;
-  
-  // Show/hide terminals
+
+  // Orphan sweep: tear down cached terminals whose sandbox no longer exists.
+  const liveIds = new Set(['_manager', ...sandboxes.map(s => s.id)]);
+  for (const cachedId of Object.keys(sandboxTerminals)) {
+    if (!liveIds.has(cachedId)) teardownSandboxTerminal(cachedId);
+  }
+
+  // If the active tab was just removed, snap to the new effective sandbox.
+  // switchSandboxTab re-calls renderSandboxTabs; on the second pass currentSid
+  // is valid, so this branch is not re-entered.
+  if (currentSid && !liveIds.has(currentSid)) {
+    switchSandboxTab(getEffectiveSandboxId());
+    return;
+  }
+
+  // Show/hide terminals.
   for (const [sid, t] of Object.entries(sandboxTerminals)) {
-    t.el.style.display = sid === currentSid ? 'flex' : 'none';
+    t.el.style.display = sid === getEffectiveSandboxId() ? 'flex' : 'none';
   }
 }
 
