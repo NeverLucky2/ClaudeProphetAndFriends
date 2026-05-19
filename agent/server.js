@@ -66,24 +66,6 @@ if (initialActiveSandbox?.id) {
   }
 }
 
-// Seed second account from env vars if configured
-{
-  const pk2 = process.env.ALPACA_PUBLIC_KEY_2;
-  const sk2 = process.env.ALPACA_SECRET_KEY_2;
-  if (pk2 && sk2) {
-    const cfg = getConfig();
-    const alreadyExists = (cfg.accounts || []).some(a => a.publicKey === pk2);
-    if (!alreadyExists) {
-      const paper2 = process.env.ALPACA_PAPER_2 !== 'false';
-      const name2 = process.env.ALPACA_NAME_2 || 'Account 2';
-      const baseUrl2 = process.env.ALPACA_ENDPOINT_2 ||
-        (paper2 ? 'https://paper-api.alpaca.markets' : 'https://api.alpaca.markets');
-      await addAccount({ name: name2, publicKey: pk2, secretKey: sk2, baseUrl: baseUrl2, paper: paper2 });
-      console.log(`  Seeded second account "${name2}" from env vars`);
-    }
-  }
-}
-
 // ── Agent Instance ─────────────────────────────────────────────────
 const chatStore = new ChatStore();
 const orchestrator = new AgentOrchestrator({

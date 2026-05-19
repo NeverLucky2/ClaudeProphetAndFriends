@@ -723,37 +723,6 @@ export async function loadConfig() {
     }
   }
 
-  const envPk = process.env.ALPACA_PUBLIC_KEY || process.env.ALPACA_API_KEY;
-  const envSk = process.env.ALPACA_SECRET_KEY;
-  const envBaseUrl = process.env.ALPACA_BASE_URL || process.env.ALPACA_ENDPOINT || '';
-
-  if (_config.accounts.length === 0) {
-    if (envPk && envSk) {
-      const isPaper = envBaseUrl.includes('paper') || process.env.ALPACA_PAPER === 'true';
-      const id = crypto.randomUUID().slice(0, 8);
-      const account = {
-        id,
-        name: isPaper ? 'Paper (from .env)' : 'Live (from .env)',
-        publicKey: envPk,
-        secretKey: envSk,
-        baseUrl: envBaseUrl || (isPaper ? 'https://paper-api.alpaca.markets' : 'https://api.alpaca.markets'),
-        paper: isPaper,
-        createdAt: new Date().toISOString(),
-      };
-      _config.accounts.push(account);
-      _config.sandboxes[`sbx_${id}`] = createSandbox(account);
-      _config.activeAccountId = id;
-      _config.activeSandboxId = `sbx_${id}`;
-      console.log(`  Auto-imported Alpaca account from .env (${isPaper ? 'paper' : 'live'})`);
-    }
-  } else if (envBaseUrl) {
-    const envAccount = _config.accounts.find(a => a.name.includes('(from .env)'));
-    if (envAccount && envAccount.baseUrl !== envBaseUrl) {
-      envAccount.baseUrl = envBaseUrl;
-      console.log(`  Synced baseUrl for "${envAccount.name}" from .env`);
-    }
-  }
-
   syncLegacyAliases(_config);
   await saveConfig();
   return _config;
