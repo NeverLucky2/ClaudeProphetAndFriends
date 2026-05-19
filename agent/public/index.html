@@ -3089,6 +3089,53 @@ async function sendManagerMessage() {
   }
 }
 
+function onSandboxTabDragStart(e) {
+  const tab = e.currentTarget;
+  _draggedSandboxId = tab.dataset.sandboxId || null;
+  if (!_draggedSandboxId) return;
+  e.dataTransfer.effectAllowed = 'move';
+  try { e.dataTransfer.setData('text/plain', _draggedSandboxId); } catch {}
+  tab.classList.add('dragging');
+}
+
+function onSandboxTabDragOver(e) {
+  if (!_draggedSandboxId) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+  const tab = e.currentTarget;
+  if (tab.dataset.sandboxId && tab.dataset.sandboxId !== _draggedSandboxId) {
+    tab.classList.add('drag-over');
+  }
+}
+
+function onSandboxTabDragLeave(e) {
+  e.currentTarget.classList.remove('drag-over');
+}
+
+function onSandboxTabDrop(e) {
+  e.preventDefault();
+  const tab = e.currentTarget;
+  const targetId = tab.dataset.sandboxId;
+  tab.classList.remove('drag-over');
+  if (!_draggedSandboxId || !targetId || _draggedSandboxId === targetId) return;
+
+  const order = getSandboxTabOrder().map(s => s.id);
+  const fromIdx = order.indexOf(_draggedSandboxId);
+  const toIdx = order.indexOf(targetId);
+  if (fromIdx < 0 || toIdx < 0) return;
+
+  order.splice(fromIdx, 1);
+  order.splice(toIdx, 0, _draggedSandboxId);
+  saveTabOrder(order);
+  renderSandboxTabs();
+}
+
+function onSandboxTabDragEnd(e) {
+  e.currentTarget.classList.remove('dragging');
+  document.querySelectorAll('.sandbox-tab.drag-over').forEach(el => el.classList.remove('drag-over'));
+  _draggedSandboxId = null;
+}
+
 async function switchSandboxTab(sandboxId) {
   // 1. Set selection immediately for UI
   selectedSandboxId = sandboxId || null;
