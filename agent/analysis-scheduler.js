@@ -30,6 +30,10 @@ import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { EventEmitter } from 'events';
+import {
+  DAILY_BRIEF_FILENAME,
+  injectFreshnessFields,
+} from './daily-brief-freshness.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(__dirname, '..');
@@ -1097,6 +1101,8 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
     this._log(`Starting daily briefing for ${date}...`, 'info');
     this.emit('scheduler_job_start', { job: 'daily_briefing', date });
 
+    const briefPath = path.join(REPORTS_DIR, DAILY_BRIEF_FILENAME);
+
     const hasFmp = !!process.env.FMP_API_KEY;
     const fmpNote = hasFmp ? '' : '\nNote: FMP_API_KEY not set — FTD check, economic calendar, earnings calendar, analyst actions, and catalyst news will be skipped.';
 
@@ -1113,7 +1119,7 @@ ${hasFmp ? `2. run_ftd_check — detects Follow-Through Day signals (requires FM
 3. get_marketwatch_all — fetches all MarketWatch feeds. Scan for market-moving headlines and extract up to 7 that a trader must know about today.`}
 
 After all tools have returned, use the Write tool to save the briefing to exactly this path:
-data/reports/daily_brief_${dateSlug}.json
+data/reports/${DAILY_BRIEF_FILENAME}
 
 The JSON must be exactly this structure (fill all values from tool results):
 {
@@ -1132,11 +1138,30 @@ The JSON must be exactly this structure (fill all values from tool results):
   "summary": "<2-3 sentences describing today's market setup, key risks from headlines, notable analyst actions and ticker catalysts on Prophet's universe, and any sector-specific warnings>"
 }
 
-Use null for any field where the corresponding tool failed. Use [] for analyst_actions and ticker_catalysts if the tools were skipped or returned empty. Write only the JSON — no markdown, no explanation.`;
+Use null for any field where the corresponding tool failed. Use [] for analyst_actions and ticker_catalysts if the tools were skipped or returned empty. Do NOT include "as_of" or "stale_after" fields — the scheduler injects those after you write. Write only the JSON — no markdown, no explanation.`;
 
     await this._runOneshotOpencode(prompt, 'daily_briefing', 10 * 60 * 1000);
-    this._log(`Daily briefing complete → data/reports/daily_brief_${dateSlug}.json`, 'success');
-    this.emit('scheduler_job_end', { job: 'daily_briefing', date, output: `data/reports/daily_brief_${dateSlug}.json` });
+
+    // Post-process: read the LLM-written file, inject as_of + stale_after from
+    // the scheduler's clock (single source of truth), and atomically rewrite.
+    // A failure here leaves the file without freshness fields — the reader
+    // treats that as stale and the next scheduler cycle re-runs the briefing.
+    try {
+      const raw = await fs.readFile(briefPath, 'utf-8');
+      const parsed = JSON.parse(raw);
+      const enriched = injectFreshnessFields(parsed, new Date());
+      const tmpPath = `${briefPath}.tmp`;
+      await fs.writeFile(tmpPath, JSON.stringify(enriched, null, 2), 'utf-8');
+      await fs.rename(tmpPath, briefPath);
+    } catch (err) {
+      this._log(`Daily briefing freshness injection failed: ${err.message}`, 'warn');
+    }
+
+    this._log(`Daily briefing complete → data/reports/${DAILY_BRIEF_FILENAME}`, 'success');
+    this.emit('scheduler_job_end', { job: 'daily_briefing', date, output: `data/reports/${DAILY_BRIEF_FILENAME}` });
+    // dateSlug retained for backwards-compatible log/event payloads if any
+    // downstream consumer reads it (none currently — see plan).
+    void dateSlug;
   }
 
   async _runWeeklyScreeners(date) {
