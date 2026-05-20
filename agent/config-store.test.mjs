@@ -152,3 +152,37 @@ test('createSandboxForAccount: applies agentId override when provided', async ()
   const sbx = await cfgStore.createSandboxForAccount(a.id, { name: 'Harvest sbx', agentId: 'harvest' });
   assert.equal(sbx.agent.activeAgentId, 'harvest');
 });
+
+// ── normalizeConfig merges code-default agents/strategies missing on disk ──
+
+test('loadConfig merges code-default agents/strategies missing from persisted config', async () => {
+  // Simulate a config saved BEFORE the `drift` agent + `earnings-drift`
+  // strategy were added to the code defaults, with a user rename in place.
+  const raw = {
+    schemaVersion: 5,
+    accounts: [],
+    sandboxes: {},
+    agents: [
+      { id: 'default', name: 'Prophet', strategyId: 'v2-options' },
+      { id: 'penny-prophet', name: 'Spark', strategyId: 'penny-momentum' }, // user rename
+      { id: 'mean-rev', name: 'Coil', strategyId: 'mean-rev-rsi2' },
+    ],
+    strategies: [
+      { id: 'v2-options', name: 'Aggressive Options v2' },
+      { id: 'mean-rev-rsi2', name: 'Mean Reversion (Connors RSI(2))' },
+    ],
+  };
+  await fs.writeFile(configPath, JSON.stringify(raw, null, 2));
+
+  const cfg = await cfgStore.loadConfig();
+
+  // Missing code-default agent + strategy are merged in from defaults.
+  assert.ok(cfg.agents.find(a => a.id === 'drift'), 'drift agent merged in from defaults');
+  assert.ok(cfg.strategies.find(s => s.id === 'earnings-drift'), 'earnings-drift strategy merged in');
+  // User rename is preserved (NOT clobbered by the code default name 'PennyProphet').
+  assert.equal(cfg.agents.find(a => a.id === 'penny-prophet').name, 'Spark', 'user rename preserved');
+  // Pre-existing agents stay; no duplicate ids introduced by the merge.
+  assert.ok(cfg.agents.find(a => a.id === 'mean-rev'), 'existing coil agent preserved');
+  const ids = cfg.agents.map(a => a.id);
+  assert.equal(new Set(ids).size, ids.length, 'no duplicate agent ids');
+});

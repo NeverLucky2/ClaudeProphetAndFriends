@@ -578,6 +578,24 @@ function mergeSandbox(sandbox, fallback = {}) {
   };
 }
 
+// Append any code-default entries whose id is missing from the persisted list.
+// Existing rows (including user renames/edits) are kept untouched; new agents or
+// strategies added to defaultAgents()/defaultStrategies() in code surface on the
+// next load instead of being shadowed by a stale persisted list. Tradeoff: a
+// default deleted via the UI reappears on restart while it remains in the code
+// defaults.
+function mergeMissingDefaults(persisted, defaults) {
+  const list = Array.isArray(persisted) ? [...persisted] : [];
+  const seen = new Set(list.map(x => x?.id));
+  for (const def of defaults) {
+    if (!seen.has(def.id)) {
+      list.push(def);
+      seen.add(def.id);
+    }
+  }
+  return list;
+}
+
 async function normalizeConfig(raw = {}) {
   const rawSchemaVersion = Number(raw.schemaVersion) || 0;
   const defaults = createDefaultConfig();
@@ -589,8 +607,8 @@ async function normalizeConfig(raw = {}) {
     plugins: mergePlugins(raw.plugins || {}),
     accounts: raw.accounts || [],
     sandboxes: raw.sandboxes || {},
-    agents: raw.agents || defaults.agents,
-    strategies: raw.strategies || defaults.strategies,
+    agents: mergeMissingDefaults(raw.agents, defaults.agents),
+    strategies: mergeMissingDefaults(raw.strategies, defaults.strategies),
     models: raw.models || defaults.models,
   };
 
