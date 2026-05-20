@@ -17,55 +17,55 @@ import (
 
 // ManagedPosition represents a position with automated risk management
 type ManagedPosition struct {
-	ID                string                 `json:"id"`
-	Symbol            string                 `json:"symbol"`
-	Side              string                 `json:"side"` // "buy" or "sell"
-	Strategy          string                 `json:"strategy"` // "SWING_TRADE", "LONG_TERM", "DAY_TRADE"
+	ID       string `json:"id"`
+	Symbol   string `json:"symbol"`
+	Side     string `json:"side"`     // "buy" or "sell"
+	Strategy string `json:"strategy"` // "SWING_TRADE", "LONG_TERM", "DAY_TRADE"
 	// AgentStrategy is the owning agent's strategyId (e.g. "penny-momentum",
 	// "trend"). Distinct from Strategy, which is the trading-style label.
 	// Populated from OPENPROPHET_STRATEGY at the MCP boundary.
-	AgentStrategy     string                 `json:"agent_strategy,omitempty"`
+	AgentStrategy string `json:"agent_strategy,omitempty"`
 
 	// Entry details
-	Quantity          float64                `json:"quantity"`
-	EntryPrice        float64                `json:"entry_price"`
-	EntryOrderID      string                 `json:"entry_order_id"`
-	EntryOrderType    string                 `json:"entry_order_type"` // "market", "limit"
-	AllocationDollars float64                `json:"allocation_dollars"`
+	Quantity          float64 `json:"quantity"`
+	EntryPrice        float64 `json:"entry_price"`
+	EntryOrderID      string  `json:"entry_order_id"`
+	EntryOrderType    string  `json:"entry_order_type"` // "market", "limit"
+	AllocationDollars float64 `json:"allocation_dollars"`
 
 	// Risk management
-	StopLossPrice     float64                `json:"stop_loss_price"`
-	StopLossPercent   float64                `json:"stop_loss_percent"`
-	StopLossOrderID   string                 `json:"stop_loss_order_id,omitempty"`
-	TrailingStop      bool                   `json:"trailing_stop"`
-	TrailingPercent   float64                `json:"trailing_percent,omitempty"`
+	StopLossPrice   float64 `json:"stop_loss_price"`
+	StopLossPercent float64 `json:"stop_loss_percent"`
+	StopLossOrderID string  `json:"stop_loss_order_id,omitempty"`
+	TrailingStop    bool    `json:"trailing_stop"`
+	TrailingPercent float64 `json:"trailing_percent,omitempty"`
 
 	// Profit targets
-	TakeProfitPrice   float64                `json:"take_profit_price"`
-	TakeProfitPercent float64                `json:"take_profit_percent"`
-	TakeProfitOrderID string                 `json:"take_profit_order_id,omitempty"`
+	TakeProfitPrice   float64 `json:"take_profit_price"`
+	TakeProfitPercent float64 `json:"take_profit_percent"`
+	TakeProfitOrderID string  `json:"take_profit_order_id,omitempty"`
 
 	// Partial exit strategy
-	PartialExit       *PartialExitConfig     `json:"partial_exit,omitempty"`
-	PartialExitOrders []string               `json:"partial_exit_orders,omitempty"`
+	PartialExit       *PartialExitConfig `json:"partial_exit,omitempty"`
+	PartialExitOrders []string           `json:"partial_exit_orders,omitempty"`
 
 	// Status tracking
-	Status            string                 `json:"status"` // "PENDING", "ACTIVE", "PARTIAL", "CLOSED", "STOPPED_OUT", "FAILED"
-	CurrentPrice      float64                `json:"current_price"`
-	UnrealizedPL      float64                `json:"unrealized_pl"`
-	UnrealizedPLPC    float64                `json:"unrealized_pl_percent"`
-	RemainingQty      float64                `json:"remaining_qty"`
+	Status         string  `json:"status"` // "PENDING", "ACTIVE", "PARTIAL", "CLOSED", "STOPPED_OUT", "FAILED"
+	CurrentPrice   float64 `json:"current_price"`
+	UnrealizedPL   float64 `json:"unrealized_pl"`
+	UnrealizedPLPC float64 `json:"unrealized_pl_percent"`
+	RemainingQty   float64 `json:"remaining_qty"`
 
 	// Metadata
-	CreatedAt         time.Time              `json:"created_at"`
-	UpdatedAt         time.Time              `json:"updated_at"`
-	ClosedAt          *time.Time             `json:"closed_at,omitempty"`
-	Notes             string                 `json:"notes,omitempty"`
-	Tags              []string               `json:"tags,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
+	ClosedAt  *time.Time `json:"closed_at,omitempty"`
+	Notes     string     `json:"notes,omitempty"`
+	Tags      []string   `json:"tags,omitempty"`
 	// DominantSignal classifies penny entries by signal type. Drives
 	// the social-signal 20-minute time exit in checkPositions. Empty
 	// for non-penny managed positions.
-	DominantSignal    string                 `json:"dominant_signal,omitempty"`
+	DominantSignal string `json:"dominant_signal,omitempty"`
 }
 
 // PartialExitConfig defines partial profit taking strategy
@@ -79,33 +79,33 @@ type PartialExitConfig struct {
 // PlaceManagedPositionRequest represents request to open a managed position
 type PlaceManagedPositionRequest struct {
 	Symbol            string      `json:"symbol" binding:"required"`
-	Side              string      `json:"side" binding:"required"` // "buy" or "sell"
-	Strategy          string      `json:"strategy"`                // "SWING_TRADE", "LONG_TERM", "DAY_TRADE"
+	Side              string      `json:"side" binding:"required"`  // "buy" or "sell"
+	Strategy          string      `json:"strategy"`                 // "SWING_TRADE", "LONG_TERM", "DAY_TRADE"
 	AgentStrategy     string      `json:"agent_strategy,omitempty"` // agent strategyId from OPENPROPHET_STRATEGY (e.g. "penny-momentum")
-	AgentSource       AgentSource `json:"agent_source,omitempty"`  // "main" or "penny"; defaults to "main"
+	AgentSource       AgentSource `json:"agent_source,omitempty"`   // "main" or "penny"; defaults to "main"
 	AllocationDollars float64     `json:"allocation_dollars" binding:"required,gt=0"`
 
 	// Entry configuration
-	EntryStrategy     string              `json:"entry_strategy"` // "market", "limit"
-	EntryPrice        *float64            `json:"entry_price,omitempty"` // Required for limit orders
+	EntryStrategy string   `json:"entry_strategy"`        // "market", "limit"
+	EntryPrice    *float64 `json:"entry_price,omitempty"` // Required for limit orders
 
 	// Risk management (one of these required)
-	StopLossPrice     *float64            `json:"stop_loss_price,omitempty"`
-	StopLossPercent   *float64            `json:"stop_loss_percent,omitempty"`
-	TrailingStop      bool                `json:"trailing_stop"`
-	TrailingPercent   float64             `json:"trailing_percent,omitempty"`
+	StopLossPrice   *float64 `json:"stop_loss_price,omitempty"`
+	StopLossPercent *float64 `json:"stop_loss_percent,omitempty"`
+	TrailingStop    bool     `json:"trailing_stop"`
+	TrailingPercent float64  `json:"trailing_percent,omitempty"`
 
 	// Profit targets (one of these required)
-	TakeProfitPrice   *float64            `json:"take_profit_price,omitempty"`
-	TakeProfitPercent *float64            `json:"take_profit_percent,omitempty"`
+	TakeProfitPrice   *float64 `json:"take_profit_price,omitempty"`
+	TakeProfitPercent *float64 `json:"take_profit_percent,omitempty"`
 
 	// Partial exit (optional)
-	PartialExit       *PartialExitConfig  `json:"partial_exit,omitempty"`
+	PartialExit *PartialExitConfig `json:"partial_exit,omitempty"`
 
 	// Metadata
-	Notes             string              `json:"notes,omitempty"`
-	Tags              []string            `json:"tags,omitempty"`
-	DominantSignal    string              `json:"dominant_signal,omitempty"`
+	Notes          string   `json:"notes,omitempty"`
+	Tags           []string `json:"tags,omitempty"`
+	DominantSignal string   `json:"dominant_signal,omitempty"`
 }
 
 // PositionManager handles automated position management
@@ -118,6 +118,13 @@ type PositionManager struct {
 	positions map[string]*ManagedPosition // position_id -> position
 	mu        sync.RWMutex
 	logger    *logrus.Logger
+
+	// reconcileMissCount tracks, per position_id, how many consecutive
+	// reconciliation passes the symbol has been absent from broker truth.
+	// A position is closed only once this reaches reconcileCloseThreshold,
+	// which absorbs the propagation lag between a market fill and GetPositions
+	// reflecting it. Guarded by mu.
+	reconcileMissCount map[string]int
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -137,13 +144,14 @@ func NewPositionManager(
 	ctx, cancel := context.WithCancel(context.Background())
 
 	pm := &PositionManager{
-		tradingService: tradingService,
-		dataService:    dataService,
-		storageService: storageService,
-		positions:      make(map[string]*ManagedPosition),
-		logger:         logger,
-		ctx:            ctx,
-		cancel:         cancel,
+		tradingService:     tradingService,
+		dataService:        dataService,
+		storageService:     storageService,
+		positions:          make(map[string]*ManagedPosition),
+		reconcileMissCount: make(map[string]int),
+		logger:             logger,
+		ctx:                ctx,
+		cancel:             cancel,
 	}
 
 	// Load existing positions from database
@@ -283,7 +291,7 @@ func (pm *PositionManager) placeEntryOrder(ctx context.Context, position *Manage
 		// Propagate the owning agent's strategy so the broker's
 		// client_order_id is encoded as "{agent_strategy}:{uuid}" and the
 		// resulting DBOrder row is attributable. Empty for legacy callers.
-		Strategy:    position.AgentStrategy,
+		Strategy: position.AgentStrategy,
 	}
 
 	if orderType == "limit" {
@@ -324,6 +332,17 @@ func (pm *PositionManager) MonitorPositions(ctx context.Context) {
 
 	pm.logger.Debug("Position monitoring started")
 
+	// Reconcile managed state against broker truth every reconcileEveryTicks
+	// (~60s), plus once immediately. The startup pass is what catches a
+	// restart-induced phantom (a non-closed row reloaded as ACTIVE while the
+	// broker is already flat) within two passes instead of letting it linger
+	// indefinitely — the failure mode that left III stuck on Spark for days.
+	const reconcileEveryTicks = 6
+	if _, err := pm.reconcileWithBroker(ctx); err != nil {
+		pm.logger.WithError(err).Debug("startup broker reconcile skipped (broker read failed)")
+	}
+	tick := 0
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -331,8 +350,103 @@ func (pm *PositionManager) MonitorPositions(ctx context.Context) {
 			return
 		case <-ticker.C:
 			pm.checkPositions(ctx)
+			tick++
+			if tick%reconcileEveryTicks == 0 {
+				if _, err := pm.reconcileWithBroker(ctx); err != nil {
+					pm.logger.WithError(err).Debug("periodic broker reconcile skipped (broker read failed)")
+				}
+			}
 		}
 	}
+}
+
+// reconcileCloseThreshold is the number of consecutive reconciliation passes a
+// managed position must be absent from broker truth before it is closed. Two
+// passes (spaced by the monitor's reconcile cadence) absorb the brief window
+// between a market entry filling and that fill propagating to GetPositions, so
+// a freshly opened position is never mistaken for a phantom.
+const reconcileCloseThreshold = 2
+
+// reconcileWithBroker closes managed positions that the broker no longer holds.
+//
+// The managed-position store can drift out of sync with the broker: a bracket
+// leg fills but the GetOrder check misses it, a co-located agent on the shared
+// account closes the symbol, a manual/broker close happens, or a restart
+// reloads a position whose broker side had already been flattened (this is what
+// stranded III on Spark — managed row stuck ACTIVE for 2+ days while the broker
+// had been flat since the agent's own hard-stop sell). None of those paths
+// transition the managed row to CLOSED, so it lingers as a phantom the agent
+// keeps "managing".
+//
+// This pass is the backstop. It is deliberately conservative:
+//   - A failed broker read closes nothing — we act only on a confirmed-empty
+//     broker, never on an error or unknown.
+//   - PENDING positions are skipped: an unfilled entry legitimately has no
+//     broker position yet (handled by checkEntryOrder + the 24h stale filter).
+//   - Closure requires the symbol absent on reconcileCloseThreshold consecutive
+//     passes, so propagation lag on a just-filled buy can't cause a false close.
+//   - It NEVER places an order. The broker is already flat; an exit order would
+//     reject or, worse, open a short. The row is marked CLOSED in place.
+//
+// Returns the number of positions reconciled-closed this pass.
+func (pm *PositionManager) reconcileWithBroker(ctx context.Context) (int, error) {
+	brokerPositions, err := pm.tradingService.GetPositions(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("reconcile: broker positions read failed: %w", err)
+	}
+
+	held := make(map[string]bool, len(brokerPositions))
+	for _, bp := range brokerPositions {
+		if bp != nil && bp.Qty != 0 {
+			held[bp.Symbol] = true
+		}
+	}
+
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	closed := 0
+	for id, pos := range pm.positions {
+		// Only entry-filled positions can be phantoms. PENDING/terminal states
+		// are not candidates; clear any stale miss count and skip.
+		if pos.Status != "ACTIVE" && pos.Status != "PARTIAL" {
+			delete(pm.reconcileMissCount, id)
+			continue
+		}
+		if held[pos.Symbol] {
+			delete(pm.reconcileMissCount, id)
+			continue
+		}
+
+		pm.reconcileMissCount[id]++
+		if pm.reconcileMissCount[id] < reconcileCloseThreshold {
+			continue
+		}
+
+		now := time.Now()
+		pos.Status = "CLOSED"
+		pos.ClosedAt = &now
+		pos.UpdatedAt = now
+		pos.Notes = strings.TrimSpace(pos.Notes + " reconciled_closed:broker_flat")
+		delete(pm.reconcileMissCount, id)
+
+		if saveErr := pm.savePositionToDB(pos); saveErr != nil {
+			pm.logger.WithError(saveErr).WithFields(logrus.Fields{
+				"position_id":              pos.ID,
+				"symbol":                   pos.Symbol,
+				"operator_review_required": true,
+			}).Error("Failed to persist reconciled-closed position — may resurrect on reload")
+		}
+
+		pm.logger.WithFields(logrus.Fields{
+			"position_id": pos.ID,
+			"symbol":      pos.Symbol,
+			"qty":         pos.RemainingQty,
+		}).Warn("Managed position closed by broker reconciliation — broker holds none (no exit order placed)")
+		closed++
+	}
+
+	return closed, nil
 }
 
 // checkPositions checks all positions and manages their risk orders
@@ -531,11 +645,11 @@ func (pm *PositionManager) flattenUnprotected(ctx context.Context, position *Man
 	}
 
 	pm.logger.WithFields(logrus.Fields{
-		"position_id":  position.ID,
-		"symbol":       position.Symbol,
-		"order_id":     result.OrderID,
-		"quantity":     position.RemainingQty,
-		"reason":       reason,
+		"position_id": position.ID,
+		"symbol":      position.Symbol,
+		"order_id":    result.OrderID,
+		"quantity":    position.RemainingQty,
+		"reason":      reason,
 	}).Info("Unprotected position auto-flattened")
 }
 
