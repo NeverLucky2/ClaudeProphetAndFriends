@@ -317,6 +317,19 @@ func (s *MeanRevCandidatesService) GetCandidates(ctx context.Context) *MeanRevCa
 	return resp
 }
 
+// Refresh unconditionally recomputes the candidate scan and overwrites the
+// cache, bypassing the TTL. The background cache warmer calls this so the
+// once-daily Coil beat reads a hot cache instead of triggering a cold
+// full-universe scan that exceeds agent/preflight.js's 2s budget. Safe to
+// call concurrently with GetCandidates reads.
+func (s *MeanRevCandidatesService) Refresh(ctx context.Context) {
+	resp := s.computeCandidates(ctx)
+	s.mu.Lock()
+	s.cached = resp
+	s.cachedAt = time.Now()
+	s.mu.Unlock()
+}
+
 // computeCandidates does the full scan-and-filter pass. Public-method
 // GetCandidates wraps this with cache logic.
 func (s *MeanRevCandidatesService) computeCandidates(ctx context.Context) *MeanRevCandidatesResponse {

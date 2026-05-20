@@ -661,3 +661,39 @@ func TestDriftCandidatesService_CachingHonored(t *testing.T) {
 		t.Fatalf("after cache disabled, expected 0 candidates; got %d", third.Count)
 	}
 }
+
+func TestDriftCandidatesService_RefreshBypassesTTL(t *testing.T) {
+	// Refresh must recompute and overwrite the cache even within the TTL, so the
+	// background warmer keeps Drift's once-daily 17:00 ET beat reading a hot
+	// cache instead of triggering a cold scan that exceeds the 2s preflight
+	// budget. Detection mirrors TestDriftCandidatesService_CachingHonored.
+	stub := &stubDriftBarFetcherSvc{bars: map[string][]*interfaces.Bar{
+		"AAA": buildGradeABars("AAA"),
+	}}
+	reports := []RecentReport{
+		{Ticker: "AAA", Date: stub.bars["AAA"][len(stub.bars["AAA"])-5].Timestamp, Timing: "bmo"},
+	}
+	cs := NewDriftCandidatesService(
+		NewDriftSignalService(stub),
+		&stubRecentReporterFetcher{reports: reports},
+		[]string{"AAA"},
+	)
+	cs.SetRefreshInterval(10 * time.Minute) // caching ON, long TTL
+
+	if first := cs.GetCandidates(context.Background(), time.Date(2026, 5, 19, 17, 0, 0, 0, time.UTC)); first.Count != 1 {
+		t.Fatalf("first: expected 1 candidate, got %d", first.Count)
+	}
+
+	// Wipe AAA. A within-TTL read still serves the cached (stale) result.
+	delete(stub.bars, "AAA")
+	if cached := cs.GetCandidates(context.Background(), time.Date(2026, 5, 19, 17, 1, 0, 0, time.UTC)); cached.Count != 1 {
+		t.Fatalf("within-TTL read should be cached; got %d", cached.Count)
+	}
+
+	// Refresh bypasses the TTL and recomputes against the mutated fetcher.
+	cs.Refresh(context.Background())
+
+	if after := cs.GetCandidates(context.Background(), time.Date(2026, 5, 19, 17, 2, 0, 0, time.UTC)); after.Count != 0 {
+		t.Fatalf("Refresh should have recomputed an empty result into cache; got %d", after.Count)
+	}
+}

@@ -442,6 +442,41 @@ func TestCandidatesService_CachingHonored(t *testing.T) {
 	}
 }
 
+func TestCandidatesService_RefreshBypassesTTL(t *testing.T) {
+	// Refresh must recompute and overwrite the cache even when the cached entry
+	// is still within its TTL. That's what lets the background warmer keep the
+	// cache hot so the once-daily Coil beat hits it instead of triggering a
+	// cold full-universe scan that blows past the 2s preflight budget.
+	//
+	// Detection mirrors TestCandidatesService_CachingHonored: mutate the stub
+	// between calls so a cached read and a recompute return different counts.
+	stub := &stubBarFetcher{bars: map[string][]*interfaces.Bar{
+		"AAA": makeMeanRevBars(pullbackCloses()),
+		"SPY": makeMeanRevBars(pullbackCloses()),
+	}}
+	sig := NewMeanRevSignalService(stub)
+	svc := NewMeanRevCandidatesService(sig, nil, []string{"AAA"}, "normal")
+	svc.SetRefreshInterval(10 * time.Minute) // caching ON, long TTL
+
+	if first := svc.GetCandidates(context.Background()); first.Count != 1 {
+		t.Fatalf("first call: expected 1 candidate, got %d", first.Count)
+	}
+
+	// Wipe AAA. A within-TTL read still serves the cached (stale) result.
+	delete(stub.bars, "AAA")
+	if cached := svc.GetCandidates(context.Background()); cached.Count != 1 {
+		t.Fatalf("within-TTL read should be cached; got %d", cached.Count)
+	}
+
+	// Refresh bypasses the TTL and recomputes against the mutated fetcher.
+	svc.Refresh(context.Background())
+
+	// The cache now reflects the recompute (0), despite being within the TTL.
+	if after := svc.GetCandidates(context.Background()); after.Count != 0 {
+		t.Fatalf("Refresh should have recomputed an empty result into cache; got %d", after.Count)
+	}
+}
+
 func TestGetSignalForTicker_AppliesEarningsFilter(t *testing.T) {
 	bars := map[string][]*interfaces.Bar{
 		"AAA": makeMeanRevBars(pullbackCloses()),
