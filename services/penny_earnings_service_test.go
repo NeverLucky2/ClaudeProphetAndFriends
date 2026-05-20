@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -748,3 +749,79 @@ func TestEarningsCalendarService_Calendar_ReturnsSnapshot(t *testing.T) {
 		t.Error("Calendar() returned reference to internal slice; expected defensive copy")
 	}
 }
+
+func TestFetchRecentReports_ParsesPastWindow(t *testing.T) {
+	// FMP stable endpoint returns a mix of past + future-dated rows. We must
+	// keep only entries whose date falls in the past-window (cutoff..today),
+	// normalize timing strings, and skip malformed rows.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.Path, "/stable/earnings-calendar") {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		from := r.URL.Query().Get("from")
+		to := r.URL.Query().Get("to")
+		if from == "" || to == "" || from >= to {
+			t.Errorf("from/to malformed: from=%q to=%q", from, to)
+		}
+		payload := []fmpEarningsItem{
+			{Symbol: "AAPL", Date: "2026-05-15", Time: "amc"},
+			{Symbol: "MSFT", Date: "2026-05-16", Time: "BMO"},
+			{Symbol: "BAD", Date: "not-a-date", Time: "amc"},
+			{Symbol: "OLD", Date: "2026-04-01", Time: "bmo"}, // outside past window
+			{Symbol: "FUTURE", Date: "2026-06-01", Time: "amc"}, // future-dated
+		}
+		_ = json.NewEncoder(w).Encode(payload)
+	}))
+	defer ts.Close()
+
+	svc := NewEarningsCalendarService("fakekey", "", "", "", ts.Client())
+	svc.fmpBaseURL = ts.URL // inject test server
+
+	// 2026-05-19 ET; with days=5 the cutoff is now-(5*2+4) = now-14 days = 2026-05-05.
+	now := time.Date(2026, 5, 19, 17, 0, 0, 0, time.UTC)
+	got, err := svc.FetchRecentReports(context.Background(), now, 5)
+	if err != nil {
+		t.Fatalf("FetchRecentReports err = %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 reports, got %d: %+v", len(got), got)
+	}
+	want := map[string]string{"AAPL": "amc", "MSFT": "bmo"}
+	for _, r := range got {
+		w, ok := want[r.Ticker]
+		if !ok || r.Timing != w {
+			t.Errorf("ticker=%s timing=%q want=%q ok=%v", r.Ticker, r.Timing, w, ok)
+		}
+	}
+}
+
+func TestFetchRecentReports_HandlesUpstreamError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer ts.Close()
+
+	svc := NewEarningsCalendarService("fakekey", "", "", "", ts.Client())
+	svc.fmpBaseURL = ts.URL
+
+	now := time.Date(2026, 5, 19, 17, 0, 0, 0, time.UTC)
+	_, err := svc.FetchRecentReports(context.Background(), now, 5)
+	if err == nil {
+		t.Fatal("expected error on 500, got nil")
+	}
+}
+
+func TestFetchRecentReports_ZeroDaysReturnsEmpty(t *testing.T) {
+	svc := NewEarningsCalendarService("fakekey", "", "", "", nil)
+	got, err := svc.FetchRecentReports(context.Background(), time.Now(), 0)
+	if err != nil {
+		t.Fatalf("FetchRecentReports(days=0) err = %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("FetchRecentReports(days=0) returned %d entries, want 0", len(got))
+	}
+}
+
+// Silence unused-symbol guard when test file is built without referencing logrus
+// elsewhere in this section.
+var _ = logrus.New
