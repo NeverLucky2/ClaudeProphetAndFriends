@@ -729,6 +729,19 @@ func (s *DriftCandidatesService) GetCandidates(ctx context.Context, now time.Tim
 	return resp
 }
 
+// Refresh unconditionally recomputes the candidate scan and overwrites the
+// cache, bypassing the TTL. The background cache warmer calls this so Drift's
+// once-daily 17:00 ET beat reads a hot cache instead of triggering a cold
+// full-universe scan that exceeds agent/preflight.js's 2s budget. Safe to
+// call concurrently with GetCandidates reads.
+func (s *DriftCandidatesService) Refresh(ctx context.Context) {
+	resp := s.compute(ctx, time.Now())
+	s.mu.Lock()
+	s.cached = resp
+	s.cachedAt = time.Now()
+	s.mu.Unlock()
+}
+
 func (s *DriftCandidatesService) compute(ctx context.Context, now time.Time) *DriftCandidatesResponse {
 	resp := &DriftCandidatesResponse{Candidates: []DriftSignal{}}
 	if s.earnings == nil {

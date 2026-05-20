@@ -463,6 +463,13 @@ func main() {
 	// Start managed position monitoring
 	go positionManager.MonitorPositions(ctx)
 
+	// Keep the Coil/Drift candidate caches hot during their weekday ET beat
+	// windows. Both agents beat once or twice a day — far apart relative to the
+	// 5-min cache TTL — so without warming, every beat's preflight triggers a
+	// cold full-universe scan that exceeds the 2s budget and fails open. The
+	// warmer recomputes on a sub-TTL interval so the beat-time read is a hot hit.
+	go services.RunCandidateCacheWarmer(ctx, services.CandidateCacheWarmInterval, logger, meanRevCandidatesSvc, driftCandidatesSvc)
+
 	// Setup graceful shutdown
 	shutdown := make(chan os.Signal, 1)
 	signal.Notify(shutdown, os.Interrupt, syscall.SIGTERM)
