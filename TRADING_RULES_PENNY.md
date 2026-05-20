@@ -56,6 +56,32 @@ If the block is missing or contains an `errors:` line for a particular field,
 fall back to the corresponding tool call (the rule's existing fail-closed
 policy still applies on tool error).
 
+### Broker truth wins over managed-position state
+
+The `Positions` list in the Beat Context (and `get_positions`) is **broker
+truth** — what the account actually holds. `get_managed_positions` is the
+agent's internal bookkeeping and can drift out of sync (a bracket leg fills
+unobserved, a co-located agent closes the symbol on the shared account, or a
+restart reloads a position whose broker side was already flat).
+
+When the two disagree, broker truth wins. Specifically, a symbol that is
+ACTIVE in `get_managed_positions` but ABSENT from broker truth is a PHANTOM —
+the account does not hold it:
+
+  - Do NOT "manage" a phantom and do NOT place an exit/sell order for it. The
+    account is already flat, so a sell would be rejected or open a short.
+  - Never explain a missing broker position away as a "display" or
+    "attribution" artifact. If it is not in broker truth, you do not hold it.
+  - Log it once via log_decision ("phantom managed position — broker flat") and
+    move on. This specific case is self-healing and is NOT a hard-stop: the
+    backend reconciler closes broker-flat managed positions automatically (to
+    CLOSED, no order) within a minute or two, after which the stale entry
+    disappears from get_managed_positions.
+
+The reverse mismatch — broker holds a position you have no ACTIVE managed
+record for, or quantities materially diverge — is the dangerous direction
+(an unmanaged real position) and remains a Hard Stop per the section below.
+
 ## Rule Boundary Handling
 
 Numeric thresholds are inclusive unless explicitly stated otherwise:
