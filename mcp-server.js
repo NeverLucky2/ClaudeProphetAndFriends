@@ -1393,6 +1393,37 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: 'get_earnings_drift_candidates',
+        description: 'Get Drift earnings PEAD candidates: $2B+ S&P 500 large-cap stocks that reported earnings in the last 5 trading days, gap-up ≥ 3%, above 50/200 MA, grade A or B from the 5-factor scorecard (Gap 25%, 20d Trend 30%, 20/60 Volume 20%, MA200 15%, MA50 10%). Candidates are sorted by composite score descending. Each candidate includes full factor breakdown plus PEAD weekly-candle pattern (stage ∈ MONITORING/SIGNAL_READY/BREAKOUT/EXPIRED, red_candle high/low, is_breakout, breakout_pct). Use once per beat — the endpoint caches for 5 minutes.',
+        inputSchema: {
+          type: 'object',
+          properties: {},
+        },
+      },
+      {
+        name: 'get_earnings_drift_signal',
+        description: 'Get Drift per-symbol drift signal. Used for managing open Drift positions (MA50-break exit check, PEAD stage updates). Requires earnings_date (YYYY-MM-DD) and timing (bmo|amc) — pass the values the position was opened with. Returns 422 if bars_count < 210 (insufficient history). Accepts any symbol — not restricted to the candidates universe.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            symbol: {
+              type: 'string',
+              description: 'Stock ticker (e.g. AAPL, MSFT)',
+            },
+            earnings_date: {
+              type: 'string',
+              description: 'Earnings announcement date (YYYY-MM-DD)',
+            },
+            timing: {
+              type: 'string',
+              description: 'Earnings timing: bmo (before market open) or amc (after market close)',
+              enum: ['bmo', 'amc'],
+            },
+          },
+          required: ['symbol', 'earnings_date', 'timing'],
+        },
+      },
+      {
         name: 'get_segment_pnl',
         description: 'Get live unrealized P&L, deployed dollars, and deployed percent for the calling agent\'s strategy. Used by segment-scoped circuit breakers to decide whether the strategy has tripped its loss threshold. v1 limitation: unrealized P&L only (intraday realized closes not yet included). Strategy is auto-resolved from the agent\'s configuration; pass `strategy` to override (rare).',
         inputSchema: {
@@ -3021,6 +3052,21 @@ Worst Trade: ${stats.worst_result_pct.toFixed(1)}% ($${stats.worst_result_dollar
 
       case 'get_mean_reversion_signal': {
         const data = await callTradingBot(`/meanrev/signal/${encodeURIComponent(args.symbol)}`);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'get_earnings_drift_candidates': {
+        const data = await callTradingBot('/drift/candidates');
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'get_earnings_drift_signal': {
+        const sym = encodeURIComponent(args.symbol);
+        const qs = new URLSearchParams({
+          earnings_date: args.earnings_date,
+          timing: args.timing,
+        }).toString();
+        const data = await callTradingBot(`/drift/signal/${sym}?${qs}`);
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 

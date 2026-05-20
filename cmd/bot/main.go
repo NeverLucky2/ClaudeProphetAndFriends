@@ -350,6 +350,26 @@ func main() {
 	meanRevController := controllers.NewMeanRevController(meanRevCandidatesSvc)
 	logger.Debug("Mean reversion signal service initialized")
 
+	// Initialize Drift signal pipeline (used by Drift for PEAD post-earnings
+	// drift on S&P 500 large-caps). Pulls recent earnings from
+	// EarningsCalendarService via FetchRecentReports and computes the 5-factor
+	// scorecard + PEAD weekly-candle pattern in Go (no Python skill
+	// dependency). Earnings source is wired only when the FMP-backed
+	// earnings calendar is available — otherwise the candidates endpoint
+	// returns an "no earnings source configured" error in resp.Errors.
+	driftSignalSvc := services.NewDriftSignalService(dataService)
+	var driftRecentReporter services.RecentReporterFetcher
+	if earningsService != nil {
+		driftRecentReporter = earningsService
+	}
+	driftCandidatesSvc := services.NewDriftCandidatesService(
+		driftSignalSvc,
+		driftRecentReporter,
+		nil, // nil universe = use services.DriftUniverse default
+	)
+	driftController := controllers.NewDriftController(driftCandidatesSvc)
+	logger.Debug("Drift signal service initialized")
+
 	// Initialize Segment P&L service (used by segment-scoped circuit breakers)
 	segmentPnLSvc := services.NewSegmentPnLService(storageService, tradingService)
 	segmentPnLController := controllers.NewSegmentPnLController(segmentPnLSvc)
@@ -425,6 +445,7 @@ func main() {
 		harvestController,
 		trendController,
 		meanRevController,
+		driftController,
 		segmentPnLController,
 		ivController,
 		intradayController,
@@ -473,6 +494,7 @@ func setupRouter(
 	harvestController *controllers.HarvestController,
 	trendController *controllers.TrendController,
 	meanRevController *controllers.MeanRevController,
+	driftController *controllers.DriftController,
 	segmentPnLController *controllers.SegmentPnLController,
 	ivController *controllers.IVController,
 	intradayController *controllers.IntradayController,
@@ -616,6 +638,19 @@ func setupRouter(
 			meanrev.GET("/candidates", meanRevController.HandleGetCandidates)
 			meanrev.GET("/signal/:symbol", meanRevController.HandleGetSignal)
 			meanrev.GET("/universe", meanRevController.HandleGetUniverse)
+		}
+
+		// Drift PEAD endpoints (5-factor scorecard + weekly-candle pattern).
+		// /candidates: ranked list of grade-A/B post-earnings tickers in the
+		//   curated universe whose earnings landed in the last 5 trading days.
+		// /signal/:symbol: ad-hoc per-symbol lookup (operator + agent exit-side
+		//   checks). Requires earnings_date + timing query params.
+		// /universe: introspection of the curated universe.
+		drift := api.Group("/drift")
+		{
+			drift.GET("/candidates", driftController.HandleGetCandidates)
+			drift.GET("/signal/:symbol", driftController.HandleGetSignal)
+			drift.GET("/universe", driftController.HandleGetUniverse)
 		}
 
 		// Turtle scheduler status endpoint — only registered when the env flag

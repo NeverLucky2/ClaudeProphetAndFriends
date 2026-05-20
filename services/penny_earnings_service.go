@@ -189,6 +189,77 @@ func (s *EarningsCalendarService) HasEarningsWithinTradingDays(ticker string, da
 	return distance <= days
 }
 
+// RecentReport is a single past earnings event surfaced by FetchRecentReports.
+// Timing is normalized to "bmo" / "amc" / "" (unknown).
+type RecentReport struct {
+	Ticker string
+	Date   time.Time
+	Timing string
+}
+
+// FetchRecentReports does a one-off (uncached) FMP /stable/earnings-calendar
+// fetch covering a past calendar-day window approximating the last `days`
+// trading days, and returns parsed entries whose date falls strictly on or
+// before today. Used by the Drift agent's candidates service to enumerate
+// post-earnings tickers without polluting the forward-looking cache used by
+// IsExcluded / HasEarningsWithinTradingDays.
+//
+// Window is `days*2 + 4` calendar days to cover weekends + holidays. Drift's
+// candidates service does trading-day distance filtering downstream using the
+// AlpacaCalendarEntry cache via Calendar().
+func (s *EarningsCalendarService) FetchRecentReports(ctx context.Context, now time.Time, days int) ([]RecentReport, error) {
+	if days <= 0 {
+		return nil, nil
+	}
+	loc := nyLoc
+	if loc == nil {
+		loc = time.UTC
+	}
+	nowET := now.In(loc)
+	from := nowET.AddDate(0, 0, -(days*2 + 4)).Format("2006-01-02")
+	to := nowET.Format("2006-01-02")
+	url := fmt.Sprintf("%s/stable/earnings-calendar?from=%s&to=%s&apikey=%s",
+		s.fmpBaseURL, from, to, s.fmpAPIKey)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fmp recent earnings fetch: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("fmp recent earnings returned HTTP %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	var items []fmpEarningsItem
+	if err := json.Unmarshal(body, &items); err != nil {
+		return nil, fmt.Errorf("parse recent earnings JSON: %w", err)
+	}
+	todayYMD := nowET.Format("2006-01-02")
+	out := make([]RecentReport, 0, len(items))
+	for _, it := range items {
+		if it.Date < from || it.Date > todayYMD {
+			continue
+		}
+		d, perr := time.ParseInLocation("2006-01-02", it.Date, loc)
+		if perr != nil {
+			continue
+		}
+		t := strings.ToLower(strings.TrimSpace(it.Time))
+		if t != "bmo" && t != "amc" {
+			t = ""
+		}
+		out = append(out, RecentReport{Ticker: it.Symbol, Date: d, Timing: t})
+	}
+	return out, nil
+}
+
 // WaitForFirstRefresh blocks until the first successful refresh has signaled
 // firstRefreshDone, or the timeout elapses. Returns true if the signal arrived first.
 func (s *EarningsCalendarService) WaitForFirstRefresh(timeout time.Duration) bool {

@@ -299,6 +299,45 @@ For existing positions, use get_mean_reversion_signal({ symbol }) to check the e
       createdAt: new Date().toISOString(),
     },
     {
+      id: 'drift',
+      name: 'Drift',
+      description: 'Mechanical PEAD (post-earnings drift) on S&P 500 large-caps. Daily 17:00 ET beat; buys grade A/B post-earnings continuation in stocks gapped ≥3% and above 50/200 MA; +20% target / -10% stop / 60-day time stop.',
+      systemPromptTemplate: 'custom',
+      customSystemPrompt: `You are Drift, a mechanical earnings-drift (PEAD) trading agent. You are not a reasoning agent. You are a rule executor wrapped in a language model.
+
+Your ONLY job is to follow your trading rules exactly. Do not improvise. Do not add commentary. Do not make directional judgments. Helpful improvisation is the failure mode.
+
+Read your Strategy Rules section carefully — it contains your complete heartbeat procedure. Follow it step by step on every heartbeat.
+
+Key tools: get_datetime, get_account, get_positions, get_quote, get_earnings_drift_candidates, get_earnings_drift_signal, place_managed_position, close_managed_position, get_managed_positions, log_decision, log_activity.
+
+Use get_earnings_drift_candidates (no args) to read the pre-filtered, composite-sorted candidate list for the day. The endpoint applies the entry filters (gap ≥ 3%, above 50/200 MA, grade A or B) and surfaces the full 5-factor breakdown plus PEAD weekly-candle pattern stage. Do not compute these values yourself — the endpoint is the single source of truth.
+
+For existing positions, use get_earnings_drift_signal({ symbol, earnings_date, timing }) to check exit conditions (MA50 break, PEAD stage updates). The 60-trading-day time stop is computed from the position's entry_date in your activity log.`,
+      strategyId: 'earnings-drift',
+      model: 'anthropic/claude-sonnet-4-6',
+      heartbeatOverrides: {
+        pre_market: 86400,
+        market_open: 86400,
+        midday: 86400,
+        market_close: 86400,
+        after_hours: 86400,
+        closed: 86400,
+      },
+      // Drift runs once per trading day at 17:00 ET (after the close). The
+      // 15-min window matches the agent's accepted-window check (16:55–17:15 ET
+      // per TRADING_RULES_DRIFT.md "Heartbeat Schedule"), giving FMP's
+      // earnings calendar time to populate the day's after-close reports
+      // before the beat fires.
+      scheduledBeats: {
+        times: ['17:00'],
+        weekdaysOnly: true,
+        exclusive: true,
+        windowMinutes: 15,
+      },
+      createdAt: new Date().toISOString(),
+    },
+    {
       id: 'trend-prophet',
       name: 'TrendProphet',
       description: 'Mechanical multi-asset trend-follower on ETFs. Daily Donchian-100 breakout entries; Donchian-50 trailing exits. Universe: TLT, GLD, USO, DBC, UUP, EEM.',
@@ -376,6 +415,14 @@ function defaultStrategies() {
       name: 'Mean Reversion (Connors RSI(2))',
       description: 'RSI(2) oversold pullbacks within long-term uptrends. Curated S&P 500 large-cap universe; 5% per position; max 5 concurrent; 5-day timeout; -7% hard stop.',
       rulesFile: 'TRADING_RULES_MEANREV.md',
+      customRules: null,
+      createdAt: new Date().toISOString(),
+    },
+    {
+      id: 'earnings-drift',
+      name: 'Earnings Drift (PEAD)',
+      description: '5-factor post-earnings drift on $2B+ S&P 500 large-caps. 4% per position; max 4 concurrent; +20% target / -10% stop; 60-day time stop; MA50-break exit.',
+      rulesFile: 'TRADING_RULES_DRIFT.md',
       customRules: null,
       createdAt: new Date().toISOString(),
     },
