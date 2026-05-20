@@ -12,6 +12,7 @@ import {
   isRegimeGateBlock,
   regimeGateBlockSkipIfNoPositions,
   resolvePreflight,
+  positionCountFromResponse,
 } from './preflight.js';
 
 // ── helpers ────────────────────────────────────────────────────────
@@ -76,6 +77,29 @@ const regimeAllow = (tier = 'NORMAL', score = 60) => ({
 // 404s; preflight catches and falls through to the existing logic.
 const turtleStatusEnabled = () => ({ data: { scheduler_enabled: true, last_run: null } });
 const turtleStatusDisabled404 = () => { const e = new Error('not found'); e.response = { status: 404 }; throw e; };
+
+// ── positionCountFromResponse ──────────────────────────────────────
+//
+// /api/v1/positions[?strategy=] returns a PLAIN ARRAY (order_controller.go
+// HandleGetPositions). Reading `.count` off it (the prior trend/prophet bug)
+// always yields undefined. The helper reads array length and returns -1 for any
+// non-array body so callers fail open on an ambiguous shape.
+
+test('positionCountFromResponse: array length is the count', () => {
+  assert.equal(positionCountFromResponse([]), 0);
+  assert.equal(positionCountFromResponse([{ symbol: 'A' }, { symbol: 'B' }]), 2);
+});
+
+test('positionCountFromResponse: {count} object (old bug shape) → -1', () => {
+  // The endpoint never returns this; the prior code assumed it did. Treat as
+  // ambiguous so the caller fails open instead of trusting a phantom count.
+  assert.equal(positionCountFromResponse({ count: 5 }), -1);
+});
+
+test('positionCountFromResponse: null/undefined → -1', () => {
+  assert.equal(positionCountFromResponse(null), -1);
+  assert.equal(positionCountFromResponse(undefined), -1);
+});
 
 // ── isEconomicBlackout ─────────────────────────────────────────────
 
@@ -475,8 +499,9 @@ test('trend: turtle/status 404 → falls through to existing window check', asyn
   // reason. This proves the kill switch fell through cleanly.
   const rt = makeRuntime([
     ['/api/v1/turtle/status', turtleStatusDisabled404],
-    // Provide other routes so the function can complete without unmocked-URL errors:
-    [/^\/api\/v1\/positions\?strategy=trend/, () => byStrategy(0)],
+    // Provide other routes so the function can complete without unmocked-URL errors.
+    // /positions returns a PLAIN ARRAY (matches order_controller.go).
+    [/^\/api\/v1\/positions\?strategy=trend/, () => ({ data: [] })],
     [/^\/api\/v1\/trend\/signal\//, () => ({ data: { last_close: 90, donchian_100_high: 95, sma_200: 88, atr_20: 1 } })],
     ['/api/v1/regime-gate/status', () => regimeAllow()],
     ['/api/v1/econ/blackout', () => blackoutOff()],
@@ -493,11 +518,168 @@ test('trend: turtle/status returns scheduler_enabled=false → falls through', a
   // the kill switch must NOT trip.
   const rt = makeRuntime([
     ['/api/v1/turtle/status', () => ({ data: { scheduler_enabled: false } })],
-    [/^\/api\/v1\/positions\?strategy=trend/, () => byStrategy(0)],
+    [/^\/api\/v1\/positions\?strategy=trend/, () => ({ data: [] })],
     [/^\/api\/v1\/trend\/signal\//, () => ({ data: { last_close: 90, donchian_100_high: 95, sma_200: 88, atr_20: 1 } })],
     ['/api/v1/regime-gate/status', () => regimeAllow()],
     ['/api/v1/econ/blackout', () => blackoutOff()],
   ]);
   const r = await resolvePreflight('trend', rt, {});
   assert.notEqual(r.reason, 'Turtle Go scheduler enabled — LLM beat unnecessary');
+});
+
+// ── meanRevPreflight integration (Coil, strategy=mean-rev-rsi2) ─────
+//
+// /api/v1/positions?strategy=X returns a PLAIN ARRAY (order_controller.go),
+// so positions are read via Array.isArray + .length — not a {count} object.
+
+test('coil: no positions + no candidates → skip', async () => {
+  const rt = makeRuntime([
+    ['/api/v1/meanrev/candidates', () => candidates(0)],
+    ['/api/v1/positions?strategy=mean-rev-rsi2', () => ({ data: [] })],
+  ]);
+  const r = await resolvePreflight('mean-rev-rsi2', rt, {});
+  assert.equal(r.skip, true);
+  assert.match(r.reason, /no positions and no.*candidate/i);
+});
+
+test('coil: open position + no candidates → run (exits must happen)', async () => {
+  const rt = makeRuntime([
+    ['/api/v1/meanrev/candidates', () => candidates(0)],
+    ['/api/v1/positions?strategy=mean-rev-rsi2', () => ({ data: [{ symbol: 'AAPL', qty: 50 }] })],
+  ]);
+  const r = await resolvePreflight('mean-rev-rsi2', rt, {});
+  assert.equal(r.skip, false);
+  assert.match(r.reason, /position/i);
+});
+
+test('coil: candidates exist + regime allow + no blackout → run', async () => {
+  const rt = makeRuntime([
+    ['/api/v1/meanrev/candidates', () => candidates(2)],
+    ['/api/v1/positions?strategy=mean-rev-rsi2', () => ({ data: [] })],
+    ['/api/v1/regime-gate/status', () => regimeAllow()],
+    ['/api/v1/econ/blackout', () => blackoutOff()],
+  ]);
+  const r = await resolvePreflight('mean-rev-rsi2', rt, {});
+  assert.equal(r.skip, false);
+  assert.match(r.reason, /candidate/i);
+});
+
+test('coil: candidates exist + regime RED + no positions → skip', async () => {
+  const rt = makeRuntime([
+    ['/api/v1/meanrev/candidates', () => candidates(2)],
+    ['/api/v1/positions?strategy=mean-rev-rsi2', () => ({ data: [] })],
+    ['/api/v1/regime-gate/status', () => regimeBlock('RED', 10)],
+    ['/api/v1/econ/blackout', () => blackoutOff()],
+  ]);
+  const r = await resolvePreflight('mean-rev-rsi2', rt, {});
+  assert.equal(r.skip, true);
+  assert.match(r.reason, /regime gate RED/);
+});
+
+test('coil: candidates exist + econ blackout + no positions → skip', async () => {
+  const rt = makeRuntime([
+    ['/api/v1/meanrev/candidates', () => candidates(2)],
+    ['/api/v1/positions?strategy=mean-rev-rsi2', () => ({ data: [] })],
+    ['/api/v1/regime-gate/status', () => regimeAllow()],
+    ['/api/v1/econ/blackout', () => blackoutOn('CPI release')],
+  ]);
+  const r = await resolvePreflight('mean-rev-rsi2', rt, {});
+  assert.equal(r.skip, true);
+  assert.match(r.reason, /econ blackout/);
+});
+
+test('coil: open position wins even at regime RED → run (exits not orphaned)', async () => {
+  const rt = makeRuntime([
+    ['/api/v1/meanrev/candidates', () => candidates(0)],
+    ['/api/v1/positions?strategy=mean-rev-rsi2', () => ({ data: [{ symbol: 'MSFT', qty: 10 }] })],
+    ['/api/v1/regime-gate/status', () => regimeBlock('RED', 8)],
+    ['/api/v1/econ/blackout', () => blackoutOn('NFP release')],
+  ]);
+  const r = await resolvePreflight('mean-rev-rsi2', rt, {});
+  assert.equal(r.skip, false);
+});
+
+test('coil: positions response wrong shape (object not array) → fail open (run)', async () => {
+  const rt = makeRuntime([
+    ['/api/v1/meanrev/candidates', () => candidates(0)],
+    ['/api/v1/positions?strategy=mean-rev-rsi2', () => byStrategy(0)], // {data:{count}} — wrong
+  ]);
+  const r = await resolvePreflight('mean-rev-rsi2', rt, {});
+  assert.equal(r.skip, false, 'ambiguous positions shape must fail open');
+});
+
+test('coil: candidates response wrong shape → fail open (run)', async () => {
+  const rt = makeRuntime([
+    ['/api/v1/meanrev/candidates', () => ({ data: { candidates: [] } })], // no numeric count
+    ['/api/v1/positions?strategy=mean-rev-rsi2', () => ({ data: [] })],
+  ]);
+  const r = await resolvePreflight('mean-rev-rsi2', rt, {});
+  assert.equal(r.skip, false);
+});
+
+// ── driftPreflight integration (Drift, strategy=earnings-drift) ─────
+
+test('drift: no positions + no candidates → skip', async () => {
+  const rt = makeRuntime([
+    ['/api/v1/drift/candidates', () => candidates(0)],
+    ['/api/v1/positions?strategy=earnings-drift', () => ({ data: [] })],
+  ]);
+  const r = await resolvePreflight('earnings-drift', rt, {});
+  assert.equal(r.skip, true);
+  assert.match(r.reason, /no positions and no.*candidate/i);
+});
+
+test('drift: open position + no candidates → run (exits must happen)', async () => {
+  const rt = makeRuntime([
+    ['/api/v1/drift/candidates', () => candidates(0)],
+    ['/api/v1/positions?strategy=earnings-drift', () => ({ data: [{ symbol: 'NVDA', qty: 20 }] })],
+  ]);
+  const r = await resolvePreflight('earnings-drift', rt, {});
+  assert.equal(r.skip, false);
+  assert.match(r.reason, /position/i);
+});
+
+test('drift: candidates exist + regime allow + no blackout → run', async () => {
+  const rt = makeRuntime([
+    ['/api/v1/drift/candidates', () => candidates(1)],
+    ['/api/v1/positions?strategy=earnings-drift', () => ({ data: [] })],
+    ['/api/v1/regime-gate/status', () => regimeAllow()],
+    ['/api/v1/econ/blackout', () => blackoutOff()],
+  ]);
+  const r = await resolvePreflight('earnings-drift', rt, {});
+  assert.equal(r.skip, false);
+  assert.match(r.reason, /candidate/i);
+});
+
+test('drift: candidates exist + regime RED + no positions → skip', async () => {
+  const rt = makeRuntime([
+    ['/api/v1/drift/candidates', () => candidates(1)],
+    ['/api/v1/positions?strategy=earnings-drift', () => ({ data: [] })],
+    ['/api/v1/regime-gate/status', () => regimeBlock('RED', 9)],
+    ['/api/v1/econ/blackout', () => blackoutOff()],
+  ]);
+  const r = await resolvePreflight('earnings-drift', rt, {});
+  assert.equal(r.skip, true);
+  assert.match(r.reason, /regime gate RED/);
+});
+
+test('drift: candidates exist + econ blackout + no positions → skip', async () => {
+  const rt = makeRuntime([
+    ['/api/v1/drift/candidates', () => candidates(1)],
+    ['/api/v1/positions?strategy=earnings-drift', () => ({ data: [] })],
+    ['/api/v1/regime-gate/status', () => regimeAllow()],
+    ['/api/v1/econ/blackout', () => blackoutOn('PCE release')],
+  ]);
+  const r = await resolvePreflight('earnings-drift', rt, {});
+  assert.equal(r.skip, true);
+  assert.match(r.reason, /econ blackout/);
+});
+
+test('drift: positions response wrong shape (object not array) → fail open (run)', async () => {
+  const rt = makeRuntime([
+    ['/api/v1/drift/candidates', () => candidates(0)],
+    ['/api/v1/positions?strategy=earnings-drift', () => byStrategy(0)],
+  ]);
+  const r = await resolvePreflight('earnings-drift', rt, {});
+  assert.equal(r.skip, false, 'ambiguous positions shape must fail open');
 });

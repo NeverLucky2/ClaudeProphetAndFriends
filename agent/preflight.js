@@ -104,6 +104,15 @@ export async function regimeGateBlockSkipIfNoPositions(runtime, livePositionCoun
   return null;
 }
 
+// Reads the open-position count from a /api/v1/positions[?strategy=] response.
+// That endpoint returns a PLAIN ARRAY (order_controller.go HandleGetPositions),
+// NOT a {count} object — every predicate must read it via array length. Returns
+// -1 for any non-array (ambiguous) body so callers fail open instead of trusting
+// a phantom count.
+export function positionCountFromResponse(data) {
+  return Array.isArray(data) ? data.length : -1;
+}
+
 // PennyProphet predicate. Skips the LLM beat when there are no candidates
 // above the composite-score threshold AND no penny-tagged positions to manage
 // AND no open broker orders pending fill.
@@ -223,10 +232,10 @@ async function prophetPreflight(runtime, agentConfig) {
 
   if (phase.closed) {
     const positionsResp = await goAxios.get('/api/v1/positions?strategy=v2-options');
-    if (typeof positionsResp.data?.count !== 'number') {
+    const positionCount = positionCountFromResponse(positionsResp.data);
+    if (positionCount < 0) {
       return { skip: false, reason: 'positions response shape unexpected' };
     }
-    const positionCount = positionsResp.data.count;
     if (positionCount === 0) {
       return {
         skip: true,
@@ -239,9 +248,10 @@ async function prophetPreflight(runtime, agentConfig) {
   // Open phase — Prophet normally always runs. New: gate on econ blackout
   // when there are no positions to manage. Adds one /api/v1/positions call
   // per open-phase beat (~5ms) in exchange for skipping high-noise release
-  // windows that would otherwise burn tokens.
+  // windows that would otherwise burn tokens. A bad/ambiguous shape yields -1,
+  // so the gate below is skipped and Prophet runs (fail open).
   const positionsResp = await goAxios.get('/api/v1/positions?strategy=v2-options');
-  const positionCount = (typeof positionsResp.data?.count === 'number') ? positionsResp.data.count : -1;
+  const positionCount = positionCountFromResponse(positionsResp.data);
   if (positionCount === 0) {
     const regimeSkip = await regimeGateBlockSkipIfNoPositions(runtime, 0);
     if (regimeSkip) return regimeSkip;
@@ -312,10 +322,10 @@ async function trendPreflight(runtime, agentConfig) {
   // the agent must run to evaluate exit rules.
   const { goAxios } = runtime;
   const positionsResp = await goAxios.get('/api/v1/positions?strategy=trend');
-  if (typeof positionsResp.data?.count !== 'number') {
+  const positionCount = positionCountFromResponse(positionsResp.data);
+  if (positionCount < 0) {
     return { skip: false, reason: 'positions response shape unexpected' };
   }
-  const positionCount = positionsResp.data.count;
   if (positionCount > 0) {
     return { skip: false, reason: `${positionCount} open position(s) to evaluate` };
   }
@@ -478,11 +488,91 @@ async function harvestPreflight(runtime, agentConfig) {
   return { skip: false, reason: 'no open condors but chain data available' };
 }
 
+// Coil predicate (mean-rev-rsi2). Coil fires once per trading day at 15:45 ET
+// via an exclusive scheduledBeats window, so this only runs once daily — it
+// skips the single beat on days with nothing to do.
+//
+// Skips when there are no strategy-attributed open positions AND no entry
+// candidates. When candidates exist but there are no positions, the regime
+// gate (RED block) and econ blackout still apply — TRADING_RULES_MEANREV.md
+// blocks new entries during a RED tier or an econ blackout, so with nothing to
+// manage the beat has no work either way.
+//
+// Positions are read from /api/v1/positions?strategy=mean-rev-rsi2, which
+// returns a PLAIN ARRAY (order_controller.go HandleGetPositions) — hence the
+// Array.isArray check + .length, not a {count} object. An open position always
+// wins (exit-rule evaluation must run). Ambiguous shapes fail open.
+async function meanRevPreflight(runtime, agentConfig) {
+  return candidatesAndPositionsPreflight(runtime, {
+    candidatesUrl: '/api/v1/meanrev/candidates',
+    positionsUrl: '/api/v1/positions?strategy=mean-rev-rsi2',
+    noWorkReason: 'no positions and no RSI(2) entry candidates',
+    label: 'meanrev',
+  });
+}
+
+// Drift predicate (earnings-drift). Drift fires once per trading day at 17:00
+// ET via an exclusive scheduledBeats window. Same structure as Coil:
+// TRADING_RULES_DRIFT.md blocks new entries during a RED regime tier or an
+// econ blackout, so with no positions to manage the beat is skippable.
+async function driftPreflight(runtime, agentConfig) {
+  return candidatesAndPositionsPreflight(runtime, {
+    candidatesUrl: '/api/v1/drift/candidates',
+    positionsUrl: '/api/v1/positions?strategy=earnings-drift',
+    noWorkReason: 'no positions and no grade A/B drift candidates',
+    label: 'drift',
+  });
+}
+
+// Shared body for the once-daily mechanical equity agents (Coil, Drift). Both
+// expose a candidates endpoint returning a top-level numeric `count` (already
+// filtered to entry-qualifying names) and attribute managed positions by
+// strategy id. The decision order mirrors trendPreflight: positions → empty
+// candidates → regime gate → econ blackout.
+async function candidatesAndPositionsPreflight(runtime, { candidatesUrl, positionsUrl, noWorkReason, label }) {
+  const { goAxios } = runtime;
+  const [candidatesResp, positionsResp] = await Promise.all([
+    goAxios.get(candidatesUrl),
+    goAxios.get(positionsUrl),
+  ]);
+
+  // Ambiguous responses fail open (run the LLM) rather than guessing "0".
+  if (typeof candidatesResp.data?.count !== 'number') {
+    return { skip: false, reason: `${label} candidates response shape unexpected` };
+  }
+  const positionCount = positionCountFromResponse(positionsResp.data);
+  if (positionCount < 0) {
+    return { skip: false, reason: 'positions response shape unexpected' };
+  }
+
+  const candidateCount = candidatesResp.data.count;
+
+  // Open positions require exit-rule evaluation each beat — never skip them.
+  if (positionCount > 0) {
+    return { skip: false, reason: `${positionCount} open position(s) to evaluate` };
+  }
+
+  if (candidateCount === 0) {
+    return { skip: true, reason: noWorkReason };
+  }
+
+  // No positions, candidates present. Rules block new entries during RED
+  // regime / econ blackout, so skip those days.
+  const regimeSkip = await regimeGateBlockSkipIfNoPositions(runtime, 0);
+  if (regimeSkip) return regimeSkip;
+  const econSkip = await econBlackoutSkipIfNoPositions(runtime, 0);
+  if (econSkip) return econSkip;
+
+  return { skip: false, reason: `${candidateCount} entry candidate(s) available` };
+}
+
 export const PREFLIGHT_REGISTRY = {
   'penny-momentum': pennyPreflight,
   'trend':          trendPreflight,
   'harvest':        harvestPreflight,
   'v2-options':     prophetPreflight,
+  'mean-rev-rsi2':  meanRevPreflight,
+  'earnings-drift': driftPreflight,
 };
 
 const PREFLIGHT_TIMEOUT_MS = 2000;
