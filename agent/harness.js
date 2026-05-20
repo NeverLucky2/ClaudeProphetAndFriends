@@ -10,6 +10,7 @@ import path from 'path';
 import { resolvePreflight } from './preflight.js';
 import { renderIntradayBlock, shouldInjectIntraday } from './intraday-prompt.js';
 import { fetchBeatContext, renderBeatContextBlock } from './beat-context.js';
+import { resolveAllowedTools } from './tool-allowlists.js';
 
 // Prophet's auto-pushed intraday watchlist. Symbols outside this set are
 // still reachable via the get_intraday_signals MCP tool on demand.
@@ -970,8 +971,10 @@ ${userBlock}`;
         });
       }
 
-      // Per-agent MCP tool allowlist. Empty array = no filtering (backwards compatible).
-      const allowedTools = Array.isArray(perms.allowedTools) ? perms.allowedTools.filter(Boolean) : [];
+      // Per-agent MCP tool allowlist. A non-empty per-sandbox override wins;
+      // otherwise the strategy default (tool-allowlists.js) applies; otherwise
+      // [] = no filtering (backwards compatible).
+      const allowedTools = resolveAllowedTools(perms.allowedTools, this._agentConfig?.strategyId);
 
       const proc = spawn(OPENCODE_BIN, [...OPENCODE_WIN_PREFIX, ...args], {
         cwd: process.cwd(),
