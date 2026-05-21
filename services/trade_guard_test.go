@@ -515,6 +515,21 @@ func TestGuard_DailyLossFailsOpenOnFetchError(t *testing.T) {
 	}
 }
 
+func TestGuard_NWayOverlap_BlocksAnyOtherAgent(t *testing.T) {
+	// A trend-tagged position on TLT must block a main buy of TLT — the old
+	// binary opponentOf (main<->penny only) would have allowed it.
+	lister := &stubLister{positions: []*ManagedPosition{
+		managedPos("TLT", AgentTrend, "ACTIVE", 1000),
+	}}
+	g := NewTradeGuard(lister, &stubTrading{portfolio: 100000}, defaultConfig())
+	if err := g.CheckBuy(context.Background(), AgentMain, "TLT", 0); err == nil {
+		t.Fatal("expected main buy of TLT blocked by trend's holding")
+	}
+	if err := g.CheckBuy(context.Background(), AgentMain, "SPY", 0); err != nil {
+		t.Fatalf("unrelated symbol should pass: %v", err)
+	}
+}
+
 func TestAgentForStrategy(t *testing.T) {
 	cases := map[string]AgentSource{
 		"v2-options": AgentMain, "penny-momentum": AgentPenny, "harvest": AgentHarvest,

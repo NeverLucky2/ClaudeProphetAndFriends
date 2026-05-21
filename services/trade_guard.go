@@ -240,7 +240,6 @@ func (g *TradeGuard) CheckBuy(ctx context.Context, agent AgentSource, symbol str
 	if agent == "" {
 		agent = AgentMain
 	}
-	opponent := g.opponentOf(agent)
 
 	// Lazily fetch account at most once per CheckBuy. Both the value and any
 	// fetch error are cached so each downstream helper can apply its own policy:
@@ -267,8 +266,8 @@ func (g *TradeGuard) CheckBuy(ctx context.Context, agent AgentSource, symbol str
 		return err
 	}
 
-	if g.agentOwnsSymbol(opponent, symbol) {
-		return fmt.Errorf("guard: %s agent holds %s — %s agent cannot open a position in the same symbol", opponent, symbol, agent)
+	if owner := g.heldByAnyOtherAgent(agent, symbol); owner != "" {
+		return fmt.Errorf("guard: %s agent holds %s — %s agent cannot open a position in the same symbol", owner, symbol, agent)
 	}
 
 	if g.cfg.EnableSectorAggregation && allocationDollars > 0 {
@@ -298,10 +297,9 @@ func (g *TradeGuard) CheckSell(_ context.Context, agent AgentSource, symbol stri
 	if agent == "" {
 		agent = AgentMain
 	}
-	opponent := g.opponentOf(agent)
 
-	if g.agentOwnsSymbol(opponent, symbol) {
-		return fmt.Errorf("guard: %s agent holds %s — %s agent cannot sell it", opponent, symbol, agent)
+	if owner := g.heldByAnyOtherAgent(agent, symbol); owner != "" {
+		return fmt.Errorf("guard: %s agent holds %s — %s agent cannot sell it", owner, symbol, agent)
 	}
 
 	return nil
@@ -412,6 +410,21 @@ func (g *TradeGuard) sectorMaxByBucket(portfolioValue float64, exposure map[stri
 }
 
 // --- internal helpers ---
+
+// heldByAnyOtherAgent returns the first agent != self that owns the symbol, or
+// "" if none. Replaces binary opponentOf so all six strategies are checked.
+// Exact-symbol-string match (OCC option symbols never collide with tickers).
+func (g *TradeGuard) heldByAnyOtherAgent(self AgentSource, symbol string) AgentSource {
+	for _, other := range []AgentSource{AgentMain, AgentPenny, AgentHarvest, AgentTrend, AgentMeanRev, AgentDrift} {
+		if other == self {
+			continue
+		}
+		if g.agentOwnsSymbol(other, symbol) {
+			return other
+		}
+	}
+	return ""
+}
 
 func (g *TradeGuard) agentOwnsSymbol(agent AgentSource, symbol string) bool {
 	owned := g.symbolsFor(agent)
@@ -585,13 +598,6 @@ func (g *TradeGuard) currentPennyExposure() float64 {
 		}
 	}
 	return total
-}
-
-func (g *TradeGuard) opponentOf(agent AgentSource) AgentSource {
-	if agent == AgentMain {
-		return AgentPenny
-	}
-	return AgentMain
 }
 
 func isActivePosition(p *ManagedPosition) bool {
