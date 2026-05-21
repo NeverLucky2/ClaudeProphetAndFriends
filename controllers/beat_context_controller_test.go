@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -238,6 +239,58 @@ func TestBeatContext_OmitsSegmentPnLWithoutStrategy(t *testing.T) {
 			t.Errorf("response missing %q field on no-strategy path: %v", key, body)
 		}
 	}
+}
+
+// ── Prophet beat recorder tests ─────────────────────────────────────
+
+type fakeBeatRecorder struct{ calls int }
+
+func (f *fakeBeatRecorder) RecordBeat(_ time.Time) { f.calls++ }
+
+func TestBeatContext_StampsProphetBeat(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	// shared stubs — all happy-path, we don't care about their output here
+	acct := &fakeAccountFetcher{acct: Account{PortfolioValue: 50000, Cash: 10000, BuyingPower: 20000}}
+	pos := &fakePositionsFetcher{positions: []PositionSummary{}}
+	black := &fakeBlackoutFetcher{}
+	regime := &fakeRegimeFetcher{status: services.RegimeGateStatus{Tier: "NORMAL", SizingMultiplier: 1.0}}
+	seg := &fakeSegmentPnLFetcher{}
+
+	rec := &fakeBeatRecorder{}
+
+	ctrl := NewBeatContextController(acct, pos, black, regime, seg)
+	ctrl.SetProphetBeatRecorder(rec)
+
+	router := gin.New()
+	router.GET("/api/v1/beat-context", ctrl.HandleGet)
+
+	t.Run("v2-options stamps once", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/beat-context?strategy=v2-options", nil)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status: want 200, got %d", w.Code)
+		}
+		if rec.calls != 1 {
+			t.Errorf("RecordBeat calls: want 1, got %d", rec.calls)
+		}
+	})
+
+	t.Run("non-prophet strategy does not stamp", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/beat-context?strategy=penny-momentum", nil)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status: want 200, got %d", w.Code)
+		}
+		// calls should still be 1 from the previous sub-test
+		if rec.calls != 1 {
+			t.Errorf("RecordBeat calls: want still 1, got %d", rec.calls)
+		}
+	})
 }
 
 func TestBeatContext_SoftFailsOnDownstreamErrors(t *testing.T) {

@@ -427,6 +427,36 @@ func main() {
 	)
 	logger.Debug("Beat-context controller initialized")
 
+	// Prophet options auto-stop monitor (default OFF; operator opts in).
+	// A deep catastrophic loss floor on Prophet's long single-leg options that
+	// the LLM heartbeat can't react to fast enough (esp. an overnight gap at the
+	// open). Scoped to v2-options long positions; never touches Harvest legs.
+	if cfg.EnableProphetOptionsStop {
+		prophetBeatObserver := services.NewProphetBeatObserver()
+		beatCtxController.SetProphetBeatRecorder(prophetBeatObserver)
+		optDataSvc := services.NewAlpacaOptionsDataService(cfg.AlpacaAPIKey, cfg.AlpacaSecretKey)
+		stopMonitor := services.NewProphetOptionsStopMonitor(
+			tradingService, // ListOptionsPositions
+			storageService, // ListOpenHarvestCondors
+			optDataSvc,     // GetOptionSnapshot
+			tradingService, // PlaceOptionsOrder / ListOrders / GetOrder / CancelOrder
+			services.ProphetOptionsStopConfig{
+				StopPct:         cfg.ProphetOptionsStopPct,
+				Cooloff:         time.Duration(cfg.ProphetOptionsStopCooloffMin) * time.Minute,
+				Escalation:      time.Duration(cfg.ProphetOptionsStopEscalationSec) * time.Second,
+				SanityFloorFrac: cfg.ProphetOptionsStopSanityFloorFrac,
+			},
+		)
+		stopMonitor.SetRawOwnershipChecker(tradeGuard)
+		stopMonitor.SetBeatObserver(prophetBeatObserver)
+		nyLocStop, _ := time.LoadLocation("America/New_York")
+		stopMarketOpen := func() bool { return services.StaticMarketPhase(time.Now().UTC(), nyLocStop) == "open" }
+		go stopMonitor.Start(ctx, 1*time.Minute, 5*time.Minute, stopMarketOpen)
+		logger.Info("Prophet options stop monitor started (ENABLE_PROPHET_OPTIONS_STOP=true)")
+	} else {
+		logger.Info("Prophet options stop monitor disabled (ENABLE_PROPHET_OPTIONS_STOP!=true)")
+	}
+
 	// Generic IV-rank controller (shared by Harvest and Prophet via /api/v1/iv/:symbol).
 	// rvSvc enriches the response with realized_vol_20d + iv_minus_rv.
 	ivController := controllers.NewIVController(harvestIVRSvc, realizedVolSvc)

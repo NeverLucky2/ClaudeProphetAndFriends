@@ -79,6 +79,12 @@ type SegmentPnLFetcher interface {
 	GetSegmentPnL(ctx context.Context, strategy string) (*services.SegmentPnL, error)
 }
 
+// ProphetBeatRecorder records that the Prophet (v2-options) agent took a beat.
+// Implemented by *services.ProphetBeatObserver. Optional: nil disables stamping.
+type ProphetBeatRecorder interface {
+	RecordBeat(t time.Time)
+}
+
 // BeatContextController bundles all five fetchers behind the single
 // /api/v1/beat-context endpoint.
 type BeatContextController struct {
@@ -87,6 +93,7 @@ type BeatContextController struct {
 	blackout BlackoutFetcher
 	regime   RegimeFetcher
 	segment  SegmentPnLFetcher
+	beatRec  ProphetBeatRecorder
 }
 
 // NewBeatContextController constructs the controller. All five fetchers are
@@ -108,6 +115,9 @@ func NewBeatContextController(
 	}
 }
 
+// SetProphetBeatRecorder wires the holder stamped on each Prophet beat. Optional.
+func (c *BeatContextController) SetProphetBeatRecorder(r ProphetBeatRecorder) { c.beatRec = r }
+
 // HandleGet handles GET /api/v1/beat-context[?strategy=X].
 //
 // Returns 200 even when individual deps error; failed deps are listed by name
@@ -116,6 +126,10 @@ func NewBeatContextController(
 // return an error if asked with "").
 func (c *BeatContextController) HandleGet(ctx *gin.Context) {
 	strategy := ctx.Query("strategy")
+
+	if c.beatRec != nil && strategy == "v2-options" {
+		c.beatRec.RecordBeat(time.Now().UTC())
+	}
 
 	resp := gin.H{}
 	var errs []string

@@ -43,6 +43,14 @@ type Config struct {
 	EnablePositionCaps bool
 	MaxPositionPct     float64 // per-position cap, fraction of portfolio (0.12 = 12%)
 	MaxDeployedPct     float64 // whole-account deployed ceiling (0.50 = 50%)
+
+	// Prophet options auto-stop monitor. Flag-gated, default OFF.
+	// Deep catastrophic loss floor on Prophet's long single-leg options.
+	EnableProphetOptionsStop          bool
+	ProphetOptionsStopPct             float64
+	ProphetOptionsStopCooloffMin      float64
+	ProphetOptionsStopEscalationSec   float64
+	ProphetOptionsStopSanityFloorFrac float64
 }
 
 var AppConfig *Config
@@ -86,6 +94,12 @@ func Load() error {
 		EnablePositionCaps: getEnvOrDefault("ENABLE_POSITION_CAPS", "true") == "true",
 		MaxPositionPct:     parseFloat(getEnvOrDefault("MAX_POSITION_PCT", "0.12")),
 		MaxDeployedPct:     parseFloat(getEnvOrDefault("MAX_DEPLOYED_PCT", "0.50")),
+
+		EnableProphetOptionsStop:          getEnvOrDefault("ENABLE_PROPHET_OPTIONS_STOP", "false") == "true",
+		ProphetOptionsStopPct:             parseFloat(getEnvOrDefault("PROPHET_OPTIONS_STOP_PCT", "0.50")),
+		ProphetOptionsStopCooloffMin:      parseFloat(getEnvOrDefault("PROPHET_OPTIONS_STOP_COOLOFF_MIN", "7")),
+		ProphetOptionsStopEscalationSec:   parseFloat(getEnvOrDefault("PROPHET_OPTIONS_STOP_ESCALATION_SEC", "60")),
+		ProphetOptionsStopSanityFloorFrac: parseFloat(getEnvOrDefault("PROPHET_OPTIONS_STOP_SANITY_FLOOR_FRAC", "0.50")),
 
 		OperatorEmail: os.Getenv("OPERATOR_EMAIL"),
 	}

@@ -337,6 +337,20 @@ func (s *AlpacaTradingService) convertAlpacaOrder(ao *alpaca.Order) *interfaces.
 	return order
 }
 
+// resolveOptionsClientOrderID picks the broker client_order_id for an options
+// order: a caller-supplied id always wins (lets the auto-stop monitor tag its
+// flatten orders with a distinct "v2-options-stop:" prefix); otherwise, when a
+// strategy is set, generate the standard "{strategy}:{uuid}" tag; otherwise empty.
+func resolveOptionsClientOrderID(caller, strategy string) string {
+	if caller != "" {
+		return caller
+	}
+	if strategy != "" {
+		return fmt.Sprintf("%s:%s", strategy, uuid.NewString())
+	}
+	return ""
+}
+
 // PlaceOptionsOrder places a new options order. Strategy attribution mirrors
 // PlaceOrder: when order.Strategy is set, the broker's client_order_id is
 // encoded as "{strategy}:{uuid}" so fills carry the tag through reconciliation.
@@ -356,10 +370,9 @@ func (s *AlpacaTradingService) PlaceOptionsOrder(ctx context.Context, order *int
 		req.LimitPrice = &limitPrice
 	}
 
-	if order.Strategy != "" {
-		clientOrderID := fmt.Sprintf("%s:%s", order.Strategy, uuid.NewString())
-		req.ClientOrderID = clientOrderID
-		order.ClientOrderID = clientOrderID
+	if coid := resolveOptionsClientOrderID(order.ClientOrderID, order.Strategy); coid != "" {
+		req.ClientOrderID = coid
+		order.ClientOrderID = coid
 	}
 
 	s.logger.WithFields(logrus.Fields{
