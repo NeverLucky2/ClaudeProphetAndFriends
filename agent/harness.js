@@ -578,18 +578,62 @@ ${userBlock}`;
   }
 
   _getHeartbeatSeconds() {
-    if (this.state.heartbeatOverride) {
-      const override = this.state.heartbeatOverride;
-      if (override.oneTime) this.state.heartbeatOverride = null;
-      return override.seconds;
-    }
     const phase = this.getCurrentPhaseFn();
     this.state.phase = phase;
-    // Agent-level overrides take priority, then global config, then hardcoded defaults
+
+    const override = this.state.heartbeatOverride;
+    if (override) {
+      // A runtime override reflects the agent's read of the *current* phase
+      // ("idle overnight" → long, "scalping this open" → short). Once the phase
+      // turns over, that read no longer holds, so auto-expire the override and
+      // fall back to the phase default — otherwise a long overnight setting
+      // would suppress the configured pre-market/market cadence (the
+      // phase-boundary snap only wakes the agent once per phase). Overrides
+      // predating this field (no setInPhase) keep the old persist-forever
+      // behavior for back-compat.
+      if (override.setInPhase && override.setInPhase !== phase) {
+        this.state.heartbeatOverride = null;
+        const reverted = this._phaseDefaultSeconds(phase);
+        this.state.emit('agent_log', {
+          message: `Heartbeat override expired at ${PHASE_DEFAULTS[phase]?.label || phase} boundary — reverting to ${reverted}s phase default.`,
+          level: 'info',
+          sandboxId: this.sandboxId,
+        });
+      } else {
+        if (override.oneTime) this.state.heartbeatOverride = null;
+        return override.seconds;
+      }
+    }
+    return this._phaseDefaultSeconds(phase);
+  }
+
+  // Phase default: agent-level overrides take priority, then global/sandbox
+  // config, then the hardcoded PHASE_DEFAULTS.
+  _phaseDefaultSeconds(phase) {
     if (this._agentConfig?.heartbeatOverrides?.[phase]) {
       return this._agentConfig.heartbeatOverrides[phase];
     }
     return this.getHeartbeatForPhase(this.sandboxId, phase) || PHASE_DEFAULTS[phase]?.seconds || 600;
+  }
+
+  // Set a runtime heartbeat override, tagging it with the phase it was set in so
+  // _getHeartbeatSeconds can auto-expire it at the next phase boundary. Callers
+  // (set_heartbeat tool via the HTTP endpoint, dashboard) should route through
+  // here rather than assigning state.heartbeatOverride directly.
+  setHeartbeatOverride(seconds, reason) {
+    const phase = this.getCurrentPhaseFn();
+    this.state.phase = phase;
+    this.state.heartbeatOverride = {
+      seconds,
+      reason: reason || 'Manual override',
+      oneTime: false,
+      setInPhase: phase,
+    };
+    return this.state.heartbeatOverride;
+  }
+
+  clearHeartbeatOverride() {
+    this.state.heartbeatOverride = null;
   }
 
   _getSecondsToNextPhaseBoundary() {
