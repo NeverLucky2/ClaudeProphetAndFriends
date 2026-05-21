@@ -5,6 +5,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -12,14 +13,18 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"prophet-trader/interfaces"
+	"prophet-trader/services"
 )
 
 // recordingTradingService captures every PlaceOrder call so a test can assert
 // exactly what hit the broker boundary. The other TradingService methods are
 // no-ops returning nil; tests that exercise paths through them should extend.
 type recordingTradingService struct {
-	mu             sync.Mutex
-	recordedOrders []*interfaces.Order
+	mu                  sync.Mutex
+	recordedOrders      []*interfaces.Order
+	portfolio           float64
+	cash                float64
+	optionsOrdersPlaced int
 }
 
 func (r *recordingTradingService) PlaceOrder(_ context.Context, order *interfaces.Order) (*interfaces.OrderResult, error) {
@@ -41,7 +46,7 @@ func (r *recordingTradingService) GetPositions(_ context.Context) ([]*interfaces
 	return nil, nil
 }
 func (r *recordingTradingService) GetAccount(_ context.Context) (*interfaces.Account, error) {
-	return nil, nil
+	return &interfaces.Account{PortfolioValue: r.portfolio, Cash: r.cash, LastEquity: r.portfolio}, nil
 }
 func (r *recordingTradingService) PlaceOptionsOrder(_ context.Context, _ *interfaces.OptionsOrder) (*interfaces.OrderResult, error) {
 	return nil, nil
@@ -160,6 +165,13 @@ func TestHandleSell_DefaultsToMarketOnEmptyType(t *testing.T) {
 	}
 }
 
+// stubGuardLister is a minimal positionLister for constructing a TradeGuard in
+// controller tests. It reports no managed positions so the only factor is the
+// per-trade notional check.
+type stubGuardLister struct{}
+
+func (stubGuardLister) ListManagedPositions(_ string) []*services.ManagedPosition { return nil }
+
 // TestHandleBuy_LimitOrderRoundTrip mirrors the sell test on the buy path —
 // same field-binding bug class, same fix obligation. We pin both so neither
 // silently regresses.
@@ -199,6 +211,34 @@ func TestHandleBuy_LimitOrderRoundTrip(t *testing.T) {
 	}
 	if o.LimitPrice == nil || *o.LimitPrice != 4.20 {
 		t.Errorf("LimitPrice=%v, want 4.20", o.LimitPrice)
+	}
+}
+
+// TestBuy_ComputesAllocationForAllAgents asserts that the per-position cap
+// fires on a non-penny (main) buy. Before the fix, allocationDollars was
+// always 0 for non-penny agents, so the cap could never trigger.
+func TestBuy_ComputesAllocationForAllAgents(t *testing.T) {
+	rec := &recordingTradingService{portfolio: 100000, cash: 100000}
+	guard := services.NewTradeGuard(&stubGuardLister{}, rec, services.TradeGuardConfig{
+		EnablePositionCaps: true, MaxPositionPct: 0.12, MaxDeployedPct: 0.50,
+	})
+	oc := NewOrderController(rec, nil, noopStorage{})
+	oc.SetGuard(guard)
+	lp := 100.0
+	// 200 * $100 = $20k > 12% of $100k — must block a MAIN (non-penny) buy.
+	_, err := oc.Buy(context.Background(), BuyRequest{
+		Symbol: "AAPL", Qty: 200, Type: "limit", LimitPrice: &lp, Strategy: "v2-options",
+	})
+	if err == nil {
+		t.Fatal("expected per-position cap to block a $20k main stock buy")
+	}
+	// Discriminating assertion: the block must come from the real per-position
+	// cap (computed $20k notional), NOT the indeterminate-notional fail-closed
+	// path. The pre-fix penny-only code left allocationDollars=0 for main, which
+	// would have blocked with "could not be determined" instead — so this keeps
+	// the test honest as a red→green regression guard.
+	if !strings.Contains(err.Error(), "per-position cap") {
+		t.Fatalf("expected per-position cap error (from computed notional), got: %v", err)
 	}
 }
 

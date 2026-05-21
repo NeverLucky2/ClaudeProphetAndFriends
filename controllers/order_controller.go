@@ -90,8 +90,13 @@ func (oc *OrderController) Buy(ctx context.Context, req BuyRequest) (*interfaces
 
 	// Trade guard check
 	if oc.guard != nil {
+		// Compute notional for every agent so the per-position/deployed/sector
+		// caps can apply. Prefer the order's limit price; else a quote. Zero when
+		// neither is available — the guard's fail policy then governs.
 		allocationDollars := 0.0
-		if agent == services.AgentPenny {
+		if req.LimitPrice != nil && *req.LimitPrice > 0 {
+			allocationDollars = *req.LimitPrice * req.Qty
+		} else if oc.dataService != nil {
 			if quote, err := oc.dataService.GetLatestQuote(ctx, req.Symbol); err == nil {
 				price := quote.AskPrice
 				if price <= 0 {
