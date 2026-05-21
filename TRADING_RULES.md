@@ -1,3 +1,7 @@
+> **DEPRECATED.** Legacy V1 rule set, kept only as a fallback when no strategy
+> rules file resolves (`agent/harness.js`). The live Prophet (`v2-options`) agent
+> uses `TRADING_RULES_V2.md`. Edit V2 for behavior changes, not this file.
+
 # Trading Rules
 
 **Updated:** November 26, 2025

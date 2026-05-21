@@ -49,10 +49,16 @@ policy still applies on tool error).
 
 **Rule:** Maximum 40% of portfolio deployed in V2 positions at any time (segment cap)
 - Calculate: sum of `position_value` across all V2 positions / `portfolio_value` ≤ 0.40
-- This is the V2 strategy's lane in the multi-agent capital model. The other lanes are HARVEST (12%), PENNY (30%), and TREND (18%) — total ≤ 100%
+- This is the V2 strategy's lane in the multi-agent capital model. The other lanes are HARVEST (12%), PENNY (20% (default; env-tunable via `PENNY_MAX_CAPITAL_PCT`)), and TREND (18%) — total ≤ 100%
 - Reconciles with the existing "50-70% cash" rule under Portfolio Construction: at the 40% cap, V2 alone leaves 60% available; the other agents draw from that 60% within their own caps
 - If a candidate trade would push V2 deployed above 40%, skip the entry (or close an existing V2 position first to make room)
 - This cap applies regardless of conviction; high-conviction setups do not override it
+
+> **Code-enforced (not advisory) as of 2026-05-21:** per-position size (12%) and
+> total deployed (50%) are hard caps in the TradeGuard when `ENABLE_POSITION_CAPS`
+> is on (default on); orders exceeding them are rejected. The daily-loss breaker
+> blocks new entries (including options) and fails closed when account equity
+> can't be read. The 40% V2 segment cap and the sector caps remain advisory.
 
 ---
 
@@ -353,6 +359,11 @@ If you see `guard: sector cap — {BUCKET} bucket would reach $X ...`:
 - The operator can inspect live bucket exposure at `GET /api/v1/guard/status` (`sector_exposure_dollars`, `sector_max_by_bucket_dollars`). An MCP tool surfacing this to the agent directly is a planned follow-up.
 
 Flag-gated rollout: enforcement defaults off (`ENABLE_SECTOR_AGGREGATION=false`). While off, the rejection above does not fire even when a bucket is technically over; bucket exposure is still computed and emitted in the guard status payload for observation.
+
+> **Symbol-overlap scope:** the cross-agent symbol guard is exact-string. It does
+> not catch Prophet (options, OCC symbols) and a stock agent concentrating in the
+> same *underlying* — that collision is not currently guarded. Underlying-level
+> overlap is a tracked follow-up.
 
 ---
 

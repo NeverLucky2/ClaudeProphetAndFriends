@@ -127,7 +127,7 @@ export async function buildSystemPrompt(agentConfig, options = {}) {
 
   // Layer 2: Strategy Rules
   const rulesBlock = tradingRules
-    ? `## Strategy Rules\nThese are the hard rules you MUST follow. They define what you can trade, position sizes, risk limits, and exit criteria.\n\n${tradingRules}`
+    ? `## Strategy Rules\nSome of these are enforced in code (position size, total deployed, the daily-loss breaker, per-order value, and the live/options/0DTE gates) — orders that violate them are rejected by the system. The rest are discretionary guidance you are expected to follow. They define what you can trade, position sizes, risk limits, and exit criteria.\n\n${tradingRules}`
     : '## No Strategy Rules Assigned\nNo trading rules have been configured. Use conservative defaults: max 10% per position, always use limit orders, maintain 50%+ cash.';
 
   // Layer 3: System Instructions (tools, heartbeat, operational)
