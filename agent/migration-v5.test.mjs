@@ -57,7 +57,7 @@ test('v4→v5: 4 duplicate accounts dedup to 1 survivor, sandbox pointers rewrit
   await cfgStore.loadConfig();
   const cfg = cfgStore.getConfig();
 
-  assert.equal(cfg.schemaVersion, 5);
+  assert.equal(cfg.schemaVersion, 6);
   assert.equal(cfg.accounts.length, 1, 'deduped to one account');
   const survivorId = cfg.accounts[0].id;
   assert.equal(cfg.accounts[0].name, 'Paper (from .env)', 'env-seeded account is survivor by name match');
@@ -107,8 +107,8 @@ test('v4→v5: idempotent — re-running on v5 config is a no-op', async () => {
   await cfgStore.loadConfig();
   const afterSecond = await fs.readFile(configPath, 'utf-8');
 
-  assert.equal(JSON.parse(afterFirst).schemaVersion, 5);
-  assert.equal(JSON.parse(afterSecond).schemaVersion, 5);
+  assert.equal(JSON.parse(afterFirst).schemaVersion, 6);
+  assert.equal(JSON.parse(afterSecond).schemaVersion, 6);
 
   // No second backup file written on the no-op migration
   const backups = await fs.readdir(backupDir);
@@ -227,4 +227,53 @@ test('v4→v5: rename failure aborts migration before secrets are stripped', asy
   const onDisk = JSON.parse(await fs.readFile(configPath, 'utf-8'));
   assert.equal(onDisk.schemaVersion, 4, 'schemaVersion must not have been bumped');
   assert.ok(onDisk.accounts[0].publicKey, 'publicKey must NOT have been stripped');
+});
+
+// v5 → v6: mechanical / price-only agents are exempted from emergency-alert
+// wakes so the mid-session scanner no longer burns a beat on agents that can't
+// act on news. Mirrors the structure of the v4 fixture but at schemaVersion 5.
+const v5AgentsFixture = {
+  schemaVersion: 5,
+  accounts: [],
+  sandboxes: {},
+  agents: [
+    { id: 'default', name: 'Prophet', strategyId: 'v2-options' },
+    { id: 'harvest', name: 'Harvest', strategyId: 'harvest' },
+    { id: 'mean-rev', name: 'Coil', strategyId: 'mean-rev-rsi2' },
+    { id: 'trend-prophet', name: 'Turtle', strategyId: 'trend' },
+    { id: 'penny-prophet', name: 'Spark', strategyId: 'penny-momentum' },
+  ],
+  strategies: [],
+  models: [],
+};
+
+test('v5→v6: mechanical agents get respondsToEmergencyWakes=false, reactive agents untouched, version bumped', async () => {
+  await fs.writeFile(configPath, JSON.stringify(v5AgentsFixture));
+  await cfgStore.loadConfig();
+  const cfg = cfgStore.getConfig();
+  const byId = Object.fromEntries(cfg.agents.map(a => [a.id, a]));
+
+  assert.equal(cfg.schemaVersion, 6, 'schemaVersion bumped to 6');
+  assert.equal(byId['harvest'].respondsToEmergencyWakes, false);
+  assert.equal(byId['mean-rev'].respondsToEmergencyWakes, false);
+  assert.equal(byId['trend-prophet'].respondsToEmergencyWakes, false);
+  // News-reactive agents are left untouched (flag absent => default reactive).
+  assert.notEqual(byId['default'].respondsToEmergencyWakes, false);
+  assert.notEqual(byId['penny-prophet'].respondsToEmergencyWakes, false);
+});
+
+test('v5→v6: a user-set respondsToEmergencyWakes value is not clobbered', async () => {
+  const fixture = {
+    ...v5AgentsFixture,
+    agents: [
+      // User deliberately re-enabled emergency wakes for Harvest.
+      { id: 'harvest', name: 'Harvest', strategyId: 'harvest', respondsToEmergencyWakes: true },
+      { id: 'mean-rev', name: 'Coil', strategyId: 'mean-rev-rsi2' },
+    ],
+  };
+  await fs.writeFile(configPath, JSON.stringify(fixture));
+  await cfgStore.loadConfig();
+  const byId = Object.fromEntries(cfgStore.getConfig().agents.map(a => [a.id, a]));
+  assert.equal(byId['harvest'].respondsToEmergencyWakes, true, 'user value preserved');
+  assert.equal(byId['mean-rev'].respondsToEmergencyWakes, false, 'unset mechanical agent still defaulted');
 });

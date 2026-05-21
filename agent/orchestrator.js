@@ -327,14 +327,16 @@ export class AgentOrchestrator extends EventEmitter {
     return runtime.harness.state.toJSON();
   }
 
-  triggerEmergencyHeartbeat(reason) {
+  // resolveAgent is injectable for testing; defaults to the real config-store
+  // resolver. Agents whose definition sets respondsToEmergencyWakes:false
+  // (mechanical / price-only strategies with no provision to act on intraday
+  // news — e.g. TrendProphet, Coil, Harvest) are skipped, since waking them just
+  // burns a full LLM beat to conclude the alert is irrelevant.
+  triggerEmergencyHeartbeat(reason, resolveAgent = getResolvedAgentForSandbox) {
     for (const [, runtime] of this.runtimes) {
       if (!runtime.harness.state.running || runtime.harness.state.paused) continue;
-      // TrendProphet is a price-only, daily-bar, fixed-window agent — its rules
-      // have no provision to act on intraday news. Waking it just burns tokens
-      // on an out-of-window exit.
-      const resolvedAgent = getResolvedAgentForSandbox(runtime.sandboxId);
-      if (resolvedAgent?.id === 'trend-prophet') continue;
+      const resolvedAgent = resolveAgent(runtime.sandboxId);
+      if (resolvedAgent?.respondsToEmergencyWakes === false) continue;
       runtime.harness.emergencyWake(reason);
     }
   }
