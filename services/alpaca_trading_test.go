@@ -6,6 +6,7 @@ import (
 	"io"
 	"math"
 	"prophet-trader/interfaces"
+	"strings"
 	"testing"
 
 	"github.com/alpacahq/alpaca-trade-api-go/v3/alpaca"
@@ -154,6 +155,34 @@ func TestSnapToTradablePrice(t *testing.T) {
 			}
 			if changed != tc.wantChanged {
 				t.Errorf("changed: got %v, want %v", changed, tc.wantChanged)
+			}
+		})
+	}
+}
+
+func TestResolveOptionsClientOrderID(t *testing.T) {
+	cases := []struct {
+		name          string
+		caller        string
+		strategy      string
+		wantExact     string // when non-empty, result must equal this
+		wantGenerated bool   // when true, result must be non-empty and start with strategy+":"
+	}{
+		{name: "caller-supplied wins", caller: "v2-options-stop:SPY:123", strategy: "v2-options", wantExact: "v2-options-stop:SPY:123"},
+		{name: "generated from strategy", caller: "", strategy: "v2-options", wantGenerated: true},
+		{name: "empty when neither", caller: "", strategy: "", wantExact: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := resolveOptionsClientOrderID(tc.caller, tc.strategy)
+			if tc.wantGenerated {
+				if !strings.HasPrefix(got, tc.strategy+":") {
+					t.Fatalf("got %q, want generated %q-prefixed id", got, tc.strategy+":")
+				}
+			} else {
+				if got != tc.wantExact {
+					t.Fatalf("got %q, want %q", got, tc.wantExact)
+				}
 			}
 		})
 	}

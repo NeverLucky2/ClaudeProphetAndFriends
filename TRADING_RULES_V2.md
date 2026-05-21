@@ -60,6 +60,20 @@ policy still applies on tool error).
 > blocks new entries (including options) and fails closed when account equity
 > can't be read. The 40% V2 segment cap and the sector caps remain advisory.
 
+> **Options auto-stop monitor (code-enforced, flag-gated, default OFF):** when
+> `ENABLE_PROPHET_OPTIONS_STOP=true`, a Go monitor polls this agent's **long
+> single-leg** options positions every minute during market hours and flattens any
+> position past a **deep catastrophic floor** (`PROPHET_OPTIONS_STOP_PCT`, default
+> −50% of premium since entry). It is a backstop *far below* your ~−15%
+> discretionary stop — it exists for overnight gap-downs the heartbeat can't catch
+> at the open, not for normal loss management. It defers to you: it stays dormant
+> until it has observed you take a beat since it started, and it suppresses itself
+> for a few minutes after you place any order on a symbol
+> (`PROPHET_OPTIONS_STOP_COOLOFF_MIN`, default 7). The flatten is a marketable-limit
+> sell that escalates to a wide limit bounded by a sanity floor (never a naked
+> market order). It is scoped strictly to v2-options long positions and **never
+> touches a Harvest condor leg**. Default OFF (observe before enforcing).
+
 ---
 
 ## Day Trading

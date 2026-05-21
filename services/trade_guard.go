@@ -349,6 +349,19 @@ func (g *TradeGuard) RecordRawBuy(agent AgentSource, symbol string) {
 	g.rawSymbols[agent][symbol] = struct{}{}
 }
 
+// HasRawSymbol reports whether the agent has a raw (non-managed) ownership
+// record for the symbol. Read-only; used by the options stop monitor to flag a
+// flatten taken without a positive ownership record.
+func (g *TradeGuard) HasRawSymbol(agent AgentSource, symbol string) bool {
+	if agent == "" {
+		agent = AgentMain
+	}
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	_, ok := g.rawSymbols[agent][symbol]
+	return ok
+}
+
 // RecordRawSell removes the in-memory ownership record when an agent exits a raw position.
 func (g *TradeGuard) RecordRawSell(agent AgentSource, symbol string) {
 	if agent == "" {

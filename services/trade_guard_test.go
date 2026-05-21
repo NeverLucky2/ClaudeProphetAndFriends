@@ -622,3 +622,17 @@ func TestGuard_PositionCaps_DisabledIsNoop(t *testing.T) {
 		t.Fatalf("caps disabled → notional 0 must not block: %v", err)
 	}
 }
+
+func TestTradeGuard_HasRawSymbol(t *testing.T) {
+	g := NewTradeGuard(nil, nil, TradeGuardConfig{})
+	if g.HasRawSymbol(AgentMain, "NVDA_C") {
+		t.Fatal("expected no raw symbol initially")
+	}
+	g.RecordRawBuy(AgentMain, "NVDA_C")
+	if !g.HasRawSymbol(AgentMain, "NVDA_C") {
+		t.Fatal("expected NVDA_C after RecordRawBuy")
+	}
+	if g.HasRawSymbol(AgentPenny, "NVDA_C") {
+		t.Fatal("raw symbol must be per-agent")
+	}
+}
