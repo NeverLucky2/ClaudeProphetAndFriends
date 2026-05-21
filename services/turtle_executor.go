@@ -476,7 +476,7 @@ func (e *TurtleExecutor) runEntries(ctx context.Context, openRows []*models.DBTr
 			continue
 		}
 		if e.guard != nil {
-			if err := e.guard.CheckBuy(ctx, AgentMain, ticker, dollars); err != nil {
+			if err := e.guard.CheckBuy(ctx, AgentTrend, ticker, dollars); err != nil {
 				res.Skips = append(res.Skips, fmt.Sprintf("%s: guard: %v", ticker, err))
 				continue
 			}

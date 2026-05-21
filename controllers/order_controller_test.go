@@ -214,6 +214,31 @@ func TestHandleBuy_LimitOrderRoundTrip(t *testing.T) {
 	}
 }
 
+// TestBuy_AttributesByStrategyTagNotAgentSource asserts that the guard agent
+// is derived from the strategy tag when agent_source is absent — reproducing
+// the production attribution gap where every order defaulted to AgentMain.
+func TestBuy_AttributesByStrategyTagNotAgentSource(t *testing.T) {
+	// Production sends strategy="penny-momentum" and NO agent_source. The guard
+	// must see AgentPenny so the $500 penny per-position cap applies.
+	rec := &recordingTradingService{portfolio: 100000, cash: 100000}
+	guard := services.NewTradeGuard(&stubGuardLister{}, rec, services.TradeGuardConfig{
+		PennyMaxPositionDollars: 500, PennyMaxCapitalPct: 0.20,
+	})
+	oc := NewOrderController(rec, nil, noopStorage{})
+	oc.SetGuard(guard)
+	lp := 1.0
+	// $1 * 600 = $600 > $500 penny per-position cap — only blocks if attributed to penny.
+	_, err := oc.Buy(context.Background(), BuyRequest{
+		Symbol: "ABCD", Qty: 600, Type: "limit", LimitPrice: &lp, Strategy: "penny-momentum",
+	})
+	if err == nil {
+		t.Fatal("expected penny per-position cap to block a $600 buy attributed via strategy tag")
+	}
+	if !strings.Contains(err.Error(), "per-position cap") {
+		t.Fatalf("expected penny per-position cap error, got: %v", err)
+	}
+}
+
 // TestBuy_ComputesAllocationForAllAgents asserts that the per-position cap
 // fires on a non-penny (main) buy. Before the fix, allocationDollars was
 // always 0 for non-penny agents, so the cap could never trigger.

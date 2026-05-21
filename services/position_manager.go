@@ -170,10 +170,11 @@ func (pm *PositionManager) PlaceManagedPosition(ctx context.Context, req *PlaceM
 		"allocation": req.AllocationDollars,
 	}).Info("Placing managed position")
 
-	// Resolve agent source
+	// Resolve agent source: explicit override wins; else derive from the agent
+	// strategy tag (agent_source is not sent by the MCP in production).
 	agent := req.AgentSource
 	if agent == "" {
-		agent = AgentMain
+		agent = AgentForStrategy(req.AgentStrategy)
 	}
 
 	// Trade guard check

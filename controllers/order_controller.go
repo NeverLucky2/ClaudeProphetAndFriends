@@ -83,9 +83,11 @@ func (oc *OrderController) Buy(ctx context.Context, req BuyRequest) (*interfaces
 	if req.TimeInForce == "" {
 		req.TimeInForce = "day"
 	}
+	// Attribution: explicit AgentSource overrides; else derive from the strategy
+	// tag the MCP forwards (agent_source is never sent in production).
 	agent := req.AgentSource
 	if agent == "" {
-		agent = services.AgentMain
+		agent = services.AgentForStrategy(req.Strategy)
 	}
 
 	// Trade guard check
@@ -161,9 +163,11 @@ func (oc *OrderController) Sell(ctx context.Context, req SellRequest) (*interfac
 	if req.TimeInForce == "" {
 		req.TimeInForce = "day"
 	}
+	// Attribution: explicit AgentSource overrides; else derive from the strategy
+	// tag the MCP forwards (agent_source is never sent in production).
 	agent := req.AgentSource
 	if agent == "" {
-		agent = services.AgentMain
+		agent = services.AgentForStrategy(req.Strategy)
 	}
 
 	// Trade guard check
