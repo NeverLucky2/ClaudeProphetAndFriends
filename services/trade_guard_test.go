@@ -503,15 +503,35 @@ func TestGuard_Status_ReportsSectorExposure(t *testing.T) {
 	}
 }
 
-func TestGuard_DailyLossFailsOpenOnFetchError(t *testing.T) {
-	// Daily-loss check is fail-open on fetch errors (transient API hiccup
-	// shouldn't block all trading). Verify a fetch error doesn't block a main buy.
+func TestGuard_DailyLoss_FailsClosedOnFetchError(t *testing.T) {
 	cfg := defaultConfig()
-	cfg.MaxDailyLossPct = 5.0
-	stub := &stubTrading{getAcctErr: errors.New("alpaca timeout")}
-	g := NewTradeGuard(&stubLister{}, stub, cfg)
+	cfg.MaxDailyLossPct = 5
+	g := NewTradeGuard(&stubLister{}, &stubTrading{getAcctErr: errors.New("alpaca 503")}, cfg)
+	if err := g.CheckBuy(context.Background(), AgentMain, "AAPL", 0); err == nil {
+		t.Fatal("expected buy blocked when account fetch errors (fail closed)")
+	}
+}
+
+func TestGuard_DailyLoss_NilTradingServiceAllows(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.MaxDailyLossPct = 5
+	g := NewTradeGuard(&stubLister{}, nil, cfg) // no account context
 	if err := g.CheckBuy(context.Background(), AgentMain, "AAPL", 0); err != nil {
-		t.Fatalf("daily-loss check should fail-open on fetch error, got: %v", err)
+		t.Fatalf("nil trading service should fail open: %v", err)
+	}
+}
+
+func TestGuard_DailyLoss_RecoversAfterTransientError(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.MaxDailyLossPct = 5
+	stub := &stubTrading{portfolio: 100000, lastEquity: 100000, getAcctErr: errors.New("503")}
+	g := NewTradeGuard(&stubLister{}, stub, cfg)
+	if err := g.CheckBuy(context.Background(), AgentMain, "AAPL", 0); err == nil {
+		t.Fatal("first call should block on error")
+	}
+	stub.getAcctErr = nil // API recovers
+	if err := g.CheckBuy(context.Background(), AgentMain, "AAPL", 0); err != nil {
+		t.Fatalf("second call should allow once API recovers (no latch): %v", err)
 	}
 }
 

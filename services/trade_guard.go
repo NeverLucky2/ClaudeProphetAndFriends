@@ -261,8 +261,8 @@ func (g *TradeGuard) CheckBuy(ctx context.Context, agent AgentSource, symbol str
 	}
 
 	// Daily-loss circuit breaker applies to BOTH agents.
-	dailyAcct, _ := getAcct()
-	if err := g.checkDailyLoss(dailyAcct); err != nil {
+	dailyAcct, dailyErr := getAcct()
+	if err := g.checkDailyLoss(dailyAcct, dailyErr); err != nil {
 		return err
 	}
 
@@ -452,12 +452,26 @@ func (g *TradeGuard) symbolsFor(agent AgentSource) map[string]struct{} {
 	return result
 }
 
-// checkDailyLoss returns an error if intraday equity is down beyond MaxDailyLossPct.
-// Disabled when MaxDailyLossPct <= 0, when acct is nil (no data available),
-// or when LastEquity/PortfolioValue is zero (fail-open to avoid bricking new accounts).
-// The caller is responsible for fetching the account; passing nil makes this a no-op.
-func (g *TradeGuard) checkDailyLoss(acct *interfaces.Account) error {
-	if g.cfg.MaxDailyLossPct <= 0 || acct == nil {
+// checkDailyLoss blocks new buys when intraday equity is down beyond
+// MaxDailyLossPct. Fail policy:
+//   - disabled when MaxDailyLossPct <= 0.
+//   - acctErr != nil → fail CLOSED (cannot read live equity; don't open new risk
+//     while blind to P&L). Per-CheckBuy, no latch — self-recovers when the API
+//     recovers. Mirrors checkPennyCapCap.
+//   - acct == nil with no error (nil trading service / tests) → fail open.
+//   - LastEquity/PortfolioValue <= 0 (new account) → fail open.
+func (g *TradeGuard) checkDailyLoss(acct *interfaces.Account, acctErr error) error {
+	if g.cfg.MaxDailyLossPct <= 0 {
+		return nil
+	}
+	if acctErr != nil {
+		g.logger.WithFields(logrus.Fields{
+			"daily_loss_check_unavailable": true,
+			"operator_review_required":     true,
+		}).Warn("daily-loss breaker: account fetch failed — blocking new buys (fail closed)")
+		return fmt.Errorf("guard: daily loss breaker — account unavailable, blocking new entries: %w", acctErr)
+	}
+	if acct == nil {
 		return nil
 	}
 	if acct.LastEquity <= 0 || acct.PortfolioValue <= 0 {
