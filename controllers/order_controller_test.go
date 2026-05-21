@@ -48,8 +48,11 @@ func (r *recordingTradingService) GetPositions(_ context.Context) ([]*interfaces
 func (r *recordingTradingService) GetAccount(_ context.Context) (*interfaces.Account, error) {
 	return &interfaces.Account{PortfolioValue: r.portfolio, Cash: r.cash, LastEquity: r.portfolio}, nil
 }
-func (r *recordingTradingService) PlaceOptionsOrder(_ context.Context, _ *interfaces.OptionsOrder) (*interfaces.OrderResult, error) {
-	return nil, nil
+func (r *recordingTradingService) PlaceOptionsOrder(_ context.Context, order *interfaces.OptionsOrder) (*interfaces.OrderResult, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.optionsOrdersPlaced++
+	return &interfaces.OrderResult{OrderID: "opt-" + order.Symbol, Status: "accepted"}, nil
 }
 func (r *recordingTradingService) GetOptionsChain(_ context.Context, _ string, _ time.Time) ([]*interfaces.OptionContract, error) {
 	return nil, nil
@@ -264,6 +267,43 @@ func TestBuy_ComputesAllocationForAllAgents(t *testing.T) {
 	// the test honest as a red→green regression guard.
 	if !strings.Contains(err.Error(), "per-position cap") {
 		t.Fatalf("expected per-position cap error (from computed notional), got: %v", err)
+	}
+}
+
+func TestPlaceOptionsOrder_GuardBlocksOversizedOpen(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := &recordingTradingService{portfolio: 100000, cash: 100000}
+	guard := services.NewTradeGuard(&stubGuardLister{}, rec, services.TradeGuardConfig{
+		EnablePositionCaps: true, MaxPositionPct: 0.12, MaxDeployedPct: 0.50,
+	})
+	oc := NewOrderController(rec, nil, noopStorage{})
+	oc.SetGuard(guard)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	// 30 * $6 * 100 = $18,000 > 12% of $100k → blocked on buy_to_open.
+	body := `{"symbol":"SPY260116C00500000","underlying":"SPY","qty":30,"side":"buy","position_intent":"buy_to_open","type":"limit","limit_price":6,"strategy":"v2-options"}`
+	c.Request = httptest.NewRequest("POST", "/options/order", bytes.NewBufferString(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	oc.PlaceOptionsOrder(c)
+	if rec.optionsOrdersPlaced != 0 {
+		t.Fatalf("guard should block before placement, placed=%d", rec.optionsOrdersPlaced)
+	}
+}
+
+func TestPlaceOptionsOrder_CloseNotBlocked(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := &recordingTradingService{portfolio: 100000, cash: 95000}
+	guard := services.NewTradeGuard(&stubGuardLister{}, rec, services.TradeGuardConfig{
+		EnablePositionCaps: true, MaxPositionPct: 0.12, MaxDeployedPct: 0.50,
+	})
+	oc := NewOrderController(rec, nil, noopStorage{})
+	oc.SetGuard(guard)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	body := `{"symbol":"SPY260116C00500000","underlying":"SPY","qty":30,"side":"sell","position_intent":"sell_to_close","type":"market","strategy":"v2-options"}`
+	c.Request = httptest.NewRequest("POST", "/options/order", bytes.NewBufferString(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	oc.PlaceOptionsOrder(c)
+	if rec.optionsOrdersPlaced != 1 {
+		t.Fatalf("close order must not be blocked, placed=%d", rec.optionsOrdersPlaced)
 	}
 }
 
