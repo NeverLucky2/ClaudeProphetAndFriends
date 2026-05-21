@@ -29,6 +29,7 @@ func (s *stubLister) ListManagedPositions(_ string) []*ManagedPosition {
 type stubTrading struct {
 	portfolio    float64
 	lastEquity   float64
+	cash         float64
 	getAcctCalls int
 	getAcctErr   error
 }
@@ -38,7 +39,7 @@ func (s *stubTrading) GetAccount(_ context.Context) (*interfaces.Account, error)
 	if s.getAcctErr != nil {
 		return nil, s.getAcctErr
 	}
-	return &interfaces.Account{PortfolioValue: s.portfolio, LastEquity: s.lastEquity}, nil
+	return &interfaces.Account{PortfolioValue: s.portfolio, LastEquity: s.lastEquity, Cash: s.cash}, nil
 }
 func (s *stubTrading) PlaceOrder(_ context.Context, _ *interfaces.Order) (*interfaces.OrderResult, error) {
 	return nil, nil
@@ -560,5 +561,47 @@ func TestAgentForStrategy(t *testing.T) {
 		if got := AgentForStrategy(strat); got != want {
 			t.Errorf("AgentForStrategy(%q) = %q, want %q", strat, got, want)
 		}
+	}
+}
+
+func capCfg() TradeGuardConfig {
+	c := defaultConfig()
+	c.EnablePositionCaps = true
+	c.MaxPositionPct = 0.12
+	c.MaxDeployedPct = 0.50
+	return c
+}
+
+func TestGuard_PositionCap_BlocksOversizedTrade(t *testing.T) {
+	g := NewTradeGuard(&stubLister{}, &stubTrading{portfolio: 100000, cash: 100000}, capCfg())
+	if err := g.CheckBuy(context.Background(), AgentMain, "SPY", 13000); err == nil {
+		t.Fatal("expected per-position cap to block $13k on $100k portfolio")
+	}
+	if err := g.CheckBuy(context.Background(), AgentMain, "SPY", 11000); err != nil {
+		t.Fatalf("$11k under 12%% cap should pass: %v", err)
+	}
+}
+
+func TestGuard_DeployedCap_ProjectsPostTrade(t *testing.T) {
+	// 49% deployed (cash 51k of 100k); a $5k order projects to 54% > 50%.
+	g := NewTradeGuard(&stubLister{}, &stubTrading{portfolio: 100000, cash: 51000}, capCfg())
+	if err := g.CheckBuy(context.Background(), AgentMain, "SPY", 5000); err == nil {
+		t.Fatal("expected projected-deployed cap to block (49%+5% > 50%)")
+	}
+}
+
+func TestGuard_PositionCaps_FailClosedOnIndeterminateNotional(t *testing.T) {
+	g := NewTradeGuard(&stubLister{}, &stubTrading{portfolio: 100000, cash: 100000}, capCfg())
+	if err := g.CheckBuy(context.Background(), AgentMain, "SPY", 0); err == nil {
+		t.Fatal("expected fail-closed when caps enabled and notional indeterminate")
+	}
+}
+
+func TestGuard_PositionCaps_DisabledIsNoop(t *testing.T) {
+	cfg := capCfg()
+	cfg.EnablePositionCaps = false
+	g := NewTradeGuard(&stubLister{}, &stubTrading{portfolio: 100000, cash: 100000}, cfg)
+	if err := g.CheckBuy(context.Background(), AgentMain, "SPY", 0); err != nil {
+		t.Fatalf("caps disabled → notional 0 must not block: %v", err)
 	}
 }

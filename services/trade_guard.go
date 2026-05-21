@@ -78,6 +78,15 @@ type TradeGuardConfig struct {
 	// entry in SectorMaxExposurePct. Zero disables the fallback (those buckets
 	// are uncapped).
 	DefaultSectorMaxPct float64 `json:"default_sector_max_pct"`
+
+	// EnablePositionCaps flag-gates the per-position and deployed caps below.
+	EnablePositionCaps bool `json:"enable_position_caps"`
+	// MaxPositionPct caps a single new trade's notional as a fraction of
+	// portfolio value (0.12 = 12%). Zero disables.
+	MaxPositionPct float64 `json:"max_position_pct"`
+	// MaxDeployedPct caps whole-account deployment after the trade:
+	// (PortfolioValue - Cash + notional) / PortfolioValue. Zero disables.
+	MaxDeployedPct float64 `json:"max_deployed_pct"`
 }
 
 // SectorBucket categorizes a symbol's primary factor exposure for cross-agent
@@ -273,6 +282,13 @@ func (g *TradeGuard) CheckBuy(ctx context.Context, agent AgentSource, symbol str
 	if g.cfg.EnableSectorAggregation && allocationDollars > 0 {
 		sectorAcct, sectorErr := getAcct()
 		if err := g.checkSectorCap(sectorAcct, sectorErr, symbol, allocationDollars); err != nil {
+			return err
+		}
+	}
+
+	if g.cfg.EnablePositionCaps {
+		capAcct, capErr := getAcct()
+		if err := g.checkPositionCaps(capAcct, capErr, allocationDollars); err != nil {
 			return err
 		}
 	}
@@ -512,6 +528,39 @@ func (g *TradeGuard) checkPennyCapCap(acct *interfaces.Account, acctErr error, a
 			exposure, additionalDollars,
 			g.cfg.PennyMaxCapitalPct*100, maxDollars, acct.PortfolioValue,
 		)
+	}
+	return nil
+}
+
+// checkPositionCaps enforces the per-position and projected-deployed caps.
+// Fail policy: acctErr → fail closed; no account context (acct==nil /
+// PortfolioValue<=0) → fail open; caps enabled but notional<=0 (size
+// indeterminate, e.g. an unpriceable market options order) → fail closed.
+func (g *TradeGuard) checkPositionCaps(acct *interfaces.Account, acctErr error, notional float64) error {
+	if acctErr != nil {
+		return fmt.Errorf("guard: failed to fetch account for position cap check: %w", acctErr)
+	}
+	if acct == nil || acct.PortfolioValue <= 0 {
+		return nil
+	}
+	if notional <= 0 {
+		g.logger.WithField("guard_notional_indeterminate", true).
+			Warn("position caps enabled but order notional indeterminate — blocking (fail closed)")
+		return fmt.Errorf("guard: position caps enabled but order notional could not be determined")
+	}
+	if g.cfg.MaxPositionPct > 0 {
+		maxPos := acct.PortfolioValue * g.cfg.MaxPositionPct
+		if notional > maxPos {
+			return fmt.Errorf("guard: position cap — $%.2f exceeds %.0f%% per-position cap ($%.2f of $%.2f)",
+				notional, g.cfg.MaxPositionPct*100, maxPos, acct.PortfolioValue)
+		}
+	}
+	if g.cfg.MaxDeployedPct > 0 {
+		projected := (acct.PortfolioValue - acct.Cash + notional) / acct.PortfolioValue
+		if projected > g.cfg.MaxDeployedPct {
+			return fmt.Errorf("guard: deployed cap — projected %.1f%% exceeds %.0f%% deployed cap ($%.2f cash of $%.2f)",
+				projected*100, g.cfg.MaxDeployedPct*100, acct.Cash, acct.PortfolioValue)
+		}
 	}
 	return nil
 }
