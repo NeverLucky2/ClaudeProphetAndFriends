@@ -161,6 +161,9 @@ func main() {
 			EnableSectorAggregation: cfg.EnableSectorAggregation,
 			SectorMaxExposurePct:    sectorCaps,
 			DefaultSectorMaxPct:     cfg.SectorDefaultMaxPct,
+			EnablePositionCaps:      cfg.EnablePositionCaps,
+			MaxPositionPct:          cfg.MaxPositionPct,
+			MaxDeployedPct:          cfg.MaxDeployedPct,
 		},
 	)
 	positionManager.SetGuard(tradeGuard)
@@ -173,6 +176,9 @@ func main() {
 		"max_daily_loss_pct":         cfg.MaxDailyLossPct,
 		"sector_aggregation_enabled": cfg.EnableSectorAggregation,
 		"sector_default_max_pct":     cfg.SectorDefaultMaxPct,
+		"position_caps_enabled":      cfg.EnablePositionCaps,
+		"max_position_pct":           cfg.MaxPositionPct,
+		"max_deployed_pct":           cfg.MaxDeployedPct,
 	}).Info("Trade guard initialized")
 
 	// Regime gate service. Reads the daily-computed regime_gate.json snapshot;
