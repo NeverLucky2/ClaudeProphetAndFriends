@@ -38,6 +38,11 @@ type Config struct {
 	// stay neutral so no agent behavior changes until enforcement is turned on.
 	EnableRegimeGate bool
 	RegimeReportPath string
+
+	// Position caps (hybrid hard backstops). Flag-gated like the regime gate.
+	EnablePositionCaps bool
+	MaxPositionPct     float64 // per-position cap, fraction of portfolio (0.12 = 12%)
+	MaxDeployedPct     float64 // whole-account deployed ceiling (0.50 = 50%)
 }
 
 var AppConfig *Config
@@ -77,6 +82,10 @@ func Load() error {
 		// flip ENABLE_REGIME_GATE=true.
 		EnableRegimeGate: getEnvOrDefault("ENABLE_REGIME_GATE", "false") == "true",
 		RegimeReportPath: getEnvOrDefault("REGIME_REPORT_PATH", "./data/reports/regime_gate.json"),
+
+		EnablePositionCaps: getEnvOrDefault("ENABLE_POSITION_CAPS", "true") == "true",
+		MaxPositionPct:     parseFloat(getEnvOrDefault("MAX_POSITION_PCT", "0.12")),
+		MaxDeployedPct:     parseFloat(getEnvOrDefault("MAX_DEPLOYED_PCT", "0.50")),
 
 		OperatorEmail: os.Getenv("OPERATOR_EMAIL"),
 	}

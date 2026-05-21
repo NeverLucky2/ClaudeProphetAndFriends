@@ -5,6 +5,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -12,14 +13,18 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"prophet-trader/interfaces"
+	"prophet-trader/services"
 )
 
 // recordingTradingService captures every PlaceOrder call so a test can assert
 // exactly what hit the broker boundary. The other TradingService methods are
 // no-ops returning nil; tests that exercise paths through them should extend.
 type recordingTradingService struct {
-	mu             sync.Mutex
-	recordedOrders []*interfaces.Order
+	mu                  sync.Mutex
+	recordedOrders      []*interfaces.Order
+	portfolio           float64
+	cash                float64
+	optionsOrdersPlaced int
 }
 
 func (r *recordingTradingService) PlaceOrder(_ context.Context, order *interfaces.Order) (*interfaces.OrderResult, error) {
@@ -41,10 +46,13 @@ func (r *recordingTradingService) GetPositions(_ context.Context) ([]*interfaces
 	return nil, nil
 }
 func (r *recordingTradingService) GetAccount(_ context.Context) (*interfaces.Account, error) {
-	return nil, nil
+	return &interfaces.Account{PortfolioValue: r.portfolio, Cash: r.cash, LastEquity: r.portfolio}, nil
 }
-func (r *recordingTradingService) PlaceOptionsOrder(_ context.Context, _ *interfaces.OptionsOrder) (*interfaces.OrderResult, error) {
-	return nil, nil
+func (r *recordingTradingService) PlaceOptionsOrder(_ context.Context, order *interfaces.OptionsOrder) (*interfaces.OrderResult, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.optionsOrdersPlaced++
+	return &interfaces.OrderResult{OrderID: "opt-" + order.Symbol, Status: "accepted"}, nil
 }
 func (r *recordingTradingService) GetOptionsChain(_ context.Context, _ string, _ time.Time) ([]*interfaces.OptionContract, error) {
 	return nil, nil
@@ -160,6 +168,13 @@ func TestHandleSell_DefaultsToMarketOnEmptyType(t *testing.T) {
 	}
 }
 
+// stubGuardLister is a minimal positionLister for constructing a TradeGuard in
+// controller tests. It reports no managed positions so the only factor is the
+// per-trade notional check.
+type stubGuardLister struct{}
+
+func (stubGuardLister) ListManagedPositions(_ string) []*services.ManagedPosition { return nil }
+
 // TestHandleBuy_LimitOrderRoundTrip mirrors the sell test on the buy path —
 // same field-binding bug class, same fix obligation. We pin both so neither
 // silently regresses.
@@ -199,6 +214,138 @@ func TestHandleBuy_LimitOrderRoundTrip(t *testing.T) {
 	}
 	if o.LimitPrice == nil || *o.LimitPrice != 4.20 {
 		t.Errorf("LimitPrice=%v, want 4.20", o.LimitPrice)
+	}
+}
+
+// TestBuy_AttributesByStrategyTagNotAgentSource asserts that the guard agent
+// is derived from the strategy tag when agent_source is absent — reproducing
+// the production attribution gap where every order defaulted to AgentMain.
+func TestBuy_AttributesByStrategyTagNotAgentSource(t *testing.T) {
+	// Production sends strategy="penny-momentum" and NO agent_source. The guard
+	// must see AgentPenny so the $500 penny per-position cap applies.
+	rec := &recordingTradingService{portfolio: 100000, cash: 100000}
+	guard := services.NewTradeGuard(&stubGuardLister{}, rec, services.TradeGuardConfig{
+		PennyMaxPositionDollars: 500, PennyMaxCapitalPct: 0.20,
+	})
+	oc := NewOrderController(rec, nil, noopStorage{})
+	oc.SetGuard(guard)
+	lp := 1.0
+	// $1 * 600 = $600 > $500 penny per-position cap — only blocks if attributed to penny.
+	_, err := oc.Buy(context.Background(), BuyRequest{
+		Symbol: "ABCD", Qty: 600, Type: "limit", LimitPrice: &lp, Strategy: "penny-momentum",
+	})
+	if err == nil {
+		t.Fatal("expected penny per-position cap to block a $600 buy attributed via strategy tag")
+	}
+	if !strings.Contains(err.Error(), "per-position cap") {
+		t.Fatalf("expected penny per-position cap error, got: %v", err)
+	}
+}
+
+// TestBuy_ComputesAllocationForAllAgents asserts that the per-position cap
+// fires on a non-penny (main) buy. Before the fix, allocationDollars was
+// always 0 for non-penny agents, so the cap could never trigger.
+func TestBuy_ComputesAllocationForAllAgents(t *testing.T) {
+	rec := &recordingTradingService{portfolio: 100000, cash: 100000}
+	guard := services.NewTradeGuard(&stubGuardLister{}, rec, services.TradeGuardConfig{
+		EnablePositionCaps: true, MaxPositionPct: 0.12, MaxDeployedPct: 0.50,
+	})
+	oc := NewOrderController(rec, nil, noopStorage{})
+	oc.SetGuard(guard)
+	lp := 100.0
+	// 200 * $100 = $20k > 12% of $100k — must block a MAIN (non-penny) buy.
+	_, err := oc.Buy(context.Background(), BuyRequest{
+		Symbol: "AAPL", Qty: 200, Type: "limit", LimitPrice: &lp, Strategy: "v2-options",
+	})
+	if err == nil {
+		t.Fatal("expected per-position cap to block a $20k main stock buy")
+	}
+	// Discriminating assertion: the block must come from the real per-position
+	// cap (computed $20k notional), NOT the indeterminate-notional fail-closed
+	// path. The pre-fix penny-only code left allocationDollars=0 for main, which
+	// would have blocked with "could not be determined" instead — so this keeps
+	// the test honest as a red→green regression guard.
+	if !strings.Contains(err.Error(), "per-position cap") {
+		t.Fatalf("expected per-position cap error (from computed notional), got: %v", err)
+	}
+}
+
+func TestPlaceOptionsOrder_GuardBlocksOversizedOpen(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := &recordingTradingService{portfolio: 100000, cash: 100000}
+	guard := services.NewTradeGuard(&stubGuardLister{}, rec, services.TradeGuardConfig{
+		EnablePositionCaps: true, MaxPositionPct: 0.12, MaxDeployedPct: 0.50,
+	})
+	oc := NewOrderController(rec, nil, noopStorage{})
+	oc.SetGuard(guard)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	// 30 * $6 * 100 = $18,000 > 12% of $100k → blocked on buy_to_open.
+	body := `{"symbol":"SPY260116C00500000","underlying":"SPY","qty":30,"side":"buy","position_intent":"buy_to_open","type":"limit","limit_price":6,"strategy":"v2-options"}`
+	c.Request = httptest.NewRequest("POST", "/options/order", bytes.NewBufferString(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	oc.PlaceOptionsOrder(c)
+	if rec.optionsOrdersPlaced != 0 {
+		t.Fatalf("guard should block before placement, placed=%d", rec.optionsOrdersPlaced)
+	}
+}
+
+func TestPlaceOptionsOrder_CloseNotBlocked(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := &recordingTradingService{portfolio: 100000, cash: 95000}
+	guard := services.NewTradeGuard(&stubGuardLister{}, rec, services.TradeGuardConfig{
+		EnablePositionCaps: true, MaxPositionPct: 0.12, MaxDeployedPct: 0.50,
+	})
+	oc := NewOrderController(rec, nil, noopStorage{})
+	oc.SetGuard(guard)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	body := `{"symbol":"SPY260116C00500000","underlying":"SPY","qty":30,"side":"sell","position_intent":"sell_to_close","type":"market","strategy":"v2-options"}`
+	c.Request = httptest.NewRequest("POST", "/options/order", bytes.NewBufferString(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	oc.PlaceOptionsOrder(c)
+	if rec.optionsOrdersPlaced != 1 {
+		t.Fatalf("close order must not be blocked, placed=%d", rec.optionsOrdersPlaced)
+	}
+}
+
+func TestPlaceOptionsOrder_FullPath_GatedAndAttributedToMain(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	// Gap #1: with caps on, an $18k buy is gated (not placed) — proves options
+	// now reach the guard.
+	rec := &recordingTradingService{portfolio: 100000, cash: 100000}
+	guard := services.NewTradeGuard(&stubGuardLister{}, rec, services.TradeGuardConfig{
+		EnablePositionCaps: true, MaxPositionPct: 0.12, MaxDeployedPct: 0.50,
+	})
+	oc := NewOrderController(rec, nil, noopStorage{})
+	oc.SetGuard(guard)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	big := `{"symbol":"SPY260116C00500000","underlying":"SPY","qty":30,"side":"buy","position_intent":"buy_to_open","type":"limit","limit_price":6,"strategy":"v2-options"}`
+	c.Request = httptest.NewRequest("POST", "/options/order", bytes.NewBufferString(big))
+	c.Request.Header.Set("Content-Type", "application/json")
+	oc.PlaceOptionsOrder(c)
+	if rec.optionsOrdersPlaced != 0 {
+		t.Fatalf("gap #1: options order should be gated, placed=%d", rec.optionsOrdersPlaced)
+	}
+
+	// Gap #2: a small buy (caps off) attributes to AgentMain via strategy tag.
+	rec2 := &recordingTradingService{portfolio: 100000, cash: 100000}
+	guard2 := services.NewTradeGuard(&stubGuardLister{}, rec2, services.TradeGuardConfig{})
+	oc2 := NewOrderController(rec2, nil, noopStorage{})
+	oc2.SetGuard(guard2)
+	c2, _ := gin.CreateTestContext(httptest.NewRecorder())
+	small := `{"symbol":"SPY260116C00500000","underlying":"SPY","qty":1,"side":"buy","position_intent":"buy_to_open","type":"limit","limit_price":1,"strategy":"v2-options"}`
+	c2.Request = httptest.NewRequest("POST", "/options/order", bytes.NewBufferString(small))
+	c2.Request.Header.Set("Content-Type", "application/json")
+	oc2.PlaceOptionsOrder(c2)
+	st := guard2.Status(context.Background())
+	found := false
+	for _, s := range st.MainSymbols {
+		if s == "SPY260116C00500000" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("gap #2: options buy with strategy=v2-options must attribute to AgentMain")
 	}
 }
 

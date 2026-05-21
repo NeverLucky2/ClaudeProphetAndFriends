@@ -83,15 +83,22 @@ func (oc *OrderController) Buy(ctx context.Context, req BuyRequest) (*interfaces
 	if req.TimeInForce == "" {
 		req.TimeInForce = "day"
 	}
+	// Attribution: explicit AgentSource overrides; else derive from the strategy
+	// tag the MCP forwards (agent_source is never sent in production).
 	agent := req.AgentSource
 	if agent == "" {
-		agent = services.AgentMain
+		agent = services.AgentForStrategy(req.Strategy)
 	}
 
 	// Trade guard check
 	if oc.guard != nil {
+		// Compute notional for every agent so the per-position/deployed/sector
+		// caps can apply. Prefer the order's limit price; else a quote. Zero when
+		// neither is available — the guard's fail policy then governs.
 		allocationDollars := 0.0
-		if agent == services.AgentPenny {
+		if req.LimitPrice != nil && *req.LimitPrice > 0 {
+			allocationDollars = *req.LimitPrice * req.Qty
+		} else if oc.dataService != nil {
 			if quote, err := oc.dataService.GetLatestQuote(ctx, req.Symbol); err == nil {
 				price := quote.AskPrice
 				if price <= 0 {
@@ -156,9 +163,11 @@ func (oc *OrderController) Sell(ctx context.Context, req SellRequest) (*interfac
 	if req.TimeInForce == "" {
 		req.TimeInForce = "day"
 	}
+	// Attribution: explicit AgentSource overrides; else derive from the strategy
+	// tag the MCP forwards (agent_source is never sent in production).
 	agent := req.AgentSource
 	if agent == "" {
-		agent = services.AgentMain
+		agent = services.AgentForStrategy(req.Strategy)
 	}
 
 	// Trade guard check
@@ -474,6 +483,40 @@ func (oc *OrderController) HandleGetBars(c *gin.Context) {
 	})
 }
 
+// isOpeningOption reports whether an options order opens (vs closes) a position.
+// Caps + the daily-loss breaker apply only to opens; closes must never block.
+func isOpeningOption(intent, side string) bool {
+	switch intent {
+	case "buy_to_open", "sell_to_open":
+		return true
+	case "buy_to_close", "sell_to_close":
+		return false
+	default:
+		return side == "buy"
+	}
+}
+
+// optionsNotional returns the dollar outlay for an options order: per-contract
+// price x qty x 100. Uses the limit price when present, else a fetched quote
+// (mid, then ask, then last). Returns 0 when no price is obtainable — the guard
+// then fails closed if position caps are enabled.
+func optionsNotional(ctx context.Context, ts interfaces.TradingService, order *interfaces.OptionsOrder) float64 {
+	price := 0.0
+	if order.LimitPrice != nil && *order.LimitPrice > 0 {
+		price = *order.LimitPrice
+	} else if q, err := ts.GetOptionsQuote(ctx, order.Symbol); err == nil && q != nil {
+		switch {
+		case q.BidPrice > 0 && q.AskPrice > 0:
+			price = (q.BidPrice + q.AskPrice) / 2
+		case q.AskPrice > 0:
+			price = q.AskPrice
+		case q.LastPrice > 0:
+			price = q.LastPrice
+		}
+	}
+	return price * order.Qty * 100
+}
+
 // OptionsOrderRequest represents an options order request
 type OptionsOrderRequest struct {
 	Symbol        string   `json:"symbol" binding:"required"`
@@ -525,11 +568,40 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	agent := services.AgentForStrategy(req.Strategy)
+	opening := isOpeningOption(req.PositionIntent, req.Side)
+	if oc.guard != nil {
+		if opening && req.Side == "buy" {
+			notional := optionsNotional(ctx, oc.tradingService, order)
+			if err := oc.guard.CheckBuy(ctx, agent, order.Symbol, notional); err != nil {
+				oc.logger.WithError(err).Warn("Options buy blocked by trade guard")
+				c.JSON(422, gin.H{"error": err.Error()})
+				return
+			}
+		} else if !opening {
+			if err := oc.guard.CheckSell(ctx, agent, order.Symbol); err != nil {
+				oc.logger.WithError(err).Warn("Options close blocked by trade guard")
+				c.JSON(422, gin.H{"error": err.Error()})
+				return
+			}
+		}
+		// sell_to_open (short premium) is not size-capped in Phase 1 (out of scope);
+		// ownership is still recorded after a successful placement below.
+	}
+
 	result, err := oc.tradingService.PlaceOptionsOrder(ctx, order)
 	if err != nil {
 		oc.logger.WithError(err).Error("Failed to place options order")
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
+	}
+
+	if oc.guard != nil {
+		if opening {
+			oc.guard.RecordRawBuy(agent, order.Symbol)
+		} else {
+			oc.guard.RecordRawSell(agent, order.Symbol)
+		}
 	}
 
 	// Persist to DBOrder for audit trail. Without this, options orders never

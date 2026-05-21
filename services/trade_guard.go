@@ -16,6 +16,9 @@ const (
 	AgentMain    AgentSource = "main"
 	AgentPenny   AgentSource = "penny"
 	AgentHarvest AgentSource = "harvest"
+	AgentTrend   AgentSource = "trend"
+	AgentMeanRev AgentSource = "meanrev"
+	AgentDrift   AgentSource = "drift"
 )
 
 const agentTagPrefix = "agent:"
@@ -23,6 +26,28 @@ const agentTagPrefix = "agent:"
 // AgentTag returns the managed-position tag string for an agent.
 func AgentTag(agent AgentSource) string {
 	return agentTagPrefix + string(agent)
+}
+
+// AgentForStrategy maps a strategyId (the OPENPROPHET_STRATEGY tag every order
+// path forwards) to its guard AgentSource. This is the production attribution
+// channel: agent_source is never sent by the MCP/harness, so deriving from the
+// strategy tag is what makes per-agent caps and cross-agent overlap identify the
+// right agent. Unknown/empty → main (legacy default).
+func AgentForStrategy(strategyId string) AgentSource {
+	switch strategyId {
+	case "penny-momentum":
+		return AgentPenny
+	case "harvest":
+		return AgentHarvest
+	case "trend":
+		return AgentTrend
+	case "mean-rev-rsi2":
+		return AgentMeanRev
+	case "earnings-drift":
+		return AgentDrift
+	default:
+		return AgentMain
+	}
 }
 
 // TradeGuardConfig holds configurable limits for the guard.
@@ -53,6 +78,15 @@ type TradeGuardConfig struct {
 	// entry in SectorMaxExposurePct. Zero disables the fallback (those buckets
 	// are uncapped).
 	DefaultSectorMaxPct float64 `json:"default_sector_max_pct"`
+
+	// EnablePositionCaps flag-gates the per-position and deployed caps below.
+	EnablePositionCaps bool `json:"enable_position_caps"`
+	// MaxPositionPct caps a single new trade's notional as a fraction of
+	// portfolio value (0.12 = 12%). Zero disables.
+	MaxPositionPct float64 `json:"max_position_pct"`
+	// MaxDeployedPct caps whole-account deployment after the trade:
+	// (PortfolioValue - Cash + notional) / PortfolioValue. Zero disables.
+	MaxDeployedPct float64 `json:"max_deployed_pct"`
 }
 
 // SectorBucket categorizes a symbol's primary factor exposure for cross-agent
@@ -199,6 +233,9 @@ func NewTradeGuard(positions positionLister, ts interfaces.TradingService, cfg T
 			AgentMain:    {},
 			AgentPenny:   {},
 			AgentHarvest: {},
+			AgentTrend:   {},
+			AgentMeanRev: {},
+			AgentDrift:   {},
 		},
 		logger: logger,
 	}
@@ -215,7 +252,6 @@ func (g *TradeGuard) CheckBuy(ctx context.Context, agent AgentSource, symbol str
 	if agent == "" {
 		agent = AgentMain
 	}
-	opponent := g.opponentOf(agent)
 
 	// Lazily fetch account at most once per CheckBuy. Both the value and any
 	// fetch error are cached so each downstream helper can apply its own policy:
@@ -237,18 +273,25 @@ func (g *TradeGuard) CheckBuy(ctx context.Context, agent AgentSource, symbol str
 	}
 
 	// Daily-loss circuit breaker applies to BOTH agents.
-	dailyAcct, _ := getAcct()
-	if err := g.checkDailyLoss(dailyAcct); err != nil {
+	dailyAcct, dailyErr := getAcct()
+	if err := g.checkDailyLoss(dailyAcct, dailyErr); err != nil {
 		return err
 	}
 
-	if g.agentOwnsSymbol(opponent, symbol) {
-		return fmt.Errorf("guard: %s agent holds %s — %s agent cannot open a position in the same symbol", opponent, symbol, agent)
+	if owner := g.heldByAnyOtherAgent(agent, symbol); owner != "" {
+		return fmt.Errorf("guard: %s agent holds %s — %s agent cannot open a position in the same symbol", owner, symbol, agent)
 	}
 
 	if g.cfg.EnableSectorAggregation && allocationDollars > 0 {
 		sectorAcct, sectorErr := getAcct()
 		if err := g.checkSectorCap(sectorAcct, sectorErr, symbol, allocationDollars); err != nil {
+			return err
+		}
+	}
+
+	if g.cfg.EnablePositionCaps {
+		capAcct, capErr := getAcct()
+		if err := g.checkPositionCaps(capAcct, capErr, allocationDollars); err != nil {
 			return err
 		}
 	}
@@ -273,10 +316,9 @@ func (g *TradeGuard) CheckSell(_ context.Context, agent AgentSource, symbol stri
 	if agent == "" {
 		agent = AgentMain
 	}
-	opponent := g.opponentOf(agent)
 
-	if g.agentOwnsSymbol(opponent, symbol) {
-		return fmt.Errorf("guard: %s agent holds %s — %s agent cannot sell it", opponent, symbol, agent)
+	if owner := g.heldByAnyOtherAgent(agent, symbol); owner != "" {
+		return fmt.Errorf("guard: %s agent holds %s — %s agent cannot sell it", owner, symbol, agent)
 	}
 
 	return nil
@@ -298,6 +340,12 @@ func (g *TradeGuard) RecordRawBuy(agent AgentSource, symbol string) {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	// Lazy-init so a newly added AgentSource that isn't in the constructor map
+	// can't cause a nil-map-write panic (the broker order is already placed by
+	// the time RecordRawBuy runs — a panic here would orphan it).
+	if g.rawSymbols[agent] == nil {
+		g.rawSymbols[agent] = map[string]struct{}{}
+	}
 	g.rawSymbols[agent][symbol] = struct{}{}
 }
 
@@ -388,6 +436,21 @@ func (g *TradeGuard) sectorMaxByBucket(portfolioValue float64, exposure map[stri
 
 // --- internal helpers ---
 
+// heldByAnyOtherAgent returns the first agent != self that owns the symbol, or
+// "" if none. Replaces binary opponentOf so all six strategies are checked.
+// Exact-symbol-string match (OCC option symbols never collide with tickers).
+func (g *TradeGuard) heldByAnyOtherAgent(self AgentSource, symbol string) AgentSource {
+	for _, other := range []AgentSource{AgentMain, AgentPenny, AgentHarvest, AgentTrend, AgentMeanRev, AgentDrift} {
+		if other == self {
+			continue
+		}
+		if g.agentOwnsSymbol(other, symbol) {
+			return other
+		}
+	}
+	return ""
+}
+
 func (g *TradeGuard) agentOwnsSymbol(agent AgentSource, symbol string) bool {
 	owned := g.symbolsFor(agent)
 	_, found := owned[symbol]
@@ -414,12 +477,26 @@ func (g *TradeGuard) symbolsFor(agent AgentSource) map[string]struct{} {
 	return result
 }
 
-// checkDailyLoss returns an error if intraday equity is down beyond MaxDailyLossPct.
-// Disabled when MaxDailyLossPct <= 0, when acct is nil (no data available),
-// or when LastEquity/PortfolioValue is zero (fail-open to avoid bricking new accounts).
-// The caller is responsible for fetching the account; passing nil makes this a no-op.
-func (g *TradeGuard) checkDailyLoss(acct *interfaces.Account) error {
-	if g.cfg.MaxDailyLossPct <= 0 || acct == nil {
+// checkDailyLoss blocks new buys when intraday equity is down beyond
+// MaxDailyLossPct. Fail policy:
+//   - disabled when MaxDailyLossPct <= 0.
+//   - acctErr != nil → fail CLOSED (cannot read live equity; don't open new risk
+//     while blind to P&L). Per-CheckBuy, no latch — self-recovers when the API
+//     recovers. Mirrors checkPennyCapCap.
+//   - acct == nil with no error (nil trading service / tests) → fail open.
+//   - LastEquity/PortfolioValue <= 0 (new account) → fail open.
+func (g *TradeGuard) checkDailyLoss(acct *interfaces.Account, acctErr error) error {
+	if g.cfg.MaxDailyLossPct <= 0 {
+		return nil
+	}
+	if acctErr != nil {
+		g.logger.WithFields(logrus.Fields{
+			"daily_loss_check_unavailable": true,
+			"operator_review_required":     true,
+		}).Warn("daily-loss breaker: account fetch failed — blocking new buys (fail closed)")
+		return fmt.Errorf("guard: daily loss breaker — account unavailable, blocking new entries: %w", acctErr)
+	}
+	if acct == nil {
 		return nil
 	}
 	if acct.LastEquity <= 0 || acct.PortfolioValue <= 0 {
@@ -460,6 +537,39 @@ func (g *TradeGuard) checkPennyCapCap(acct *interfaces.Account, acctErr error, a
 			exposure, additionalDollars,
 			g.cfg.PennyMaxCapitalPct*100, maxDollars, acct.PortfolioValue,
 		)
+	}
+	return nil
+}
+
+// checkPositionCaps enforces the per-position and projected-deployed caps.
+// Fail policy: acctErr → fail closed; no account context (acct==nil /
+// PortfolioValue<=0) → fail open; caps enabled but notional<=0 (size
+// indeterminate, e.g. an unpriceable market options order) → fail closed.
+func (g *TradeGuard) checkPositionCaps(acct *interfaces.Account, acctErr error, notional float64) error {
+	if acctErr != nil {
+		return fmt.Errorf("guard: failed to fetch account for position cap check: %w", acctErr)
+	}
+	if acct == nil || acct.PortfolioValue <= 0 {
+		return nil
+	}
+	if notional <= 0 {
+		g.logger.WithField("guard_notional_indeterminate", true).
+			Warn("position caps enabled but order notional indeterminate — blocking (fail closed)")
+		return fmt.Errorf("guard: position caps enabled but order notional could not be determined")
+	}
+	if g.cfg.MaxPositionPct > 0 {
+		maxPos := acct.PortfolioValue * g.cfg.MaxPositionPct
+		if notional > maxPos {
+			return fmt.Errorf("guard: position cap — $%.2f exceeds %.0f%% per-position cap ($%.2f of $%.2f)",
+				notional, g.cfg.MaxPositionPct*100, maxPos, acct.PortfolioValue)
+		}
+	}
+	if g.cfg.MaxDeployedPct > 0 {
+		projected := (acct.PortfolioValue - acct.Cash + notional) / acct.PortfolioValue
+		if projected > g.cfg.MaxDeployedPct {
+			return fmt.Errorf("guard: deployed cap — projected %.1f%% exceeds %.0f%% deployed cap ($%.2f cash of $%.2f)",
+				projected*100, g.cfg.MaxDeployedPct*100, acct.Cash, acct.PortfolioValue)
+		}
 	}
 	return nil
 }
@@ -560,13 +670,6 @@ func (g *TradeGuard) currentPennyExposure() float64 {
 		}
 	}
 	return total
-}
-
-func (g *TradeGuard) opponentOf(agent AgentSource) AgentSource {
-	if agent == AgentMain {
-		return AgentPenny
-	}
-	return AgentMain
 }
 
 func isActivePosition(p *ManagedPosition) bool {

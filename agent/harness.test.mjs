@@ -1,6 +1,32 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AgentHarness } from './harness.js';
+import { secondsToNextPhaseBoundary } from './harness.js';
+
+// Boundaries are phase starts in ET minutes: 240(04:00) 570(09:30) 630(10:30) 900(15:00) 960(16:00).
+// America/New_York is UTC-4 in May (EDT): 13:00Z = 09:00 ET. Use mid-May 2026 (no DST edge).
+
+test('weekday before a later boundary returns seconds to that boundary', () => {
+  // Thu 2026-05-21 13:00Z = 09:00 ET (540 min). Next boundary 09:30 (570) = 30 min.
+  assert.equal(secondsToNextPhaseBoundary(new Date('2026-05-21T13:00:00Z')), 30 * 60);
+});
+
+test('weekday after the last boundary looks ahead to next day 04:00', () => {
+  // Thu 2026-05-21 21:00Z = 17:00 ET, past the 16:00 last boundary.
+  // Next boundary = Fri 04:00 ET: 7h to midnight + 4h = 11h.
+  assert.equal(secondsToNextPhaseBoundary(new Date('2026-05-21T21:00:00Z')), 11 * 3600);
+});
+
+test('weekend looks ahead to Monday 04:00 (never returns null)', () => {
+  // Sun 2026-05-24 23:00Z = 19:00 ET Sunday. Next boundary = Mon 04:00 ET = 9h.
+  assert.equal(secondsToNextPhaseBoundary(new Date('2026-05-24T23:00:00Z')), 9 * 3600);
+});
+
+test('exactly on a boundary skips it and returns seconds to the next one', () => {
+  // Thu 2026-05-21 08:00Z = 04:00 ET exactly. The > 0 guard skips 04:00 and
+  // returns the seconds to 09:30 = 5.5h.
+  assert.equal(secondsToNextPhaseBoundary(new Date('2026-05-21T08:00:00Z')), 5.5 * 3600);
+});
 
 // Build a harness with an injectable current-phase and per-phase defaults so we
 // can exercise _getHeartbeatSeconds() in isolation (the constructor has no side

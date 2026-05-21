@@ -29,6 +29,7 @@ func (s *stubLister) ListManagedPositions(_ string) []*ManagedPosition {
 type stubTrading struct {
 	portfolio    float64
 	lastEquity   float64
+	cash         float64
 	getAcctCalls int
 	getAcctErr   error
 }
@@ -38,7 +39,7 @@ func (s *stubTrading) GetAccount(_ context.Context) (*interfaces.Account, error)
 	if s.getAcctErr != nil {
 		return nil, s.getAcctErr
 	}
-	return &interfaces.Account{PortfolioValue: s.portfolio, LastEquity: s.lastEquity}, nil
+	return &interfaces.Account{PortfolioValue: s.portfolio, LastEquity: s.lastEquity, Cash: s.cash}, nil
 }
 func (s *stubTrading) PlaceOrder(_ context.Context, _ *interfaces.Order) (*interfaces.OrderResult, error) {
 	return nil, nil
@@ -503,14 +504,121 @@ func TestGuard_Status_ReportsSectorExposure(t *testing.T) {
 	}
 }
 
-func TestGuard_DailyLossFailsOpenOnFetchError(t *testing.T) {
-	// Daily-loss check is fail-open on fetch errors (transient API hiccup
-	// shouldn't block all trading). Verify a fetch error doesn't block a main buy.
+func TestGuard_DailyLoss_FailsClosedOnFetchError(t *testing.T) {
 	cfg := defaultConfig()
-	cfg.MaxDailyLossPct = 5.0
-	stub := &stubTrading{getAcctErr: errors.New("alpaca timeout")}
-	g := NewTradeGuard(&stubLister{}, stub, cfg)
+	cfg.MaxDailyLossPct = 5
+	g := NewTradeGuard(&stubLister{}, &stubTrading{getAcctErr: errors.New("alpaca 503")}, cfg)
+	if err := g.CheckBuy(context.Background(), AgentMain, "AAPL", 0); err == nil {
+		t.Fatal("expected buy blocked when account fetch errors (fail closed)")
+	}
+}
+
+func TestGuard_DailyLoss_NilTradingServiceAllows(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.MaxDailyLossPct = 5
+	g := NewTradeGuard(&stubLister{}, nil, cfg) // no account context
 	if err := g.CheckBuy(context.Background(), AgentMain, "AAPL", 0); err != nil {
-		t.Fatalf("daily-loss check should fail-open on fetch error, got: %v", err)
+		t.Fatalf("nil trading service should fail open: %v", err)
+	}
+}
+
+func TestGuard_DailyLoss_RecoversAfterTransientError(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.MaxDailyLossPct = 5
+	stub := &stubTrading{portfolio: 100000, lastEquity: 100000, getAcctErr: errors.New("503")}
+	g := NewTradeGuard(&stubLister{}, stub, cfg)
+	if err := g.CheckBuy(context.Background(), AgentMain, "AAPL", 0); err == nil {
+		t.Fatal("first call should block on error")
+	}
+	stub.getAcctErr = nil // API recovers
+	if err := g.CheckBuy(context.Background(), AgentMain, "AAPL", 0); err != nil {
+		t.Fatalf("second call should allow once API recovers (no latch): %v", err)
+	}
+}
+
+func TestGuard_RecordRaw_NewAgentsDoNotPanic(t *testing.T) {
+	// The branch added AgentTrend/AgentMeanRev/AgentDrift and routes raw orders
+	// for them (meanrev/drift are live stock agents). NewTradeGuard must
+	// initialize rawSymbols for every agent or RecordRawBuy panics on a nil-map
+	// write — a phantom-position hazard since the broker order is already placed.
+	g := NewTradeGuard(&stubLister{}, &stubTrading{portfolio: 100000}, defaultConfig())
+	g.RecordRawBuy(AgentTrend, "TLT")
+	g.RecordRawBuy(AgentMeanRev, "GLD")
+	g.RecordRawBuy(AgentDrift, "USO")
+	g.RecordRawSell(AgentMeanRev, "GLD") // must not panic either
+
+	// Recorded ownership must also feed the N-way overlap check.
+	if err := g.CheckBuy(context.Background(), AgentMain, "TLT", 0); err == nil {
+		t.Fatal("expected trend's raw TLT to block a main buy")
+	}
+}
+
+func TestGuard_NWayOverlap_BlocksAnyOtherAgent(t *testing.T) {
+	// A trend-tagged position on TLT must block a main buy of TLT — the old
+	// binary opponentOf (main<->penny only) would have allowed it.
+	lister := &stubLister{positions: []*ManagedPosition{
+		managedPos("TLT", AgentTrend, "ACTIVE", 1000),
+	}}
+	g := NewTradeGuard(lister, &stubTrading{portfolio: 100000}, defaultConfig())
+	if err := g.CheckBuy(context.Background(), AgentMain, "TLT", 0); err == nil {
+		t.Fatal("expected main buy of TLT blocked by trend's holding")
+	}
+	if err := g.CheckBuy(context.Background(), AgentMain, "SPY", 0); err != nil {
+		t.Fatalf("unrelated symbol should pass: %v", err)
+	}
+}
+
+func TestAgentForStrategy(t *testing.T) {
+	cases := map[string]AgentSource{
+		"v2-options": AgentMain, "penny-momentum": AgentPenny, "harvest": AgentHarvest,
+		"trend": AgentTrend, "mean-rev-rsi2": AgentMeanRev, "earnings-drift": AgentDrift,
+		"": AgentMain, "unknown-xyz": AgentMain,
+	}
+	for strat, want := range cases {
+		if got := AgentForStrategy(strat); got != want {
+			t.Errorf("AgentForStrategy(%q) = %q, want %q", strat, got, want)
+		}
+	}
+}
+
+func capCfg() TradeGuardConfig {
+	c := defaultConfig()
+	c.EnablePositionCaps = true
+	c.MaxPositionPct = 0.12
+	c.MaxDeployedPct = 0.50
+	return c
+}
+
+func TestGuard_PositionCap_BlocksOversizedTrade(t *testing.T) {
+	g := NewTradeGuard(&stubLister{}, &stubTrading{portfolio: 100000, cash: 100000}, capCfg())
+	if err := g.CheckBuy(context.Background(), AgentMain, "SPY", 13000); err == nil {
+		t.Fatal("expected per-position cap to block $13k on $100k portfolio")
+	}
+	if err := g.CheckBuy(context.Background(), AgentMain, "SPY", 11000); err != nil {
+		t.Fatalf("$11k under 12%% cap should pass: %v", err)
+	}
+}
+
+func TestGuard_DeployedCap_ProjectsPostTrade(t *testing.T) {
+	// 49% deployed (cash 51k of 100k); a $5k order projects to 54% > 50%.
+	g := NewTradeGuard(&stubLister{}, &stubTrading{portfolio: 100000, cash: 51000}, capCfg())
+	if err := g.CheckBuy(context.Background(), AgentMain, "SPY", 5000); err == nil {
+		t.Fatal("expected projected-deployed cap to block (49%+5% > 50%)")
+	}
+}
+
+func TestGuard_PositionCaps_FailClosedOnIndeterminateNotional(t *testing.T) {
+	g := NewTradeGuard(&stubLister{}, &stubTrading{portfolio: 100000, cash: 100000}, capCfg())
+	if err := g.CheckBuy(context.Background(), AgentMain, "SPY", 0); err == nil {
+		t.Fatal("expected fail-closed when caps enabled and notional indeterminate")
+	}
+}
+
+func TestGuard_PositionCaps_DisabledIsNoop(t *testing.T) {
+	cfg := capCfg()
+	cfg.EnablePositionCaps = false
+	g := NewTradeGuard(&stubLister{}, &stubTrading{portfolio: 100000, cash: 100000}, cfg)
+	if err := g.CheckBuy(context.Background(), AgentMain, "SPY", 0); err != nil {
+		t.Fatalf("caps disabled → notional 0 must not block: %v", err)
 	}
 }

@@ -97,3 +97,19 @@ func TestLoad_RegimeGate_HonorsEnvOverrides(t *testing.T) {
 			"/tmp/custom_regime.json", AppConfig.RegimeReportPath)
 	}
 }
+
+func TestLoad_PositionCapDefaults(t *testing.T) {
+	t.Setenv("OPERATOR_EMAIL", "test@example.com")
+	if err := Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !AppConfig.EnablePositionCaps {
+		t.Error("EnablePositionCaps should default true")
+	}
+	if AppConfig.MaxPositionPct != 0.12 {
+		t.Errorf("MaxPositionPct = %v, want 0.12", AppConfig.MaxPositionPct)
+	}
+	if AppConfig.MaxDeployedPct != 0.50 {
+		t.Errorf("MaxDeployedPct = %v, want 0.50", AppConfig.MaxDeployedPct)
+	}
+}

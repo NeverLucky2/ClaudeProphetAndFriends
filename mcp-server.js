@@ -20,6 +20,7 @@ import {
   DAILY_BRIEF_FILENAME,
   parseBriefStaleness,
 } from './agent/daily-brief-freshness.js';
+import { computeOrderValue } from './mcp-order-value.js';
 
 // Configuration
 const TRADING_BOT_URL = process.env.TRADING_BOT_URL || 'http://localhost:4534';
@@ -1578,11 +1579,9 @@ async function enforcePermissions(toolName, args) {
     if (perms.requireConfirmation) {
       throw new Error(`Order requires operator confirmation (requireConfirmation is enabled). Tell the operator what you want to do and wait for them to disable this setting or approve via the dashboard.`);
     }
-    // Max order value
+    // Max order value (options single-leg orders are ×100 for the contract multiplier)
     if (perms.maxOrderValue > 0) {
-      const orderValue = (args.limit_price || args.entry_price || 0) * (args.quantity || args.qty || 0);
-      const allocValue = args.allocation_dollars || 0;
-      const checkValue = allocValue || orderValue;
+      const checkValue = computeOrderValue(toolName, args);
       if (checkValue > perms.maxOrderValue) {
         throw new Error(`Order value $${checkValue.toFixed(2)} exceeds max allowed $${perms.maxOrderValue}. Reduce size or change permissions.`);
       }
