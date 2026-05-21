@@ -199,6 +199,9 @@ Your ONLY job is to follow your trading rules exactly. Do not improvise. Do not 
 
 Read your Strategy Rules section carefully — it contains your complete heartbeat procedure. Follow it step by step on every heartbeat.`,
       strategyId: 'harvest',
+      // Mechanical iron-condor seller — defined-risk, no discretionary reaction
+      // to intraday news. Exempt from emergency-alert wakes (would just burn a beat).
+      respondsToEmergencyWakes: false,
       model: 'anthropic/claude-sonnet-4-6',
       heartbeatOverrides: {
         pre_market: 3600,
@@ -278,6 +281,9 @@ Use get_mean_reversion_candidates (no args) to read the pre-filtered, RSI(2)-sor
 
 For existing positions, use get_mean_reversion_signal({ symbol }) to check the exit conditions (RSI(2) > 70, last_close > SMA(5)).`,
       strategyId: 'mean-rev-rsi2',
+      // Mechanical RSI(2) mean-reversion — does not adjust on news or sector moves.
+      // Exempt from emergency-alert wakes.
+      respondsToEmergencyWakes: false,
       model: 'anthropic/claude-sonnet-4-6',
       heartbeatOverrides: {
         pre_market: 86400,
@@ -352,6 +358,9 @@ Key tools: get_datetime, get_account, get_positions, get_quote, get_trend_signal
 
 Use get_trend_signal({ symbol }) to read the daily-bar Donchian-100 high, Donchian-50 low, SMA-200, ATR-20 (Wilder), and last_close for any ticker in your universe (TLT, GLD, USO, DBC, UUP, EEM). Do not compute these values yourself — the endpoint is the single source of truth for signal computation.`,
       strategyId: 'trend',
+      // Price-only, daily-bar trend follower — no provision to act on intraday
+      // news. Exempt from emergency-alert wakes.
+      respondsToEmergencyWakes: false,
       model: 'anthropic/claude-sonnet-4-6',
       heartbeatOverrides: {
         pre_market: 86400,
@@ -735,7 +744,20 @@ async function migrateLegacyConfig(config, rawSchemaVersion = 0) {
     console.log(`[migration] v4→v5: deduped ${beforeCount} accounts → ${survivors.length}, rewrote ${pointerRewrites} sandbox pointers, extracted ${extracted} credential sets, backup at ${backupPath}`);
   }
 
-  config.schemaVersion = 5;  // was 4
+  // v5 → v6: exempt mechanical / price-only agents from emergency-alert wakes.
+  // These strategies have no provision to act on intraday news, so an emergency
+  // heartbeat just burns a full LLM beat to conclude "not relevant." Sets the
+  // new respondsToEmergencyWakes flag to false, leaving any user-set value alone.
+  if (rawSchemaVersion < 6) {
+    const EMERGENCY_EXEMPT = new Set(['trend-prophet', 'mean-rev', 'harvest']);
+    for (const agent of config.agents || []) {
+      if (EMERGENCY_EXEMPT.has(agent.id) && agent.respondsToEmergencyWakes === undefined) {
+        agent.respondsToEmergencyWakes = false;
+      }
+    }
+  }
+
+  config.schemaVersion = 6;  // was 5
   if (!config.sandboxes) config.sandboxes = {};
 
   // Only auto-create sbx_<accountId> sandboxes during the v4→v5 migration pass.
