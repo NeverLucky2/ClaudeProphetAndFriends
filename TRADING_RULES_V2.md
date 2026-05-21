@@ -351,7 +351,7 @@ Agents are **advisory, not required**. Use them when you want:
 
 **Rule:** Respect the TradeGuard sector-bucket cap (cross-agent).
 
-The guard sums dollar exposure to each sector bucket (TECH, INDEX_BETA, FINANCIALS, ENERGY, HEALTHCARE, etc.) **across all four agents' positions** and rejects a buy that would push any bucket above its per-bucket cap (TECH 20%, INDEX_BETA 25%, others 15% default).
+The guard sums dollar exposure to each sector bucket (TECH, INDEX_BETA, FINANCIALS, ENERGY, HEALTHCARE, etc.) **across all agents' positions** and rejects a buy that would push any bucket above its per-bucket cap (TECH 20%, INDEX_BETA 25%, others 15% default).
 
 If you see `guard: sector cap — {BUCKET} bucket would reach $X ...`:
 - The buy was blocked because Prophet + PennyProphet + Harvest + TrendProphet combined hold too much in that bucket already. This is intentional — it is *not* a transient API error.

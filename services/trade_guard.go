@@ -233,6 +233,9 @@ func NewTradeGuard(positions positionLister, ts interfaces.TradingService, cfg T
 			AgentMain:    {},
 			AgentPenny:   {},
 			AgentHarvest: {},
+			AgentTrend:   {},
+			AgentMeanRev: {},
+			AgentDrift:   {},
 		},
 		logger: logger,
 	}
@@ -337,6 +340,12 @@ func (g *TradeGuard) RecordRawBuy(agent AgentSource, symbol string) {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	// Lazy-init so a newly added AgentSource that isn't in the constructor map
+	// can't cause a nil-map-write panic (the broker order is already placed by
+	// the time RecordRawBuy runs — a panic here would orphan it).
+	if g.rawSymbols[agent] == nil {
+		g.rawSymbols[agent] = map[string]struct{}{}
+	}
 	g.rawSymbols[agent][symbol] = struct{}{}
 }
 

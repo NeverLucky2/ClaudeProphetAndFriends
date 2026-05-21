@@ -536,6 +536,23 @@ func TestGuard_DailyLoss_RecoversAfterTransientError(t *testing.T) {
 	}
 }
 
+func TestGuard_RecordRaw_NewAgentsDoNotPanic(t *testing.T) {
+	// The branch added AgentTrend/AgentMeanRev/AgentDrift and routes raw orders
+	// for them (meanrev/drift are live stock agents). NewTradeGuard must
+	// initialize rawSymbols for every agent or RecordRawBuy panics on a nil-map
+	// write — a phantom-position hazard since the broker order is already placed.
+	g := NewTradeGuard(&stubLister{}, &stubTrading{portfolio: 100000}, defaultConfig())
+	g.RecordRawBuy(AgentTrend, "TLT")
+	g.RecordRawBuy(AgentMeanRev, "GLD")
+	g.RecordRawBuy(AgentDrift, "USO")
+	g.RecordRawSell(AgentMeanRev, "GLD") // must not panic either
+
+	// Recorded ownership must also feed the N-way overlap check.
+	if err := g.CheckBuy(context.Background(), AgentMain, "TLT", 0); err == nil {
+		t.Fatal("expected trend's raw TLT to block a main buy")
+	}
+}
+
 func TestGuard_NWayOverlap_BlocksAnyOtherAgent(t *testing.T) {
 	// A trend-tagged position on TLT must block a main buy of TLT — the old
 	// binary opponentOf (main<->penny only) would have allowed it.
