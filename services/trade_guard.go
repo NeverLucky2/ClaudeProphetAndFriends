@@ -16,6 +16,9 @@ const (
 	AgentMain    AgentSource = "main"
 	AgentPenny   AgentSource = "penny"
 	AgentHarvest AgentSource = "harvest"
+	AgentTrend   AgentSource = "trend"
+	AgentMeanRev AgentSource = "meanrev"
+	AgentDrift   AgentSource = "drift"
 )
 
 const agentTagPrefix = "agent:"
@@ -23,6 +26,28 @@ const agentTagPrefix = "agent:"
 // AgentTag returns the managed-position tag string for an agent.
 func AgentTag(agent AgentSource) string {
 	return agentTagPrefix + string(agent)
+}
+
+// AgentForStrategy maps a strategyId (the OPENPROPHET_STRATEGY tag every order
+// path forwards) to its guard AgentSource. This is the production attribution
+// channel: agent_source is never sent by the MCP/harness, so deriving from the
+// strategy tag is what makes per-agent caps and cross-agent overlap identify the
+// right agent. Unknown/empty → main (legacy default).
+func AgentForStrategy(strategyId string) AgentSource {
+	switch strategyId {
+	case "penny-momentum":
+		return AgentPenny
+	case "harvest":
+		return AgentHarvest
+	case "trend":
+		return AgentTrend
+	case "mean-rev-rsi2":
+		return AgentMeanRev
+	case "earnings-drift":
+		return AgentDrift
+	default:
+		return AgentMain
+	}
 }
 
 // TradeGuardConfig holds configurable limits for the guard.

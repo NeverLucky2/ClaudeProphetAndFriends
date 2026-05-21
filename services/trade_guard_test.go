@@ -514,3 +514,16 @@ func TestGuard_DailyLossFailsOpenOnFetchError(t *testing.T) {
 		t.Fatalf("daily-loss check should fail-open on fetch error, got: %v", err)
 	}
 }
+
+func TestAgentForStrategy(t *testing.T) {
+	cases := map[string]AgentSource{
+		"v2-options": AgentMain, "penny-momentum": AgentPenny, "harvest": AgentHarvest,
+		"trend": AgentTrend, "mean-rev-rsi2": AgentMeanRev, "earnings-drift": AgentDrift,
+		"": AgentMain, "unknown-xyz": AgentMain,
+	}
+	for strat, want := range cases {
+		if got := AgentForStrategy(strat); got != want {
+			t.Errorf("AgentForStrategy(%q) = %q, want %q", strat, got, want)
+		}
+	}
+}
