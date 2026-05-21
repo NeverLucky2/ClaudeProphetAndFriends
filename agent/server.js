@@ -942,10 +942,12 @@ app.put('/api/sandboxes/:id/strategy-rules', async (req, res) => {
 
 app.post('/api/agent/heartbeat', (req, res) => {
   const { seconds, reason, sandboxId } = req.body;
-  if (!seconds || seconds < 30 || seconds > 3600) return res.status(400).json({ error: 'seconds must be 30-3600' });
+  if (!seconds || seconds < 30 || seconds > 28800) return res.status(400).json({ error: 'seconds must be 30-28800' });
   const targetHarness = getHarnessForSandbox(sandboxId);
   if (!targetHarness) return res.status(404).json({ error: 'Sandbox harness not found' });
-  targetHarness.state.heartbeatOverride = { seconds, reason: reason || 'Manual override', oneTime: false };
+  // Route through setHeartbeatOverride so the override is tagged with the phase
+  // it was set in and auto-expires at the next phase boundary.
+  targetHarness.setHeartbeatOverride(seconds, reason);
   targetHarness.state.emit('heartbeat_change', { seconds, reason: reason || 'Manual override from UI', sandboxId: sandboxId || targetHarness.sandboxId });
   res.json({ ok: true, seconds });
 });

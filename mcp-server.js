@@ -1108,11 +1108,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'set_heartbeat',
-        description: 'Override the agent heartbeat interval (clamped 30-3600s). Pick the longest value consistent with how soon you actually need to look again. Suggested anchors: 30-60s during volatile markets or active scalping, 300-600s for routine monitoring, 1200-1800s when only holding multi-day swing positions with no near-term stops or catalysts, up to 3600s when fully idle. The harness automatically wakes you at the next phase boundary (market_open, midday, market_close) regardless of this setting, so long intervals are safe within a single phase.',
+        description: 'Override the agent heartbeat interval for the CURRENT market phase (clamped 30-28800s, i.e. 30s to 8h). Pick the longest value consistent with how soon you actually need to look again. Suggested anchors: 30-60s during volatile markets or active scalping, 300-600s for routine monitoring, 1200-1800s when only holding multi-day swing positions with no near-term stops or catalysts, and up to 28800s (8h) when fully idle overnight or on weekends. The harness automatically wakes you at the next phase boundary (pre_market, market_open, midday, market_close, after_hours) regardless of this setting, AND the override auto-expires at that boundary so a long idle interval can never bleed into an active phase — long intervals are always safe. Note: the closed/overnight phase default is already 28800s (8h), so you only need this tool to go SHORTER than the phase default, or to extend an unusually quiet active phase.',
         inputSchema: {
           type: 'object',
           properties: {
-            seconds: { type: 'number', description: 'New heartbeat interval in seconds (30-3600)' },
+            seconds: { type: 'number', description: 'New heartbeat interval in seconds (30-28800)' },
             reason: { type: 'string', description: 'Reason for the override (logged to terminal)' },
           },
           required: ['seconds'],
@@ -2612,7 +2612,7 @@ Worst Trade: ${stats.worst_result_pct.toFixed(1)}% ($${stats.worst_result_dollar
       }
 
       case 'set_heartbeat': {
-        const seconds = Math.min(Math.max(args.seconds, 30), 3600);
+        const seconds = Math.min(Math.max(args.seconds, 30), 28800);
         await agentAxios.post(`${AGENT_URL}/api/agent/heartbeat`, {
           seconds,
           sandboxId: OPENPROPHET_SANDBOX_ID,
