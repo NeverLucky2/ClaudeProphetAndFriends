@@ -41,6 +41,39 @@ export function getCurrentPhase() {
   return 'closed';
 }
 
+// secondsToNextPhaseBoundary returns the seconds from `now` until the next
+// phase-start boundary, looking ahead across weekends to the next trading day's
+// first boundary (04:00 ET = 240 min) when none remain today. Always positive
+// on/after a trading week — never null — so _scheduleNext can snap the agent
+// awake at the next session's open. Mirrors the 8-day ET lookahead in
+// _getSecondsToNextScheduledBeat. Pure (takes `now`) for testability, like
+// outOfTrendWindow/isClosedPhase in preflight.js.
+export function secondsToNextPhaseBoundary(now) {
+  const dayName = now.toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'long' });
+  const dayMap = { Monday: 1, Tuesday: 2, Wednesday: 3, Thursday: 4, Friday: 5, Saturday: 6, Sunday: 7 };
+  const nowDow = dayMap[dayName] || 1;
+  const etStr = now.toLocaleTimeString('en-US', {
+    timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  });
+  const [h, m, s] = etStr.split(':').map(Number);
+  const nowSecs = h * 3600 + m * 60 + s;
+
+  const boundaries = Object.values(PHASE_DEFAULTS)
+    .filter(cfg => cfg.range)
+    .map(cfg => cfg.range[0] * 60)
+    .sort((a, b) => a - b);
+
+  for (let dayOffset = 0; dayOffset < 8; dayOffset++) {
+    const dow = ((nowDow - 1 + dayOffset) % 7) + 1; // 1=Mon..7=Sun
+    if (dow === 6 || dow === 7) continue;            // skip weekends — no boundaries
+    for (const bSecs of boundaries) {
+      const offset = dayOffset * 86400 + bSecs - nowSecs;
+      if (offset > 0) return offset;
+    }
+  }
+  return null; // unreachable within an 8-day window
+}
+
 // buildGuardrailBlock formats permission/limit lines for inclusion in the
 // system prompt. Returns an empty string when there are no guardrails to
 // surface. Pulled out of _beat() so the block can live in the system prompt
@@ -637,28 +670,12 @@ ${userBlock}`;
   }
 
   _getSecondsToNextPhaseBoundary() {
-    const now = new Date();
-    const weekday = now.getDay() >= 1 && now.getDay() <= 5;
-    if (!weekday) return null;
-    const etStr = now.toLocaleTimeString('en-US', {
-      timeZone: 'America/New_York',
-      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
-    });
-    const [h, m, s] = etStr.split(':').map(Number);
-    const nowSecs = (h * 60 + m) * 60 + s;
-    const boundaries = Object.values(PHASE_DEFAULTS)
-      .filter(cfg => cfg.range)
-      .map(cfg => cfg.range[0] * 60)
-      .sort((a, b) => a - b);
-    for (const bSecs of boundaries) {
-      if (bSecs > nowSecs) return bSecs - nowSecs;
-    }
-    return null;
+    return secondsToNextPhaseBoundary(new Date());
   }
 
   // Returns ET wall-clock weekday (1=Mon..7=Sun) and seconds-since-midnight ET.
-  // Used by scheduledBeats helpers; differs from _getSecondsToNextPhaseBoundary
-  // which uses local-timezone weekday (kept as-is to avoid changing existing behavior).
+  // Used by scheduledBeats helpers. secondsToNextPhaseBoundary uses the same
+  // ET-weekday detection (this helper predates it; kept for the scheduledBeats path).
   _getETNow() {
     const now = new Date();
     const dayName = now.toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'long' });
