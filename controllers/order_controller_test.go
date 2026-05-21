@@ -307,3 +307,45 @@ func TestPlaceOptionsOrder_CloseNotBlocked(t *testing.T) {
 	}
 }
 
+func TestPlaceOptionsOrder_FullPath_GatedAndAttributedToMain(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	// Gap #1: with caps on, an $18k buy is gated (not placed) — proves options
+	// now reach the guard.
+	rec := &recordingTradingService{portfolio: 100000, cash: 100000}
+	guard := services.NewTradeGuard(&stubGuardLister{}, rec, services.TradeGuardConfig{
+		EnablePositionCaps: true, MaxPositionPct: 0.12, MaxDeployedPct: 0.50,
+	})
+	oc := NewOrderController(rec, nil, noopStorage{})
+	oc.SetGuard(guard)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	big := `{"symbol":"SPY260116C00500000","underlying":"SPY","qty":30,"side":"buy","position_intent":"buy_to_open","type":"limit","limit_price":6,"strategy":"v2-options"}`
+	c.Request = httptest.NewRequest("POST", "/options/order", bytes.NewBufferString(big))
+	c.Request.Header.Set("Content-Type", "application/json")
+	oc.PlaceOptionsOrder(c)
+	if rec.optionsOrdersPlaced != 0 {
+		t.Fatalf("gap #1: options order should be gated, placed=%d", rec.optionsOrdersPlaced)
+	}
+
+	// Gap #2: a small buy (caps off) attributes to AgentMain via strategy tag.
+	rec2 := &recordingTradingService{portfolio: 100000, cash: 100000}
+	guard2 := services.NewTradeGuard(&stubGuardLister{}, rec2, services.TradeGuardConfig{})
+	oc2 := NewOrderController(rec2, nil, noopStorage{})
+	oc2.SetGuard(guard2)
+	c2, _ := gin.CreateTestContext(httptest.NewRecorder())
+	small := `{"symbol":"SPY260116C00500000","underlying":"SPY","qty":1,"side":"buy","position_intent":"buy_to_open","type":"limit","limit_price":1,"strategy":"v2-options"}`
+	c2.Request = httptest.NewRequest("POST", "/options/order", bytes.NewBufferString(small))
+	c2.Request.Header.Set("Content-Type", "application/json")
+	oc2.PlaceOptionsOrder(c2)
+	st := guard2.Status(context.Background())
+	found := false
+	for _, s := range st.MainSymbols {
+		if s == "SPY260116C00500000" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("gap #2: options buy with strategy=v2-options must attribute to AgentMain")
+	}
+}
+
