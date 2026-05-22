@@ -117,6 +117,13 @@ export function positionCountFromResponse(data) {
 // above the composite-score threshold AND no penny-tagged positions to manage
 // AND no open broker orders pending fill.
 //
+// Closed-phase short-circuit (mirrors prophetPreflight): during the overnight
+// 8pm-4am ET window and full weekends the broker is shut — entry candidates
+// can't be acted on and open orders can't fill (penny place_buy_order defaults
+// to day orders, which Alpaca auto-cancels at the close). Only open positions
+// warrant a wake there. The 4am ET phase-boundary snap (harness.js) wakes the
+// agent at pre-market to re-check any still-open orders, so nothing is missed.
+//
 // Positions are filtered by strategy=penny-momentum so that other agents
 // sharing the same paper account (Prophet, Trend, Harvest) do not keep
 // PennyProphet awake on their positions. Attribution is by symbol-of-most-
@@ -134,6 +141,22 @@ export function positionCountFromResponse(data) {
 // but if it becomes a problem, add ?strategy filtering to HandleGetOrders too.
 async function pennyPreflight(runtime, agentConfig) {
   const { goAxios } = runtime;
+
+  // Closed phase: nothing fills and no entries are possible, so open orders and
+  // entry candidates are not reasons to wake. Only open positions are. Matches
+  // prophetPreflight's closed-phase branch exactly.
+  const phase = isClosedPhase(new Date());
+  if (phase.closed) {
+    const positionsResp = await goAxios.get('/api/v1/positions?strategy=penny-momentum');
+    const positionCount = positionCountFromResponse(positionsResp.data);
+    if (positionCount < 0) {
+      return { skip: false, reason: 'positions response shape unexpected' };
+    }
+    if (positionCount === 0) {
+      return { skip: true, reason: `closed phase (${phase.reason}), no penny positions` };
+    }
+    return { skip: false, reason: `${positionCount} open position(s) to evaluate (closed phase)` };
+  }
 
   const [candidatesResp, positionsResp, ordersResp] = await Promise.all([
     goAxios.get('/api/v1/penny/candidates?min_score=60'),
