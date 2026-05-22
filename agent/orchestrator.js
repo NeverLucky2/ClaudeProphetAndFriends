@@ -7,6 +7,7 @@ import { spawn, execSync } from 'child_process';
 import axios from 'axios';
 
 import { AgentHarness } from './harness.js';
+import { candidateWarmerFlags } from './candidate-warmer-flags.js';
 import {
   getSandbox,
   getSandboxes,
@@ -189,6 +190,7 @@ export class AgentOrchestrator extends EventEmitter {
       ...(Number.isFinite(maxDailyLossPct) && maxDailyLossPct > 0 ? { MAX_DAILY_LOSS_PCT: String(maxDailyLossPct) } : {}),
       ...(pennyPipelineEnabled ? { ENABLE_PENNY_PIPELINE: 'true' } : {}),
       TURTLE_SCHEDULER_ENABLED: turtleSchedulerEnabled ? 'true' : 'false',
+      ...candidateWarmerFlags(resolvedAgent?.strategyId),
     };
 
     const binaryName = process.platform === 'win32' ? 'prophet_bot.exe' : 'prophet_bot';

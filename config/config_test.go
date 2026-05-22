@@ -2,6 +2,7 @@ package config
 
 import (
 	"testing"
+	"time"
 )
 
 func TestLoad_MissingOperatorEmail_ReturnsError(t *testing.T) {
@@ -117,6 +118,49 @@ func TestLoad_AlpacaDataRatePerMin_Override(t *testing.T) {
 	}
 	if AppConfig.AlpacaDataRatePerMin != 600 {
 		t.Errorf("override: got %d, want 600", AppConfig.AlpacaDataRatePerMin)
+	}
+}
+
+func TestLoad_BarCache_Defaults(t *testing.T) {
+	t.Setenv("OPERATOR_EMAIL", "ops@example.com")
+	t.Setenv("BAR_CACHE_ENABLED", "")
+	t.Setenv("BAR_CACHE_DIR", "")
+	t.Setenv("BAR_CACHE_TTL", "")
+	_ = Load()
+	if !AppConfig.BarCacheEnabled {
+		t.Error("BarCacheEnabled should default to true")
+	}
+	if AppConfig.BarCacheDir != "./data/bar-cache" {
+		t.Errorf("BarCacheDir default: got %q, want ./data/bar-cache", AppConfig.BarCacheDir)
+	}
+	if AppConfig.BarCacheTTL != 5*time.Minute {
+		t.Errorf("BarCacheTTL default: got %v, want 5m", AppConfig.BarCacheTTL)
+	}
+}
+
+func TestLoad_BarCache_Overrides(t *testing.T) {
+	t.Setenv("OPERATOR_EMAIL", "ops@example.com")
+	t.Setenv("BAR_CACHE_ENABLED", "false")
+	t.Setenv("BAR_CACHE_DIR", "/tmp/bc")
+	t.Setenv("BAR_CACHE_TTL", "90s")
+	_ = Load()
+	if AppConfig.BarCacheEnabled {
+		t.Error("BarCacheEnabled should be false when BAR_CACHE_ENABLED=false")
+	}
+	if AppConfig.BarCacheDir != "/tmp/bc" {
+		t.Errorf("BarCacheDir override: got %q", AppConfig.BarCacheDir)
+	}
+	if AppConfig.BarCacheTTL != 90*time.Second {
+		t.Errorf("BarCacheTTL override: got %v, want 90s", AppConfig.BarCacheTTL)
+	}
+}
+
+func TestLoad_BarCacheTTL_BadValueFallsBackToDefault(t *testing.T) {
+	t.Setenv("OPERATOR_EMAIL", "ops@example.com")
+	t.Setenv("BAR_CACHE_TTL", "not-a-duration")
+	_ = Load()
+	if AppConfig.BarCacheTTL != 5*time.Minute {
+		t.Errorf("bad BAR_CACHE_TTL must fall back to 5m, got %v", AppConfig.BarCacheTTL)
 	}
 }
 

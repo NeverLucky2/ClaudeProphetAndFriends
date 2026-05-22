@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"prophet-trader/config"
 	"prophet-trader/controllers"
 	"prophet-trader/database"
@@ -69,12 +70,34 @@ func main() {
 		tradingService.SetRateLimiter(alpacaDataLimiter)
 	}
 
-	// Create data service
-	dataService := services.NewAlpacaDataService(
+	// Create the raw Alpaca data service + shared rate limiter, then wrap it in
+	// the cross-agent shared bar cache. Every non-intraday consumer reads through
+	// `dataService` (now a MarketDataProvider); the intraday service constructed
+	// later is built separately and never wrapped (latency isolation, 1ec6b6a).
+	rawDataService := services.NewAlpacaDataService(
 		cfg.AlpacaAPIKey,
 		cfg.AlpacaSecretKey,
 	)
-	dataService.SetRateLimiter(alpacaDataLimiter)
+	rawDataService.SetRateLimiter(alpacaDataLimiter)
+
+	var dataService services.MarketDataProvider = rawDataService
+	if cfg.BarCacheEnabled {
+		absCacheDir, err := filepath.Abs(cfg.BarCacheDir)
+		if err != nil {
+			absCacheDir = cfg.BarCacheDir
+		}
+		if err := os.MkdirAll(absCacheDir, 0o755); err != nil {
+			logger.WithError(err).Warn("bar cache dir create failed — running without cache this session")
+		} else {
+			dataService = services.NewSharedBarCache(rawDataService, absCacheDir, cfg.BarCacheTTL, logger)
+			logger.WithFields(logrus.Fields{
+				"bar_cache_dir": absCacheDir, // operators: confirm every bot logs the SAME absolute path
+				"bar_cache_ttl": cfg.BarCacheTTL,
+			}).Info("Shared bar cache enabled")
+		}
+	} else {
+		logger.Info("Shared bar cache disabled (BAR_CACHE_ENABLED != true)")
+	}
 
 	// Create storage service
 	storageService, err := database.NewLocalStorage(cfg.DatabasePath)
@@ -517,11 +540,25 @@ func main() {
 	go positionManager.MonitorPositions(ctx)
 
 	// Keep the Coil/Drift candidate caches hot during their weekday ET beat
-	// windows. Both agents beat once or twice a day — far apart relative to the
-	// 5-min cache TTL — so without warming, every beat's preflight triggers a
-	// cold full-universe scan that exceeds the 2s budget and fails open. The
-	// warmer recomputes on a sub-TTL interval so the beat-time read is a hot hit.
-	go services.RunCandidateCacheWarmer(ctx, services.CandidateCacheWarmInterval, logger, meanRevCandidatesSvc, driftCandidatesSvc)
+	// windows, but gate per-agent: only the bot whose agent reads a cache warms
+	// it (Coil→meanrev, Drift→drift), set via ENABLE_MEANREV_WARMER /
+	// ENABLE_DRIFT_WARMER by the orchestrator. The other four bots previously
+	// warmed caches nothing reads — the dominant source of redundant cross-agent
+	// daily-bar fetches. Gating only ever degrades to a slower on-demand cold
+	// scan (fail-open), never to wrong/empty candidates.
+	var candidateWarmers []services.CandidateRefresher
+	if os.Getenv("ENABLE_MEANREV_WARMER") == "true" {
+		candidateWarmers = append(candidateWarmers, meanRevCandidatesSvc)
+	}
+	if os.Getenv("ENABLE_DRIFT_WARMER") == "true" {
+		candidateWarmers = append(candidateWarmers, driftCandidatesSvc)
+	}
+	if len(candidateWarmers) > 0 {
+		go services.RunCandidateCacheWarmer(ctx, services.CandidateCacheWarmInterval, logger, candidateWarmers...)
+		logger.WithField("warmers", len(candidateWarmers)).Info("Candidate cache warmer started")
+	} else {
+		logger.Info("Candidate cache warmer disabled (no ENABLE_MEANREV_WARMER/ENABLE_DRIFT_WARMER)")
+	}
 
 	// Setup graceful shutdown
 	shutdown := make(chan os.Signal, 1)
