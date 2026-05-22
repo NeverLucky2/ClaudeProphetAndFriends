@@ -17,35 +17,62 @@ type AlpacaDataService struct {
 	logger *logrus.Logger
 }
 
-// boundedAlpacaClientOpts builds marketdata.ClientOpts with the retry and
-// HTTP-timeout knobs clamped. The SDK defaults (RetryLimit=10, RetryDelay=1s,
-// 10s per-request timeout — marketdata/rest.go) let a single rate-limited
-// GetBars block for ~60s while ignoring the caller's context. These bounds cap
-// a single call's worst case at ~3 attempts × 2s + 2 × 250ms ≈ 4.5s, so the
-// intraday-signals path can stay within Prophet's per-beat fetch budget.
-func boundedAlpacaClientOpts(apiKey, secretKey string) marketdata.ClientOpts {
+// defaultAlpacaClientOpts builds the shared client's marketdata.ClientOpts.
+// The SDK defaults (RetryLimit=10, RetryDelay=1s, 10s per-request timeout —
+// marketdata/rest.go) let a single rate-limited GetBars block for ~60s while
+// ignoring the caller's context. This clamps that to a worst case of ~4
+// attempts × 5s + 3 × 250ms ≈ 21s — still generous enough for heavy batch
+// callers like penny_max_filter's 100-symbol GetMultiBars, but far below the
+// runaway default.
+func defaultAlpacaClientOpts(apiKey, secretKey string) marketdata.ClientOpts {
 	return marketdata.ClientOpts{
 		APIKey:     apiKey,
 		APISecret:  secretKey,
-		RetryLimit: 2,
+		RetryLimit: 3,
 		RetryDelay: 250 * time.Millisecond,
+		HTTPClient: &http.Client{Timeout: 5 * time.Second},
+	}
+}
+
+// intradayAlpacaClientOpts builds a tight client for the latency-critical
+// intraday-signals path. That path is already deadline-bounded in
+// IntradaySignalService (2500ms, returning partial data), so this client only
+// needs to clean up abandoned fetches quickly rather than nurse slow ones —
+// hence a 2s per-request timeout and just one retry. Keeping it on a separate
+// client means a slow heavy batch on the shared client can neither be caused
+// by nor delay the intraday path.
+func intradayAlpacaClientOpts(apiKey, secretKey string) marketdata.ClientOpts {
+	return marketdata.ClientOpts{
+		APIKey:     apiKey,
+		APISecret:  secretKey,
+		RetryLimit: 1,
+		RetryDelay: 200 * time.Millisecond,
 		HTTPClient: &http.Client{Timeout: 2 * time.Second},
 	}
 }
 
-// NewAlpacaDataService creates a new Alpaca data service
-func NewAlpacaDataService(apiKey, secretKey string) *AlpacaDataService {
-	client := marketdata.NewClient(boundedAlpacaClientOpts(apiKey, secretKey))
-
+func newAlpacaDataService(opts marketdata.ClientOpts) *AlpacaDataService {
 	logger := logrus.New()
 	logger.SetFormatter(&logrus.TextFormatter{
 		FullTimestamp: true,
 	})
-
 	return &AlpacaDataService{
-		client: client,
+		client: marketdata.NewClient(opts),
 		logger: logger,
 	}
+}
+
+// NewAlpacaDataService creates the shared Alpaca data service used by every
+// non-latency-critical consumer (screeners, signal services, analytics).
+func NewAlpacaDataService(apiKey, secretKey string) *AlpacaDataService {
+	return newAlpacaDataService(defaultAlpacaClientOpts(apiKey, secretKey))
+}
+
+// NewIntradayAlpacaDataService creates a tightly-bounded Alpaca data service
+// dedicated to the intraday-signals path. Wire this (not the shared service)
+// into NewIntradaySignalService.
+func NewIntradayAlpacaDataService(apiKey, secretKey string) *AlpacaDataService {
+	return newAlpacaDataService(intradayAlpacaClientOpts(apiKey, secretKey))
 }
 
 // GetHistoricalBars retrieves historical bar data

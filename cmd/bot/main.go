@@ -463,8 +463,14 @@ func main() {
 	logger.Debug("IV controller initialized")
 
 	// Intraday signal service + controller (auto-pushed into Prophet beats,
-	// also available on-demand via the get_intraday_signals MCP tool)
-	intradaySignalSvc := services.NewIntradaySignalService(dataService)
+	// also available on-demand via the get_intraday_signals MCP tool). Uses a
+	// dedicated tightly-bounded Alpaca client so its per-beat fetch budget is
+	// isolated from heavy batch callers on the shared client.
+	intradayDataService := services.NewIntradayAlpacaDataService(
+		cfg.AlpacaAPIKey,
+		cfg.AlpacaSecretKey,
+	)
+	intradaySignalSvc := services.NewIntradaySignalService(intradayDataService)
 	intradayController := controllers.NewIntradayController(intradaySignalSvc)
 	logger.Debug("Intraday signal service initialized")
 
