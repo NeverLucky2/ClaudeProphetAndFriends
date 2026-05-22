@@ -820,3 +820,63 @@ test('drift: positions response wrong shape (object not array) → fail open (ru
   const r = await resolvePreflight('earnings-drift', rt, {});
   assert.equal(r.skip, false, 'ambiguous positions shape must fail open');
 });
+
+// ── harvestPreflight: expirations 404 = skip ───────────────────────
+//
+// GET /api/v1/harvest/expirations/:symbol returns HTTP 404 when
+// GetNextMonthlyExpiration finds no qualifying contract in [35,55] DTE.
+// This is a semantic "not found", identical in meaning to the !exp branch
+// (expiration_date: null) which already returns skip:true. The catch block
+// must distinguish 404 (skip) from transient errors like 500 or ECONNREFUSED
+// (fail open — let the LLM investigate).
+
+test('harvest: expirations endpoint 404 → skip (no qualifying DTE window)', async () => {
+  const rt = makeRuntime([
+    ['/api/v1/harvest/state', () => harvestState(0)],
+    ['/api/v1/harvest/fomc', () => fomcStatus(false)],
+    ['/api/v1/regime-gate/status', () => regimeAllow()],
+    ['/api/v1/econ/blackout', () => blackoutOff()],
+    ['/api/v1/harvest/expirations/SPY', () => {
+      const e = new Error('Request failed with status code 404');
+      e.response = { status: 404 };
+      throw e;
+    }],
+  ]);
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('harvest', rt, {}));
+  assert.equal(r.skip, true);
+  assert.match(r.reason, /404/);
+});
+
+test('harvest: expirations endpoint 500 → run (fail open on non-404 error)', async () => {
+  const rt = makeRuntime([
+    ['/api/v1/harvest/state', () => harvestState(0)],
+    ['/api/v1/harvest/fomc', () => fomcStatus(false)],
+    ['/api/v1/regime-gate/status', () => regimeAllow()],
+    ['/api/v1/econ/blackout', () => blackoutOff()],
+    ['/api/v1/harvest/expirations/SPY', () => {
+      const e = new Error('Internal server error');
+      e.response = { status: 500 };
+      throw e;
+    }],
+  ]);
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('harvest', rt, {}));
+  assert.equal(r.skip, false);
+  assert.match(r.reason, /harvest chain probe error/);
+});
+
+test('harvest: expirations network error (no response object) → run (fail open)', async () => {
+  // ECONNREFUSED / timeout throws an Error with no .response property.
+  // Must not be treated as 404 — the endpoint may be temporarily unreachable.
+  const rt = makeRuntime([
+    ['/api/v1/harvest/state', () => harvestState(0)],
+    ['/api/v1/harvest/fomc', () => fomcStatus(false)],
+    ['/api/v1/regime-gate/status', () => regimeAllow()],
+    ['/api/v1/econ/blackout', () => blackoutOff()],
+    ['/api/v1/harvest/expirations/SPY', () => {
+      throw new Error('ECONNREFUSED');
+    }],
+  ]);
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('harvest', rt, {}));
+  assert.equal(r.skip, false);
+  assert.match(r.reason, /harvest chain probe error/);
+});

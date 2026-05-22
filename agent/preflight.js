@@ -486,6 +486,9 @@ async function harvestPreflight(runtime, agentConfig) {
       };
     }
   } catch (err) {
+    if (err.response?.status === 404) {
+      return { skip: true, reason: 'no qualifying monthly expiration in [35,55] DTE for SPY (404)' };
+    }
     return { skip: false, reason: `harvest chain probe error: ${err.message}` };
   }
 
