@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"prophet-trader/interfaces"
 	"time"
 
@@ -12,30 +13,81 @@ import (
 
 // AlpacaDataService implements DataService using Alpaca Market Data API
 type AlpacaDataService struct {
-	client *marketdata.Client
-	logger *logrus.Logger
+	client  *marketdata.Client
+	logger  *logrus.Logger
+	limiter RateLimiter // nil = unthrottled; set via SetRateLimiter at wiring time
 }
 
-// NewAlpacaDataService creates a new Alpaca data service
-func NewAlpacaDataService(apiKey, secretKey string) *AlpacaDataService {
-	client := marketdata.NewClient(marketdata.ClientOpts{
-		APIKey:    apiKey,
-		APISecret: secretKey,
-	})
+// defaultAlpacaClientOpts builds the shared client's marketdata.ClientOpts.
+// The SDK defaults (RetryLimit=10, RetryDelay=1s, 10s per-request timeout —
+// marketdata/rest.go) let a single rate-limited GetBars block for ~60s while
+// ignoring the caller's context. This clamps that to a worst case of ~4
+// attempts × 5s + 3 × 250ms ≈ 21s — still generous enough for heavy batch
+// callers like penny_max_filter's 100-symbol GetMultiBars, but far below the
+// runaway default.
+func defaultAlpacaClientOpts(apiKey, secretKey string) marketdata.ClientOpts {
+	return marketdata.ClientOpts{
+		APIKey:     apiKey,
+		APISecret:  secretKey,
+		RetryLimit: 3,
+		RetryDelay: 250 * time.Millisecond,
+		HTTPClient: &http.Client{Timeout: 5 * time.Second},
+	}
+}
 
+// intradayAlpacaClientOpts builds a tight client for the latency-critical
+// intraday-signals path. That path is already deadline-bounded in
+// IntradaySignalService (2500ms, returning partial data), so this client only
+// needs to clean up abandoned fetches quickly rather than nurse slow ones —
+// hence a 2s per-request timeout and just one retry. Keeping it on a separate
+// client means a slow heavy batch on the shared client can neither be caused
+// by nor delay the intraday path.
+func intradayAlpacaClientOpts(apiKey, secretKey string) marketdata.ClientOpts {
+	return marketdata.ClientOpts{
+		APIKey:     apiKey,
+		APISecret:  secretKey,
+		RetryLimit: 1,
+		RetryDelay: 200 * time.Millisecond,
+		HTTPClient: &http.Client{Timeout: 2 * time.Second},
+	}
+}
+
+func newAlpacaDataService(opts marketdata.ClientOpts) *AlpacaDataService {
 	logger := logrus.New()
 	logger.SetFormatter(&logrus.TextFormatter{
 		FullTimestamp: true,
 	})
-
 	return &AlpacaDataService{
-		client: client,
+		client: marketdata.NewClient(opts),
 		logger: logger,
 	}
 }
 
+// NewAlpacaDataService creates the shared Alpaca data service used by every
+// non-latency-critical consumer (screeners, signal services, analytics).
+func NewAlpacaDataService(apiKey, secretKey string) *AlpacaDataService {
+	return newAlpacaDataService(defaultAlpacaClientOpts(apiKey, secretKey))
+}
+
+// NewIntradayAlpacaDataService creates a tightly-bounded Alpaca data service
+// dedicated to the intraday-signals path. Wire this (not the shared service)
+// into NewIntradaySignalService.
+func NewIntradayAlpacaDataService(apiKey, secretKey string) *AlpacaDataService {
+	return newAlpacaDataService(intradayAlpacaClientOpts(apiKey, secretKey))
+}
+
+// SetRateLimiter wires a shared admission limiter into this service. Wire it
+// only into the shared data service (and the trading service), never the
+// intraday service, so a heavy batch can never delay the intraday path.
+func (s *AlpacaDataService) SetRateLimiter(l RateLimiter) {
+	s.limiter = l
+}
+
 // GetHistoricalBars retrieves historical bar data
 func (s *AlpacaDataService) GetHistoricalBars(ctx context.Context, symbol string, start, end time.Time, timeframe string) ([]*interfaces.Bar, error) {
+	if err := acquire(ctx, s.limiter); err != nil {
+		return nil, fmt.Errorf("historical bars rate-limit wait: %w", err)
+	}
 	s.logger.WithFields(logrus.Fields{
 		"symbol":    symbol,
 		"start":     start,
@@ -82,6 +134,9 @@ func (s *AlpacaDataService) GetHistoricalBars(ctx context.Context, symbol string
 // GetMultiBars retrieves historical bar data for multiple symbols in a single request.
 // Returns a map keyed by symbol. Missing or errored symbols are simply absent from the map.
 func (s *AlpacaDataService) GetMultiBars(ctx context.Context, symbols []string, start, end time.Time, timeframe string) (map[string][]*interfaces.Bar, error) {
+	if err := acquire(ctx, s.limiter); err != nil {
+		return nil, fmt.Errorf("multi bars rate-limit wait: %w", err)
+	}
 	s.logger.WithFields(logrus.Fields{
 		"symbols_count": len(symbols),
 		"start":         start,

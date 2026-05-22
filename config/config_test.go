@@ -98,6 +98,28 @@ func TestLoad_RegimeGate_HonorsEnvOverrides(t *testing.T) {
 	}
 }
 
+func TestLoad_AlpacaDataRatePerMin_Default(t *testing.T) {
+	t.Setenv("OPERATOR_EMAIL", "test@example.com") // required by Load
+	t.Setenv("ALPACA_DATA_RATE_PER_MIN", "")
+	if err := Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if AppConfig.AlpacaDataRatePerMin != 180 {
+		t.Errorf("default: got %d, want 180", AppConfig.AlpacaDataRatePerMin)
+	}
+}
+
+func TestLoad_AlpacaDataRatePerMin_Override(t *testing.T) {
+	t.Setenv("OPERATOR_EMAIL", "test@example.com")
+	t.Setenv("ALPACA_DATA_RATE_PER_MIN", "600")
+	if err := Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if AppConfig.AlpacaDataRatePerMin != 600 {
+		t.Errorf("override: got %d, want 600", AppConfig.AlpacaDataRatePerMin)
+	}
+}
+
 func TestLoad_PositionCapDefaults(t *testing.T) {
 	t.Setenv("OPERATOR_EMAIL", "test@example.com")
 	if err := Load(); err != nil {

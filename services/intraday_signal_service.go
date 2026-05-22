@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"sort"
 	"sync"
 	"time"
 
@@ -12,16 +11,24 @@ import (
 )
 
 // IntradaySignalService computes the per-symbol intraday context blob
-// injected into Prophet's market-hours beats. Aggressively cached (60s TTL)
-// so a steady cadence of beats doesn't multiply Alpaca fetches. All compute
-// is concurrent across symbols to keep the per-beat budget under ~500ms.
+// injected into Prophet's market-hours beats. Cold symbols are resolved in two
+// batched multi-symbol fetches (one 5Min, one 1Day) rather than per-symbol
+// round trips, and the whole fetch is deadline-bounded so a slow or throttling
+// upstream yields partial data instead of stalling the beat. Snapshots are
+// cached 60s; sector ETF readings 6h.
 
 const (
-	intradayCacheTTL  = 60 * time.Second
-	sectorCacheTTL    = 6 * time.Hour
-	intradayBarsTF    = "5Min"
-	dailyBarsTF       = "1Day"
-	atrLookback       = 20 // 20 trading days
+	intradayCacheTTL = 60 * time.Second
+	sectorCacheTTL   = 6 * time.Hour
+	intradayBarsTF   = "5Min"
+	dailyBarsTF      = "1Day"
+	atrLookback      = 20 // 20 trading days
+
+	// defaultIntradayDeadline bounds the wall-clock spent waiting on upstream
+	// bar fetches. Prophet's harness aborts the HTTP request at 3000ms and
+	// drops the whole block; returning partial data just under that keeps the
+	// endpoint responsive even when Alpaca is slow or throttling.
+	defaultIntradayDeadline = 2500 * time.Millisecond
 )
 
 // sectorETFMap maps a symbol to its primary sector ETF for context.
@@ -34,11 +41,11 @@ var sectorETFMap = map[string]string{
 }
 
 // intradayDataSource is the narrow subset of interfaces.DataService used by
-// IntradaySignalService — only historical bars are needed. Keeping the
+// IntradaySignalService — a single batched multi-symbol bar fetch. Keeping the
 // interface small lets tests stub it without implementing the full
 // DataService surface.
 type intradayDataSource interface {
-	GetHistoricalBars(ctx context.Context, symbol string, start, end time.Time, timeframe string) ([]*interfaces.Bar, error)
+	GetMultiBars(ctx context.Context, symbols []string, start, end time.Time, timeframe string) (map[string][]*interfaces.Bar, error)
 }
 
 // IntradaySignal is one symbol's snapshot.
@@ -65,8 +72,8 @@ type IntradaySignalSet struct {
 }
 
 type cachedSymbol struct {
-	signal    IntradaySignal
-	cachedAt  time.Time
+	signal   IntradaySignal
+	cachedAt time.Time
 }
 
 type cachedSector struct {
@@ -78,6 +85,11 @@ type cachedSector struct {
 type IntradaySignalService struct {
 	data intradayDataSource
 
+	// deadline bounds the wall-clock GetSignals waits on upstream fetches
+	// before returning whatever it has. Defaults to defaultIntradayDeadline;
+	// overridable in tests.
+	deadline time.Duration
+
 	mu          sync.RWMutex
 	symbolCache map[string]cachedSymbol
 	sectorCache map[string]cachedSector
@@ -85,96 +97,203 @@ type IntradaySignalService struct {
 
 // NewIntradaySignalService constructs a service over the given data source.
 // In production the source is *AlpacaDataService (which satisfies the
-// intradayDataSource interface implicitly via GetHistoricalBars).
+// intradayDataSource interface via GetMultiBars).
 func NewIntradaySignalService(data intradayDataSource) *IntradaySignalService {
 	return &IntradaySignalService{
 		data:        data,
+		deadline:    defaultIntradayDeadline,
 		symbolCache: make(map[string]cachedSymbol),
 		sectorCache: make(map[string]cachedSector),
 	}
 }
 
-// GetSignals returns a snapshot for each requested symbol. Never returns
-// nil; per-symbol failures populate IntradaySignalSet.Errors but other
-// symbols remain populated. Fetches are concurrent across symbols.
+// GetSignals returns a snapshot for each requested symbol, in request order.
+// Never returns nil. Symbols still fresh in cache are served without a fetch;
+// the rest are resolved in two batched calls (one 5Min, one 1Day covering both
+// the underlyings and any sector ETFs they need). The whole fetch is bounded
+// by s.deadline — if upstream stalls or fails, partial/cached data is returned
+// and the shortfall is recorded in Errors rather than blocking the caller.
 func (s *IntradaySignalService) GetSignals(ctx context.Context, symbols []string, now time.Time) *IntradaySignalSet {
 	set := &IntradaySignalSet{
 		GeneratedAt: now.UTC(),
 		Signals:     make([]IntradaySignal, 0, len(symbols)),
 	}
 
-	var (
-		wg sync.WaitGroup
-		mu sync.Mutex
-	)
-
-	for _, sym := range symbols {
-		wg.Add(1)
-		go func(symbol string) {
-			defer wg.Done()
-			sig, err := s.getOrComputeSymbol(ctx, symbol, now)
-			mu.Lock()
-			defer mu.Unlock()
-			if err != nil {
-				set.Errors = append(set.Errors, fmt.Sprintf("%s: %v", symbol, err))
-				// Still emit a placeholder so the LLM sees the symbol was attempted.
-				set.Signals = append(set.Signals, IntradaySignal{Symbol: symbol, Note: "fetch failed"})
-				return
-			}
-			set.Signals = append(set.Signals, sig)
-		}(sym)
-	}
-	wg.Wait()
-
-	// Stable order: match the requested symbol order so the LLM-side
-	// renderer has a deterministic layout.
-	order := make(map[string]int, len(symbols))
-	for i, sym := range symbols {
-		order[sym] = i
-	}
-	sort.SliceStable(set.Signals, func(i, j int) bool {
-		return order[set.Signals[i].Symbol] < order[set.Signals[j].Symbol]
-	})
-
-	return set
-}
-
-// getOrComputeSymbol returns the cached signal if fresh, else recomputes it.
-func (s *IntradaySignalService) getOrComputeSymbol(ctx context.Context, symbol string, now time.Time) (IntradaySignal, error) {
+	// Partition into cache-warm (served directly) and cold (need a fetch).
+	computed := make(map[string]IntradaySignal, len(symbols))
+	cold := make([]string, 0, len(symbols))
 	s.mu.RLock()
-	if c, ok := s.symbolCache[symbol]; ok && now.Sub(c.cachedAt) < intradayCacheTTL {
-		s.mu.RUnlock()
-		return c.signal, nil
+	for _, sym := range symbols {
+		if c, ok := s.symbolCache[sym]; ok && now.Sub(c.cachedAt) < intradayCacheTTL {
+			computed[sym] = c.signal
+		} else {
+			cold = append(cold, sym)
+		}
 	}
 	s.mu.RUnlock()
 
-	sig, err := s.computeSymbol(ctx, symbol, now)
-	if err != nil {
-		return IntradaySignal{}, err
+	if len(cold) > 0 {
+		fresh, errs := s.fetchAndCompute(ctx, cold, now)
+		for sym, sig := range fresh {
+			computed[sym] = sig
+		}
+		set.Errors = append(set.Errors, errs...)
+		// Cold symbols with no data returned (deadline or a failed call) still
+		// get a row so the renderer shows the symbol was attempted.
+		for _, sym := range cold {
+			if _, ok := computed[sym]; !ok {
+				computed[sym] = IntradaySignal{Symbol: sym, Note: "no data"}
+			}
+		}
 	}
-	s.mu.Lock()
-	s.symbolCache[symbol] = cachedSymbol{signal: sig, cachedAt: now}
-	s.mu.Unlock()
-	return sig, nil
+
+	// Assemble in request order for a deterministic layout.
+	for _, sym := range symbols {
+		if sig, ok := computed[sym]; ok {
+			set.Signals = append(set.Signals, sig)
+		}
+	}
+	return set
 }
 
-// computeSymbol does the actual data fetches + math for one symbol.
-func (s *IntradaySignalService) computeSymbol(ctx context.Context, symbol string, now time.Time) (IntradaySignal, error) {
-	// Today's intraday bars — 5-min interval over the session window.
+// fetchAndCompute batch-fetches bars for the cold symbols and computes their
+// signals. Returns the freshly computed signals keyed by symbol plus any
+// soft-fail notices. Complete snapshots (both timeframes present) are cached.
+func (s *IntradaySignalService) fetchAndCompute(ctx context.Context, cold []string, now time.Time) (map[string]IntradaySignal, []string) {
+	// Which sector ETFs need a daily fetch (cold in the 6h sector cache)?
+	sectorFor := make(map[string]string, len(cold)) // symbol → its ETF
+	needSector := make(map[string]bool)             // ETF → fetch needed
+	s.mu.RLock()
+	for _, sym := range cold {
+		if etf := sectorETFMap[sym]; etf != "" {
+			sectorFor[sym] = etf
+			if c, ok := s.sectorCache[etf]; !ok || now.Sub(c.cachedAt) >= sectorCacheTTL {
+				needSector[etf] = true
+			}
+		}
+	}
+	s.mu.RUnlock()
+
+	// Sector ETFs ride along in the daily batch — no separate call.
+	dailySyms := append([]string(nil), cold...)
+	for etf := range needSector {
+		dailySyms = append(dailySyms, etf)
+	}
+
 	sessionStart := startOfSessionUTC(now)
-	intraday, err := s.data.GetHistoricalBars(ctx, symbol, sessionStart, now, intradayBarsTF)
-	if err != nil {
-		return IntradaySignal{}, fmt.Errorf("intraday bars: %w", err)
+	dailyStart := now.AddDate(0, 0, -45) // calendar days, comfortably > 21 trading days
+
+	intradayMap, dailyMap, errs := s.fetchBars(ctx, cold, dailySyms, sessionStart, dailyStart, now)
+
+	// Refresh the sector cache from whatever daily bars arrived.
+	if dailyMap != nil {
+		s.mu.Lock()
+		for etf := range needSector {
+			if bars := dailyMap[etf]; len(bars) >= 2 {
+				latest := bars[len(bars)-1]
+				prior := bars[len(bars)-2]
+				s.sectorCache[etf] = cachedSector{pctChange: calcDayChangePct(latest.Close, prior.Close), cachedAt: now}
+			}
+		}
+		s.mu.Unlock()
 	}
 
-	// Daily bars — last 21 to compute ATR-20 + prior close + avg daily volume.
-	dailyEnd := now
-	dailyStart := dailyEnd.AddDate(0, 0, -45) // calendar days, well > 21 trading days
-	daily, err := s.data.GetHistoricalBars(ctx, symbol, dailyStart, dailyEnd, dailyBarsTF)
-	if err != nil {
-		return IntradaySignal{}, fmt.Errorf("daily bars: %w", err)
-	}
+	fresh := make(map[string]IntradaySignal, len(cold))
+	for _, sym := range cold {
+		// No intraday data at all (failed/deadline) → leave for the caller to
+		// mark "no data". An empty entry that came back on a successful call is
+		// a legitimate "no bars yet" and is handled inside computeSignal.
+		if intradayMap == nil {
+			continue
+		}
 
+		var sectorPct float64
+		var sectorOK bool
+		if etf := sectorFor[sym]; etf != "" {
+			s.mu.RLock()
+			if c, ok := s.sectorCache[etf]; ok {
+				sectorPct, sectorOK = c.pctChange, true
+			}
+			s.mu.RUnlock()
+		}
+
+		sig := computeSignal(sym, intradayMap[sym], dailyMap[sym], sectorFor[sym], sectorPct, sectorOK, now)
+		fresh[sym] = sig
+
+		// Cache only complete snapshots (both timeframes present) so a
+		// deadline-truncated partial is retried on the next beat.
+		if dailyMap != nil {
+			s.mu.Lock()
+			s.symbolCache[sym] = cachedSymbol{signal: sig, cachedAt: now}
+			s.mu.Unlock()
+		}
+	}
+	return fresh, errs
+}
+
+// fetchBars issues the two batched bar requests concurrently and waits up to
+// s.deadline. A timeframe whose call fails or does not arrive in time yields a
+// nil map plus a notice; the other timeframe is still returned. Goroutines
+// abandoned at the deadline send to buffered channels (no leak); the bounded
+// Alpaca client (boundedAlpacaClientOpts) caps how long they linger.
+func (s *IntradaySignalService) fetchBars(ctx context.Context, intradaySyms, dailySyms []string, sessionStart, dailyStart, now time.Time) (map[string][]*interfaces.Bar, map[string][]*interfaces.Bar, []string) {
+	type result struct {
+		m   map[string][]*interfaces.Bar
+		err error
+	}
+	intradayCh := make(chan result, 1)
+	dailyCh := make(chan result, 1)
+
+	go func() {
+		m, err := s.data.GetMultiBars(ctx, intradaySyms, sessionStart, now, intradayBarsTF)
+		intradayCh <- result{m, err}
+	}()
+	go func() {
+		m, err := s.data.GetMultiBars(ctx, dailySyms, dailyStart, now, dailyBarsTF)
+		dailyCh <- result{m, err}
+	}()
+
+	deadline := s.deadline
+	if deadline <= 0 {
+		deadline = defaultIntradayDeadline
+	}
+	timer := time.NewTimer(deadline)
+	defer timer.Stop()
+
+	var intradayMap, dailyMap map[string][]*interfaces.Bar
+	var errs []string
+	for received := 0; received < 2; {
+		select {
+		case r := <-intradayCh:
+			if r.err != nil {
+				errs = append(errs, fmt.Sprintf("intraday bars: %v", r.err))
+			} else {
+				intradayMap = r.m
+			}
+			received++
+		case r := <-dailyCh:
+			if r.err != nil {
+				errs = append(errs, fmt.Sprintf("daily bars: %v", r.err))
+			} else {
+				dailyMap = r.m
+			}
+			received++
+		case <-timer.C:
+			errs = append(errs, "intraday fetch exceeded deadline; returning partial data")
+			return intradayMap, dailyMap, errs
+		case <-ctx.Done():
+			errs = append(errs, fmt.Sprintf("intraday fetch canceled: %v", ctx.Err()))
+			return intradayMap, dailyMap, errs
+		}
+	}
+	return intradayMap, dailyMap, errs
+}
+
+// computeSignal turns one symbol's intraday + daily bars into a snapshot. Pure
+// (no I/O); sectorPct is supplied by the caller from the sector cache. A nil or
+// empty intraday slice yields a "no intraday bars yet" note; nil daily simply
+// omits the daily-derived fields (RVOL, ATR range, day change).
+func computeSignal(symbol string, intraday, daily []*interfaces.Bar, sectorETF string, sectorPct float64, sectorOK bool, now time.Time) IntradaySignal {
 	sig := IntradaySignal{Symbol: symbol}
 
 	if len(intraday) == 0 {
@@ -214,41 +333,13 @@ func (s *IntradaySignalService) computeSymbol(ctx context.Context, symbol string
 		}
 	}
 
-	// Sector ETF lookup (optional).
-	if etf, ok := sectorETFMap[symbol]; ok && etf != "" {
-		sig.SectorETF = etf
-		if pct, err := s.sectorChange(ctx, etf, now); err == nil {
-			sig.SectorChangePct = pct
+	if sectorETF != "" {
+		sig.SectorETF = sectorETF
+		if sectorOK {
+			sig.SectorChangePct = sectorPct
 		}
 	}
-
-	return sig, nil
-}
-
-// sectorChange returns today's % change for the sector ETF, cached for 6h
-// since daily bar data turns over once per session.
-func (s *IntradaySignalService) sectorChange(ctx context.Context, etf string, now time.Time) (float64, error) {
-	s.mu.RLock()
-	if c, ok := s.sectorCache[etf]; ok && now.Sub(c.cachedAt) < sectorCacheTTL {
-		s.mu.RUnlock()
-		return c.pctChange, nil
-	}
-	s.mu.RUnlock()
-
-	end := now
-	start := end.AddDate(0, 0, -7) // a week of daily bars is plenty
-	bars, err := s.data.GetHistoricalBars(ctx, etf, start, end, dailyBarsTF)
-	if err != nil || len(bars) < 2 {
-		return 0, fmt.Errorf("sector etf %s: insufficient data", etf)
-	}
-	latest := bars[len(bars)-1]
-	prior := bars[len(bars)-2]
-	pct := calcDayChangePct(latest.Close, prior.Close)
-
-	s.mu.Lock()
-	s.sectorCache[etf] = cachedSector{pctChange: pct, cachedAt: now}
-	s.mu.Unlock()
-	return pct, nil
+	return sig
 }
 
 // ── pure functions (tested directly) ───────────────────────────────

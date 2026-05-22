@@ -3,6 +3,7 @@ package controllers
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -346,6 +347,61 @@ func TestPlaceOptionsOrder_FullPath_GatedAndAttributedToMain(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("gap #2: options buy with strategy=v2-options must attribute to AgentMain")
+	}
+}
+
+// chainErrTradingService embeds the recording stub (for its full method set)
+// and overrides GetOptionsChain to return a preset error, so we can assert the
+// controller's HTTP status mapping.
+type chainErrTradingService struct {
+	*recordingTradingService
+	err error
+}
+
+func (s *chainErrTradingService) GetOptionsChain(_ context.Context, _ string, _ time.Time) ([]*interfaces.OptionContract, error) {
+	return nil, s.err
+}
+
+func TestGetOptionsChain_RateLimitedReturns429(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	trading := &chainErrTradingService{
+		recordingTradingService: &recordingTradingService{},
+		err:                     &services.RateLimitedError{RetryAfter: 4 * time.Second, Body: "too many requests"},
+	}
+	oc := NewOrderController(trading, nil, noopStorage{})
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Params = gin.Params{{Key: "symbol", Value: "SPY"}}
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/options/chain/SPY", nil)
+
+	oc.GetOptionsChain(c)
+
+	if w.Code != http.StatusTooManyRequests {
+		t.Errorf("status: got %d, want 429", w.Code)
+	}
+	if got := w.Header().Get("Retry-After"); got != "4" {
+		t.Errorf("Retry-After: got %q, want \"4\"", got)
+	}
+}
+
+func TestGetOptionsChain_OtherErrorReturns500(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	trading := &chainErrTradingService{
+		recordingTradingService: &recordingTradingService{},
+		err:                     errors.New("options chain API error (HTTP 503): boom"),
+	}
+	oc := NewOrderController(trading, nil, noopStorage{})
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Params = gin.Params{{Key: "symbol", Value: "SPY"}}
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/options/chain/SPY", nil)
+
+	oc.GetOptionsChain(c)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("status: got %d, want 500", w.Code)
 	}
 }
 

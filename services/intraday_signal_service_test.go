@@ -178,46 +178,43 @@ func TestFractionOfSessionElapsed_AfterClose(t *testing.T) {
 	}
 }
 
-// ── IntradaySignalService — stub data service + integration ────────
+// ── IntradaySignalService — stub data source + integration ─────────
 
+// stubDataService implements intradayDataSource. The service batches all
+// symbols of a timeframe into one GetMultiBars call, so the stub tracks how
+// many batch calls were issued (multiCalls), can simulate a wholesale
+// timeframe failure (failTF), and can stall a call past the deadline
+// (multiDelay) to exercise the partial-return path.
 type stubDataService struct {
-	intraday     map[string][]*interfaces.Bar
-	daily        map[string][]*interfaces.Bar
-	latestQuotes map[string]*interfaces.Quote
-	failOn       map[string]bool
-	histCalls    int32
+	intraday   map[string][]*interfaces.Bar
+	daily      map[string][]*interfaces.Bar
+	failTF     map[string]bool // timeframe ("5Min"/"1Day") → whole-call failure
+	multiDelay time.Duration   // stall before each GetMultiBars returns
+	multiCalls int32
 }
 
-func (s *stubDataService) GetHistoricalBars(ctx context.Context, symbol string, start, end time.Time, timeframe string) ([]*interfaces.Bar, error) {
-	atomic.AddInt32(&s.histCalls, 1)
-	if s.failOn[symbol] {
-		return nil, fmt.Errorf("simulated fetch failure for %s", symbol)
+func (s *stubDataService) GetMultiBars(ctx context.Context, symbols []string, start, end time.Time, timeframe string) (map[string][]*interfaces.Bar, error) {
+	atomic.AddInt32(&s.multiCalls, 1)
+	if s.multiDelay > 0 {
+		time.Sleep(s.multiDelay)
 	}
+	if s.failTF[timeframe] {
+		return nil, fmt.Errorf("simulated %s multibars failure", timeframe)
+	}
+	var src map[string][]*interfaces.Bar
 	switch timeframe {
 	case "5Min":
-		return s.intraday[symbol], nil
+		src = s.intraday
 	case "1Day":
-		return s.daily[symbol], nil
+		src = s.daily
 	}
-	return nil, nil
-}
-
-func (s *stubDataService) GetLatestBar(ctx context.Context, symbol string) (*interfaces.Bar, error) {
-	if s.failOn[symbol] {
-		return nil, fmt.Errorf("simulated fetch failure for %s", symbol)
+	out := make(map[string][]*interfaces.Bar, len(symbols))
+	for _, sym := range symbols {
+		if bars, ok := src[sym]; ok {
+			out[sym] = bars
+		}
 	}
-	bars := s.intraday[symbol]
-	if len(bars) == 0 {
-		return nil, fmt.Errorf("no bars")
-	}
-	return bars[len(bars)-1], nil
-}
-
-func (s *stubDataService) GetLatestQuote(ctx context.Context, symbol string) (*interfaces.Quote, error) {
-	if q, ok := s.latestQuotes[symbol]; ok {
-		return q, nil
-	}
-	return nil, fmt.Errorf("no quote for %s", symbol)
+	return out, nil
 }
 
 func makeIntradayBars(closePrice float64, volume int64, count int) []*interfaces.Bar {
@@ -242,24 +239,36 @@ func makeDailyBars(closes []float64) []*interfaces.Bar {
 	return bars
 }
 
+// fullStub builds a stub populated with intraday + daily bars for the full
+// Prophet watchlist plus the sector ETFs, so batched fetches resolve every
+// requested symbol.
+func fullStub() *stubDataService {
+	daily := makeDailyBars([]float64{430, 431, 432, 433, 434, 435, 436, 437, 438, 439,
+		440, 441, 442, 443, 444, 445, 446, 447, 448, 449, 450})
+	sectorDaily := makeDailyBars([]float64{240, 242, 244, 246, 248, 250, 252, 250, 248, 246,
+		244, 246, 248, 250, 252, 250, 248, 250, 252, 254, 256})
+	syms := []string{"SPY", "QQQ", "NVDA", "AMD", "TSLA", "MSTR"}
+	sectors := []string{"SMH", "XLY", "XLK"}
+	ds := &stubDataService{
+		intraday: map[string][]*interfaces.Bar{},
+		daily:    map[string][]*interfaces.Bar{},
+	}
+	for _, s := range syms {
+		ds.intraday[s] = makeIntradayBars(432.10, 100_000, 12) // 12 × 100K = 1.2M today
+		ds.daily[s] = daily
+	}
+	for _, s := range sectors {
+		ds.intraday[s] = makeIntradayBars(250.00, 50_000, 12)
+		ds.daily[s] = sectorDaily
+	}
+	return ds
+}
+
 func TestIntradaySignalService_HappyPath(t *testing.T) {
 	// Mid-session: 12:45 ET on a weekday → sessionElapsed=0.5.
 	now := time.Date(2026, 6, 15, 16, 45, 0, 0, time.UTC)
 
-	ds := &stubDataService{
-		intraday: map[string][]*interfaces.Bar{
-			"SPY": makeIntradayBars(432.10, 100_000, 12), // 12 × 100K = 1.2M today
-			"SMH": makeIntradayBars(250.00, 50_000, 12),
-		},
-		daily: map[string][]*interfaces.Bar{
-			"SPY": makeDailyBars([]float64{430, 431, 432, 433, 434, 435, 436, 437, 438, 439,
-				440, 441, 442, 443, 444, 445, 446, 447, 448, 449, 450}),
-			"SMH": makeDailyBars([]float64{240, 242, 244, 246, 248, 250, 252, 250, 248, 246,
-				244, 246, 248, 250, 252, 250, 248, 250, 252, 254, 256}),
-		},
-	}
-
-	svc := NewIntradaySignalService(ds)
+	svc := NewIntradaySignalService(fullStub())
 	set := svc.GetSignals(context.Background(), []string{"SPY"}, now)
 	if set == nil {
 		t.Fatal("GetSignals returned nil")
@@ -282,66 +291,141 @@ func TestIntradaySignalService_HappyPath(t *testing.T) {
 	}
 }
 
-func TestIntradaySignalService_PartialFailure(t *testing.T) {
+// The whole point of the batch refactor: a 6-symbol watchlist must cost two
+// upstream calls (one 5Min, one 1Day), not 12 per-symbol round trips.
+func TestIntradaySignalService_BatchesIntoTwoCalls(t *testing.T) {
 	now := time.Date(2026, 6, 15, 16, 45, 0, 0, time.UTC)
-
-	ds := &stubDataService{
-		intraday: map[string][]*interfaces.Bar{
-			"SPY": makeIntradayBars(432.10, 100_000, 12),
-		},
-		daily: map[string][]*interfaces.Bar{
-			"SPY": makeDailyBars([]float64{430, 431, 432, 433, 434, 435, 436, 437, 438, 439,
-				440, 441, 442, 443, 444, 445, 446, 447, 448, 449, 450}),
-		},
-		failOn: map[string]bool{"BADSYM": true},
-	}
+	ds := fullStub()
 
 	svc := NewIntradaySignalService(ds)
-	set := svc.GetSignals(context.Background(), []string{"SPY", "BADSYM"}, now)
-	if set == nil {
-		t.Fatal("expected non-nil set even with partial failure")
+	set := svc.GetSignals(context.Background(), []string{"SPY", "QQQ", "NVDA", "AMD", "TSLA", "MSTR"}, now)
+
+	if got := atomic.LoadInt32(&ds.multiCalls); got != 2 {
+		t.Errorf("expected exactly 2 batch calls for 6 symbols, got %d", got)
 	}
-	if len(set.Errors) == 0 {
-		t.Error("expected at least one entry in Errors for failed symbol")
+	if len(set.Signals) != 6 {
+		t.Fatalf("expected 6 signals, got %d", len(set.Signals))
 	}
-	// SPY should still be populated.
-	var spyOK bool
+	// Order must match the requested order.
+	want := []string{"SPY", "QQQ", "NVDA", "AMD", "TSLA", "MSTR"}
+	for i, s := range set.Signals {
+		if s.Symbol != want[i] {
+			t.Errorf("signal %d: expected %s, got %s", i, want[i], s.Symbol)
+		}
+	}
+}
+
+// Sector ETFs are folded into the daily batch (not a third call) and their
+// % change is attached to the underlying.
+func TestIntradaySignalService_SectorFoldedIntoDailyBatch(t *testing.T) {
+	now := time.Date(2026, 6, 15, 16, 45, 0, 0, time.UTC)
+	ds := fullStub()
+
+	svc := NewIntradaySignalService(ds)
+	set := svc.GetSignals(context.Background(), []string{"NVDA"}, now)
+
+	if got := atomic.LoadInt32(&ds.multiCalls); got != 2 {
+		t.Errorf("expected 2 batch calls (sector folded into daily), got %d", got)
+	}
+	if len(set.Signals) != 1 {
+		t.Fatalf("expected 1 signal, got %d", len(set.Signals))
+	}
+	if set.Signals[0].SectorETF != "SMH" {
+		t.Errorf("expected sector ETF SMH, got %q", set.Signals[0].SectorETF)
+	}
+	if set.Signals[0].SectorChangePct == 0 {
+		t.Error("expected non-zero sector change pct")
+	}
+}
+
+// A symbol the broker returns no bars for (present in neither map though the
+// call succeeded) is emitted with a note rather than dropping the response.
+func TestIntradaySignalService_UnknownSymbolGetsNote(t *testing.T) {
+	now := time.Date(2026, 6, 15, 16, 45, 0, 0, time.UTC)
+	ds := fullStub()
+
+	svc := NewIntradaySignalService(ds)
+	set := svc.GetSignals(context.Background(), []string{"SPY", "ZZZZ"}, now)
+
+	var spyOK, zzzzSeen bool
 	for _, s := range set.Signals {
 		if s.Symbol == "SPY" && s.VWAP > 0 {
 			spyOK = true
 		}
+		if s.Symbol == "ZZZZ" && s.Note != "" {
+			zzzzSeen = true
+		}
 	}
 	if !spyOK {
-		t.Error("SPY signal should remain populated despite BADSYM failure")
+		t.Error("SPY should remain populated alongside an unknown symbol")
+	}
+	if !zzzzSeen {
+		t.Error("unknown symbol should be emitted with a note")
+	}
+}
+
+// When a timeframe's batch call fails wholesale, the response is still
+// returned (soft-fail), with the failure surfaced in Errors.
+func TestIntradaySignalService_WholeCallFailureSoftFails(t *testing.T) {
+	now := time.Date(2026, 6, 15, 16, 45, 0, 0, time.UTC)
+	ds := fullStub()
+	ds.failTF = map[string]bool{"5Min": true}
+
+	svc := NewIntradaySignalService(ds)
+	set := svc.GetSignals(context.Background(), []string{"SPY"}, now)
+	if set == nil {
+		t.Fatal("expected non-nil set even when a batch call fails")
+	}
+	if len(set.Errors) == 0 {
+		t.Error("expected the 5Min batch failure to surface in Errors")
+	}
+}
+
+// The deadline guard is the core of fix #3: a stalled upstream must not block
+// past the budget. GetSignals returns promptly with partial data instead of
+// waiting for the slow fetch.
+func TestIntradaySignalService_DeadlineReturnsPartial(t *testing.T) {
+	now := time.Date(2026, 6, 15, 16, 45, 0, 0, time.UTC)
+	ds := fullStub()
+	ds.multiDelay = 500 * time.Millisecond // far longer than the test deadline
+
+	svc := NewIntradaySignalService(ds)
+	svc.deadline = 50 * time.Millisecond // shrink for a fast test
+
+	start := time.Now()
+	set := svc.GetSignals(context.Background(), []string{"SPY"}, now)
+	elapsed := time.Since(start)
+
+	if elapsed > 300*time.Millisecond {
+		t.Errorf("GetSignals blocked past its deadline: took %v", elapsed)
+	}
+	if set == nil {
+		t.Fatal("expected non-nil set on deadline")
+	}
+	if len(set.Errors) == 0 {
+		t.Error("expected a deadline notice in Errors")
 	}
 }
 
 func TestIntradaySignalService_CacheHit(t *testing.T) {
 	now := time.Date(2026, 6, 15, 16, 45, 0, 0, time.UTC)
-	ds := &stubDataService{
-		intraday: map[string][]*interfaces.Bar{
-			"SPY": makeIntradayBars(432.10, 100_000, 12),
-		},
-		daily: map[string][]*interfaces.Bar{
-			"SPY": makeDailyBars([]float64{430, 431, 432, 433, 434, 435, 436, 437, 438, 439,
-				440, 441, 442, 443, 444, 445, 446, 447, 448, 449, 450}),
-		},
-	}
+	ds := fullStub()
 	svc := NewIntradaySignalService(ds)
+
 	_ = svc.GetSignals(context.Background(), []string{"SPY"}, now)
-	callsAfterFirst := atomic.LoadInt32(&ds.histCalls)
+	callsAfterFirst := atomic.LoadInt32(&ds.multiCalls)
 	if callsAfterFirst == 0 {
-		t.Fatal("expected GetHistoricalBars to be invoked on first call")
+		t.Fatal("expected a batch fetch on the first call")
 	}
 	// Second call within cache TTL (5 seconds later) — must reuse cache.
 	_ = svc.GetSignals(context.Background(), []string{"SPY"}, now.Add(5*time.Second))
-	callsAfterSecond := atomic.LoadInt32(&ds.histCalls)
+	callsAfterSecond := atomic.LoadInt32(&ds.multiCalls)
 	if callsAfterSecond != callsAfterFirst {
-		t.Errorf("expected no new HTTP calls within cache TTL; before=%d after=%d", callsAfterFirst, callsAfterSecond)
+		t.Errorf("expected no new fetches within cache TTL; before=%d after=%d", callsAfterFirst, callsAfterSecond)
 	}
 	// Third call past TTL (90s later) — must refetch.
 	_ = svc.GetSignals(context.Background(), []string{"SPY"}, now.Add(90*time.Second))
-	callsAfterThird := atomic.LoadInt32(&ds.histCalls)
+	callsAfterThird := atomic.LoadInt32(&ds.multiCalls)
 	if callsAfterThird == callsAfterSecond {
 		t.Errorf("expected new fetches after cache TTL expired; before=%d after=%d", callsAfterSecond, callsAfterThird)
 	}

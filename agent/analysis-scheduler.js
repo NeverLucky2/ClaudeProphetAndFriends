@@ -63,6 +63,23 @@ const REGIME_INPUT_PREFIXES = [
   { prefix: 'bubble_', flag: '--bubble' },
 ];
 
+// A `.running` lock is released only in triggerJob's finally block, so a
+// process killed mid-job (e.g. a bot rebuild/restart) leaks the file forever.
+// Because lock keys are date-stamped, a leaked lock from today blocks that
+// job's startup self-heal for the rest of the day. We treat a lock older than
+// this window as abandoned and reclaim it. 30 min clears the longest job
+// timeout (15 min, e.g. parameter reviews) with comfortable margin so a
+// genuinely long-running job is never reclaimed out from under itself.
+export const STALE_LOCK_MS = 30 * 60 * 1000;
+
+// isLockStale reports whether a lock file with the given mtime (epoch ms)
+// should be considered abandoned at `nowMs`. A future mtime (clock skew) is
+// treated as fresh — never reclaim a lock we can't prove is dead. Pure;
+// exported for tests.
+export function isLockStale(mtimeMs, nowMs) {
+  return nowMs - mtimeMs > STALE_LOCK_MS;
+}
+
 /**
  * Build the spawn argv for the daily regime-gate compute job. Pure function:
  * given a list of filenames in `reportsDir`, picks the lexicographically
@@ -706,14 +723,30 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
     }
   }
 
-  // Exclusive lock via atomic file creation — returns true if acquired, false if already held.
+  // Exclusive lock via atomic file creation — returns true if acquired, false
+  // if already held by a live job. If an existing lock is older than
+  // STALE_LOCK_MS it was abandoned by a killed process; we reclaim it (delete
+  // + recreate) so a crash/restart can't wedge a job for the rest of the day.
   async _acquireLock(lockKey) {
     await fs.mkdir(REPORTS_DIR, { recursive: true });
+    const lockPath = path.join(REPORTS_DIR, `${lockKey}.running`);
     try {
-      const fd = await fs.open(path.join(REPORTS_DIR, `${lockKey}.running`), 'wx');
+      const fd = await fs.open(lockPath, 'wx');
       await fd.close();
       return true;
     } catch {
+      // Lock exists. Reclaim it only if it's stale; otherwise a live job holds it.
+      if (await this._isLockStale(lockPath)) {
+        this._log(`Reclaiming stale lock ${lockKey}.running (abandoned by a prior process).`, 'warning');
+        await fs.unlink(lockPath).catch(() => {});
+        try {
+          const fd = await fs.open(lockPath, 'wx');
+          await fd.close();
+          return true;
+        } catch {
+          return false; // lost a race to another process reclaiming concurrently
+        }
+      }
       return false;
     }
   }
@@ -723,7 +756,28 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
   }
 
   async _isLocked(lockKey) {
-    return fs.access(path.join(REPORTS_DIR, `${lockKey}.running`)).then(() => true).catch(() => false);
+    const lockPath = path.join(REPORTS_DIR, `${lockKey}.running`);
+    try {
+      await fs.access(lockPath);
+    } catch {
+      return false; // no lock file
+    }
+    // A stale lock (abandoned by a killed process) does not count as locked,
+    // so callers fall through to trigger the job, which reclaims it.
+    return !(await this._isLockStale(lockPath));
+  }
+
+  // Returns true if the lock file at lockPath is older than STALE_LOCK_MS.
+  // A missing file or stat error is treated as not-stale (the access/open
+  // path handles existence; we don't want a transient stat error to reclaim
+  // a live lock).
+  async _isLockStale(lockPath) {
+    try {
+      const st = await fs.stat(lockPath);
+      return isLockStale(st.mtimeMs, Date.now());
+    } catch {
+      return false;
+    }
   }
 
   _getETInfo() {
