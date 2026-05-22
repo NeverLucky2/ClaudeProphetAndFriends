@@ -842,6 +842,7 @@
 
     /* ── Go Console split pane (per-agent backend logs) ── */
     .go-pane {
+      position: relative;
       display: flex; flex-direction: column;
       flex: 0.8 1 0; min-width: 0;
       border-left: 1px solid var(--rule);
@@ -2893,6 +2894,36 @@ function attachTerminalScrollControls(sandboxId) {
   });
 }
 
+// Mirror of attachTerminalScrollControls for the per-agent Go console pane.
+function attachGoConsoleScrollControls(sandboxId) {
+  const t = sandboxTerminals[sandboxId];
+  if (!t || !t.goTermEl) return;
+
+  t.goAutoScroll = true;
+
+  const paneEl = t.el.querySelector('.go-pane');
+  if (!paneEl) return;
+
+  const btn = document.createElement('button');
+  btn.className = 'jump-bottom-btn';
+  btn.type = 'button';
+  btn.title = 'Jump to bottom';
+  btn.innerHTML = '&#8595; Jump to bottom';
+  paneEl.appendChild(btn);
+  t.goJumpBtn = btn;
+
+  t.goTermEl.addEventListener('scroll', () => {
+    const atBottom = t.goTermEl.scrollHeight - t.goTermEl.scrollTop - t.goTermEl.clientHeight < 50;
+    t.goAutoScroll = atBottom;
+    t.goJumpBtn.classList.toggle('visible', !atBottom);
+  });
+
+  btn.addEventListener('click', () => {
+    t.goTermEl.scrollTop = t.goTermEl.scrollHeight;
+    // The scroll listener will pick up the at-bottom state and hide the button.
+  });
+}
+
 function ensureSandboxTerminal(sandboxId, label) {
   if (sandboxTerminals[sandboxId]) return sandboxTerminals[sandboxId];
   
@@ -2996,6 +3027,7 @@ function ensureSandboxTerminal(sandboxId, label) {
   container.appendChild(wrapper);
   sandboxTerminals[sandboxId] = { el: wrapper, termEl: wrapper.querySelector('[data-terminal]'), goTermEl: wrapper.querySelector('[data-terminal-go]') };
   attachTerminalScrollControls(sandboxId);
+  attachGoConsoleScrollControls(sandboxId);
   return sandboxTerminals[sandboxId];
 }
 
@@ -3308,10 +3340,9 @@ function logToGoConsole(sandboxId, html, rawMessage) {
   const t = sandboxTerminals[sandboxId];
   if (!t || !t.goTermEl) return;
   const el = t.goTermEl;
-  const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 50;
   el.insertAdjacentHTML('beforeend', html);
   while (el.children.length > GO_CONSOLE_MAX) el.removeChild(el.firstChild);
-  if (nearBottom) el.scrollTop = el.scrollHeight;
+  if (t.goAutoScroll !== false) el.scrollTop = el.scrollHeight;
   // Lazily label the pane with the backend port parsed from "[go:PORT]".
   const portEl = document.querySelector(`[data-go-port="${sandboxId}"]`);
   if (portEl && !portEl.textContent && rawMessage) {
