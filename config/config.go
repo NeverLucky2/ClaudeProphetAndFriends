@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/joho/godotenv"
 )
@@ -56,6 +57,13 @@ type Config struct {
 	ProphetOptionsStopCooloffMin      float64
 	ProphetOptionsStopEscalationSec   float64
 	ProphetOptionsStopSanityFloorFrac float64
+
+	// Shared daily-bar cache (cross-agent on-disk read cache for >=1Day bars).
+	// Default ON — a pure, soft-failing read optimization. See
+	// docs/superpowers/specs/2026-05-22-shared-daily-bar-cache-design.md.
+	BarCacheEnabled bool
+	BarCacheDir     string
+	BarCacheTTL     time.Duration
 }
 
 var AppConfig *Config
@@ -108,6 +116,10 @@ func Load() error {
 		ProphetOptionsStopEscalationSec:   parseFloat(getEnvOrDefault("PROPHET_OPTIONS_STOP_ESCALATION_SEC", "60")),
 		ProphetOptionsStopSanityFloorFrac: parseFloat(getEnvOrDefault("PROPHET_OPTIONS_STOP_SANITY_FLOOR_FRAC", "0.50")),
 
+		BarCacheEnabled: getEnvOrDefault("BAR_CACHE_ENABLED", "true") == "true",
+		BarCacheDir:     getEnvOrDefault("BAR_CACHE_DIR", "./data/bar-cache"),
+		BarCacheTTL:     parseDurationOrDefault("BAR_CACHE_TTL", "5m"),
+
 		OperatorEmail: os.Getenv("OPERATOR_EMAIL"),
 	}
 
@@ -159,4 +171,16 @@ func parseIntOrDefault(key string, def int) int {
 		}
 	}
 	return def
+}
+
+// parseDurationOrDefault reads a Go duration string (e.g. "5m", "90s") from key,
+// falling back to def (which must itself parse) on absence or a parse error.
+func parseDurationOrDefault(key, def string) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	d, _ := time.ParseDuration(def)
+	return d
 }
