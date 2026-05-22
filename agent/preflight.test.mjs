@@ -376,7 +376,7 @@ test('harvest: no condors + econ blackout (non-FOMC) → skip', async () => {
     ['/api/v1/econ/blackout', () => blackoutOn('Core PCE release')],
     // chain probe routes shouldn't be reached because we skip before them.
   ]);
-  const r = await resolvePreflight('harvest', rt, {});
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('harvest', rt, {}));
   assert.equal(r.skip, true);
   assert.match(r.reason, /econ blackout/);
 });
@@ -387,7 +387,7 @@ test('harvest: open condor + econ blackout → run (exits must happen)', async (
     ['/api/v1/harvest/fomc', () => fomcStatus(false)],
     ['/api/v1/econ/blackout', () => blackoutOn('CPI release')],
   ]);
-  const r = await resolvePreflight('harvest', rt, {});
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('harvest', rt, {}));
   assert.equal(r.skip, false);
 });
 
@@ -398,7 +398,7 @@ test('harvest: existing 24h FOMC blackout still skips (econ check not required)'
     // The FOMC path returns before econ blackout is consulted — leave the
     // econ route unmocked to assert it is not called.
   ]);
-  const r = await resolvePreflight('harvest', rt, {});
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('harvest', rt, {}));
   assert.equal(r.skip, true);
   assert.match(r.reason, /FOMC blackout/);
 });
@@ -428,7 +428,7 @@ test('harvest: IV > RV → run (premium edge present)', async () => {
     [/^\/api\/v1\/options\/chain\/SPY/, () => chainNonEmpty()],
     ['/api/v1/iv/SPY', () => ivSpread(0.15, 0.04)], // IV 19, RV 15 → spread +4
   ]);
-  const r = await resolvePreflight('harvest', rt, {});
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('harvest', rt, {}));
   assert.equal(r.skip, false, `expected run, got skip: ${r.reason}`);
 });
 
@@ -441,7 +441,7 @@ test('harvest: IV ≤ RV with positive RV → skip (no premium edge)', async () 
     [/^\/api\/v1\/options\/chain\/SPY/, () => chainNonEmpty()],
     ['/api/v1/iv/SPY', () => ivSpread(0.20, -0.02)], // IV 18, RV 20 → spread -2
   ]);
-  const r = await resolvePreflight('harvest', rt, {});
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('harvest', rt, {}));
   assert.equal(r.skip, true);
   assert.match(r.reason, /IV.*RV|premium edge/i);
 });
@@ -455,7 +455,7 @@ test('harvest: IV = RV exactly → skip (spread ≤ 0)', async () => {
     [/^\/api\/v1\/options\/chain\/SPY/, () => chainNonEmpty()],
     ['/api/v1/iv/SPY', () => ivSpread(0.20, 0)],
   ]);
-  const r = await resolvePreflight('harvest', rt, {});
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('harvest', rt, {}));
   assert.equal(r.skip, true);
 });
 
@@ -470,7 +470,7 @@ test('harvest: RV = 0 (no signal) → fall through, do not skip', async () => {
     [/^\/api\/v1\/options\/chain\/SPY/, () => chainNonEmpty()],
     ['/api/v1/iv/SPY', () => ({ data: { current_iv: 0.20, realized_vol_20d: 0, iv_minus_rv: 0 } })],
   ]);
-  const r = await resolvePreflight('harvest', rt, {});
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('harvest', rt, {}));
   assert.equal(r.skip, false);
 });
 
@@ -483,7 +483,7 @@ test('harvest: IV endpoint errors → fall through (soft-fail)', async () => {
     [/^\/api\/v1\/options\/chain\/SPY/, () => chainNonEmpty()],
     ['/api/v1/iv/SPY', () => { throw new Error('iv endpoint down'); }],
   ]);
-  const r = await resolvePreflight('harvest', rt, {});
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('harvest', rt, {}));
   assert.equal(r.skip, false, 'soft-fail expected on IV endpoint error');
 });
 
@@ -494,7 +494,7 @@ test('harvest: open condor + IV ≤ RV → run (exits must happen)', async () =>
     // IV endpoint should not even be hit because open condors > 0 returns
     // before the gate runs. Leave it unmocked to assert it isn't called.
   ]);
-  const r = await resolvePreflight('harvest', rt, {});
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('harvest', rt, {}));
   assert.equal(r.skip, false);
 });
 
@@ -515,7 +515,7 @@ test('harvest: monitor_enabled + open condors but otherwise no entries → skip'
     ['/api/v1/econ/blackout', () => blackoutOff()],
     ['/api/v1/harvest/expirations/SPY', () => ({ data: { expiration_date: null } })],
   ]);
-  const r = await resolvePreflight('harvest', rt, {});
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('harvest', rt, {}));
   assert.equal(r.skip, true);
 });
 
@@ -531,7 +531,7 @@ test('harvest: monitor_enabled + open condors + entries available → run (entri
     [/^\/api\/v1\/options\/chain\/SPY/, () => chainNonEmpty()],
     ['/api/v1/iv/SPY', () => ivSpread(0.15, 0.04)], // positive premium edge
   ]);
-  const r = await resolvePreflight('harvest', rt, {});
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('harvest', rt, {}));
   assert.equal(r.skip, false);
 });
 
