@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"prophet-trader/interfaces"
 	"time"
 
@@ -16,12 +17,25 @@ type AlpacaDataService struct {
 	logger *logrus.Logger
 }
 
+// boundedAlpacaClientOpts builds marketdata.ClientOpts with the retry and
+// HTTP-timeout knobs clamped. The SDK defaults (RetryLimit=10, RetryDelay=1s,
+// 10s per-request timeout — marketdata/rest.go) let a single rate-limited
+// GetBars block for ~60s while ignoring the caller's context. These bounds cap
+// a single call's worst case at ~3 attempts × 2s + 2 × 250ms ≈ 4.5s, so the
+// intraday-signals path can stay within Prophet's per-beat fetch budget.
+func boundedAlpacaClientOpts(apiKey, secretKey string) marketdata.ClientOpts {
+	return marketdata.ClientOpts{
+		APIKey:     apiKey,
+		APISecret:  secretKey,
+		RetryLimit: 2,
+		RetryDelay: 250 * time.Millisecond,
+		HTTPClient: &http.Client{Timeout: 2 * time.Second},
+	}
+}
+
 // NewAlpacaDataService creates a new Alpaca data service
 func NewAlpacaDataService(apiKey, secretKey string) *AlpacaDataService {
-	client := marketdata.NewClient(marketdata.ClientOpts{
-		APIKey:    apiKey,
-		APISecret: secretKey,
-	})
+	client := marketdata.NewClient(boundedAlpacaClientOpts(apiKey, secretKey))
 
 	logger := logrus.New()
 	logger.SetFormatter(&logrus.TextFormatter{
