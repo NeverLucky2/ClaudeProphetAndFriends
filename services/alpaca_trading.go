@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
 	"net/http"
 	"prophet-trader/interfaces"
+	"strconv"
 	"strings"
 	"time"
 
@@ -65,6 +67,17 @@ type AlpacaTradingService struct {
 	// retry on transient broker errors. Kept short — heartbeat windows are
 	// tight and stale retries add market risk. Tests set to 0.
 	retryBackoff time.Duration
+
+	// limiter is the shared Alpaca data-API admission limiter. nil =
+	// unthrottled; set via SetRateLimiter at wiring time.
+	limiter RateLimiter
+	// fetchChainOnce is the single-attempt options-chain fetch seam. Defaults
+	// to doFetchOptionsChain; tests inject a fake to drive the retry loop
+	// without a network call.
+	fetchChainOnce func(ctx context.Context, underlying string, expiration time.Time) ([]*interfaces.OptionContract, error)
+	// optionsRetryBackoff is the base backoff for the options-chain retry loop
+	// (doubled per attempt). Tests set to 0.
+	optionsRetryBackoff time.Duration
 }
 
 // NewAlpacaTradingService creates a new Alpaca trading service
@@ -97,7 +110,15 @@ func NewAlpacaTradingService(apiKey, secretKey, baseURL string, isPaper bool) (*
 	}
 	s.brokerPlaceOrder = s.client.PlaceOrder
 	s.retryBackoff = 200 * time.Millisecond
+	s.fetchChainOnce = s.doFetchOptionsChain
+	s.optionsRetryBackoff = 250 * time.Millisecond
 	return s, nil
+}
+
+// SetRateLimiter wires the shared admission limiter into the options-chain
+// fetch path. Wire the same instance shared with the bar-fetch data service.
+func (s *AlpacaTradingService) SetRateLimiter(l RateLimiter) {
+	s.limiter = l
 }
 
 // isTransientBrokerError reports whether err should be retried with backoff.
@@ -427,8 +448,11 @@ type alpacaOptionsSnapshot struct {
 	NextPageToken string `json:"next_page_token"`
 }
 
-// GetOptionsChain retrieves the options chain for an underlying symbol
-func (s *AlpacaTradingService) GetOptionsChain(ctx context.Context, underlying string, expiration time.Time) ([]*interfaces.OptionContract, error) {
+// doFetchOptionsChain performs a single options-chain fetch. On HTTP 429 it
+// returns a *RateLimitedError carrying the Retry-After hint; on other non-200
+// statuses a generic error. This is the seam wrapped by GetOptionsChain's
+// retry loop (s.fetchChainOnce).
+func (s *AlpacaTradingService) doFetchOptionsChain(ctx context.Context, underlying string, expiration time.Time) ([]*interfaces.OptionContract, error) {
 	s.logger.WithFields(logrus.Fields{
 		"underlying": underlying,
 		"expiration": expiration,
@@ -459,6 +483,13 @@ func (s *AlpacaTradingService) GetOptionsChain(ctx context.Context, underlying s
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusTooManyRequests {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, &RateLimitedError{
+			RetryAfter: parseRetryAfter(resp.Header),
+			Body:       string(body),
+		}
+	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("options chain API error (HTTP %d): %s", resp.StatusCode, string(body))
@@ -500,6 +531,71 @@ func (s *AlpacaTradingService) GetOptionsChain(ctx context.Context, underlying s
 
 	s.logger.WithField("count", len(contracts)).Debug("Fetched options chain")
 	return contracts, nil
+}
+
+// GetOptionsChain fetches the options chain for an underlying, gated by the
+// shared rate limiter and retried on transient errors (429/5xx/network) up to
+// twice with exponential backoff, honoring Retry-After. Non-transient errors
+// (e.g. 4xx validation) fail fast. The retry budget stays well within the
+// caller's request context.
+func (s *AlpacaTradingService) GetOptionsChain(ctx context.Context, underlying string, expiration time.Time) ([]*interfaces.OptionContract, error) {
+	const maxAttempts = 3 // 1 initial + 2 retries
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			wait := chainRetryBackoff(attempt, s.optionsRetryBackoff, lastErr)
+			if wait > 0 {
+				select {
+				case <-time.After(wait):
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+			}
+		}
+		if err := acquire(ctx, s.limiter); err != nil {
+			return nil, fmt.Errorf("options chain rate-limit wait: %w", err)
+		}
+		contracts, err := s.fetchChainOnce(ctx, underlying, expiration)
+		if err == nil {
+			return contracts, nil
+		}
+		lastErr = err
+		if !isTransientBrokerError(err) {
+			return nil, err
+		}
+	}
+	return nil, lastErr
+}
+
+// chainRetryBackoff returns the wait before a retry attempt. When the last
+// error was a 429 carrying a Retry-After, that hint wins (capped at 2s);
+// otherwise exponential backoff from base (attempt 1 -> base, attempt 2 ->
+// 2*base). A non-positive base disables sleeping (tests).
+func chainRetryBackoff(attempt int, base time.Duration, lastErr error) time.Duration {
+	var rle *RateLimitedError
+	if errors.As(lastErr, &rle) && rle.RetryAfter > 0 {
+		if rle.RetryAfter > 2*time.Second {
+			return 2 * time.Second
+		}
+		return rle.RetryAfter
+	}
+	if base <= 0 {
+		return 0
+	}
+	return base * time.Duration(int64(1)<<(attempt-1))
+}
+
+// parseRetryAfter reads a delta-seconds Retry-After header (the form Alpaca
+// sends). Returns 0 when absent or unparseable.
+func parseRetryAfter(h http.Header) time.Duration {
+	v := strings.TrimSpace(h.Get("Retry-After"))
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(v); err == nil && secs >= 0 {
+		return time.Duration(secs) * time.Second
+	}
+	return 0
 }
 
 // GetOptionsQuote retrieves a quote for a specific options contract

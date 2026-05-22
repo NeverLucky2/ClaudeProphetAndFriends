@@ -6,9 +6,12 @@ require (
 	github.com/alpacahq/alpaca-trade-api-go/v3 v3.5.0
 	github.com/gin-gonic/gin v1.10.0
 	github.com/glebarez/sqlite v1.11.0
+	github.com/google/uuid v1.3.0
 	github.com/joho/godotenv v1.5.1
 	github.com/shopspring/decimal v1.3.1
 	github.com/sirupsen/logrus v1.9.3
+	golang.org/x/net v0.25.0
+	golang.org/x/time v0.9.0
 	gorm.io/gorm v1.25.12
 )
 
@@ -26,7 +29,6 @@ require (
 	github.com/go-playground/universal-translator v0.18.1 // indirect
 	github.com/go-playground/validator/v10 v10.20.0 // indirect
 	github.com/goccy/go-json v0.10.2 // indirect
-	github.com/google/uuid v1.3.0 // indirect
 	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/jinzhu/now v1.1.5 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
@@ -43,7 +45,6 @@ require (
 	github.com/ugorji/go/codec v1.2.12 // indirect
 	golang.org/x/arch v0.8.0 // indirect
 	golang.org/x/crypto v0.23.0 // indirect
-	golang.org/x/net v0.25.0 // indirect
 	golang.org/x/sys v0.20.0 // indirect
 	golang.org/x/text v0.15.0 // indirect
 	google.golang.org/protobuf v1.34.1 // indirect

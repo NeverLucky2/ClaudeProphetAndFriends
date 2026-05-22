@@ -48,6 +48,13 @@ func main() {
 	// Initialize services
 	logger.Debug("Initializing services...")
 
+	// One shared Alpaca data-API admission limiter governs both the bar-fetch
+	// path and the options-chain path so they stop colliding on the account-wide
+	// rate budget. The intraday client is deliberately left ungated to preserve
+	// its latency isolation (see services/alpaca_data.go SetRateLimiter doc).
+	const alpacaDataBurst = 10
+	alpacaDataLimiter := services.NewAlpacaDataRateLimiter(cfg.AlpacaDataRatePerMin, alpacaDataBurst)
+
 	// Create trading service
 	tradingService, err := services.NewAlpacaTradingService(
 		cfg.AlpacaAPIKey,
@@ -58,12 +65,16 @@ func main() {
 	if err != nil {
 		logger.Warn("Failed to create trading service (will retry on requests):", err)
 	}
+	if tradingService != nil {
+		tradingService.SetRateLimiter(alpacaDataLimiter)
+	}
 
 	// Create data service
 	dataService := services.NewAlpacaDataService(
 		cfg.AlpacaAPIKey,
 		cfg.AlpacaSecretKey,
 	)
+	dataService.SetRateLimiter(alpacaDataLimiter)
 
 	// Create storage service
 	storageService, err := database.NewLocalStorage(cfg.DatabasePath)

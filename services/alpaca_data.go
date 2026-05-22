@@ -13,8 +13,9 @@ import (
 
 // AlpacaDataService implements DataService using Alpaca Market Data API
 type AlpacaDataService struct {
-	client *marketdata.Client
-	logger *logrus.Logger
+	client  *marketdata.Client
+	logger  *logrus.Logger
+	limiter RateLimiter // nil = unthrottled; set via SetRateLimiter at wiring time
 }
 
 // defaultAlpacaClientOpts builds the shared client's marketdata.ClientOpts.
@@ -75,8 +76,18 @@ func NewIntradayAlpacaDataService(apiKey, secretKey string) *AlpacaDataService {
 	return newAlpacaDataService(intradayAlpacaClientOpts(apiKey, secretKey))
 }
 
+// SetRateLimiter wires a shared admission limiter into this service. Wire it
+// only into the shared data service (and the trading service), never the
+// intraday service, so a heavy batch can never delay the intraday path.
+func (s *AlpacaDataService) SetRateLimiter(l RateLimiter) {
+	s.limiter = l
+}
+
 // GetHistoricalBars retrieves historical bar data
 func (s *AlpacaDataService) GetHistoricalBars(ctx context.Context, symbol string, start, end time.Time, timeframe string) ([]*interfaces.Bar, error) {
+	if err := acquire(ctx, s.limiter); err != nil {
+		return nil, fmt.Errorf("historical bars rate-limit wait: %w", err)
+	}
 	s.logger.WithFields(logrus.Fields{
 		"symbol":    symbol,
 		"start":     start,
@@ -123,6 +134,9 @@ func (s *AlpacaDataService) GetHistoricalBars(ctx context.Context, symbol string
 // GetMultiBars retrieves historical bar data for multiple symbols in a single request.
 // Returns a map keyed by symbol. Missing or errored symbols are simply absent from the map.
 func (s *AlpacaDataService) GetMultiBars(ctx context.Context, symbols []string, start, end time.Time, timeframe string) (map[string][]*interfaces.Bar, error) {
+	if err := acquire(ctx, s.limiter); err != nil {
+		return nil, fmt.Errorf("multi bars rate-limit wait: %w", err)
+	}
 	s.logger.WithFields(logrus.Fields{
 		"symbols_count": len(symbols),
 		"start":         start,

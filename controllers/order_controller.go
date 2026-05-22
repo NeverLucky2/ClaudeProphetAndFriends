@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"prophet-trader/interfaces"
@@ -688,6 +689,17 @@ func (oc *OrderController) GetOptionsChain(c *gin.Context) {
 	chain, err := oc.tradingService.GetOptionsChain(ctx, symbol, expiration)
 	if err != nil {
 		oc.logger.WithError(err).Error("Failed to get options chain")
+		// Surface a rate-limit (429) as 429 with the broker's Retry-After hint,
+		// rather than mislabeling it as a 500 — so the agent can tell "back off
+		// and retry" from "the data feed is down".
+		var rle *services.RateLimitedError
+		if errors.As(err, &rle) {
+			if rle.RetryAfter > 0 {
+				c.Header("Retry-After", strconv.Itoa(int(rle.RetryAfter.Seconds())))
+			}
+			c.JSON(429, gin.H{"error": err.Error(), "rate_limited": true})
+			return
+		}
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}

@@ -1,6 +1,8 @@
 package services
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -63,5 +65,43 @@ func TestIntradayClientIsTighterThanDefault(t *testing.T) {
 	intra := intradayAlpacaClientOpts("k", "s")
 	if !(intra.HTTPClient.Timeout < def.HTTPClient.Timeout) {
 		t.Errorf("intraday timeout (%v) must be < shared timeout (%v)", intra.HTTPClient.Timeout, def.HTTPClient.Timeout)
+	}
+}
+
+// The shared data service must acquire a rate-limiter token before issuing a
+// fetch. We prove the gate by injecting a limiter that fails: GetHistoricalBars
+// must return that error and never reach the network SDK call.
+func TestGetHistoricalBars_AcquiresBeforeFetch(t *testing.T) {
+	sentinel := errors.New("limiter blocked")
+	svc := NewAlpacaDataService("k", "s")
+	svc.SetRateLimiter(&fakeLimiter{err: sentinel})
+
+	_, err := svc.GetHistoricalBars(context.Background(), "SPY", time.Now().AddDate(0, 0, -5), time.Now(), "1Day")
+	if !errors.Is(err, sentinel) {
+		t.Errorf("GetHistoricalBars must short-circuit on limiter error, got %v", err)
+	}
+}
+
+func TestGetMultiBars_AcquiresBeforeFetch(t *testing.T) {
+	sentinel := errors.New("limiter blocked")
+	svc := NewAlpacaDataService("k", "s")
+	svc.SetRateLimiter(&fakeLimiter{err: sentinel})
+
+	_, err := svc.GetMultiBars(context.Background(), []string{"SPY", "QQQ"}, time.Now().AddDate(0, 0, -5), time.Now(), "1Day")
+	if !errors.Is(err, sentinel) {
+		t.Errorf("GetMultiBars must short-circuit on limiter error, got %v", err)
+	}
+}
+
+// Limiter is opt-in: constructors leave it nil so existing callers/tests are
+// unthrottled. The intraday client must NEVER be wired to the shared limiter
+// (preserves the latency isolation from commit 1ec6b6a) — main.go only calls
+// SetRateLimiter on the shared service, never the intraday one.
+func TestConstructors_LeaveLimiterNil(t *testing.T) {
+	if NewAlpacaDataService("k", "s").limiter != nil {
+		t.Error("shared service must construct with nil limiter (opt-in via SetRateLimiter)")
+	}
+	if NewIntradayAlpacaDataService("k", "s").limiter != nil {
+		t.Error("intraday service must never carry a limiter")
 	}
 }

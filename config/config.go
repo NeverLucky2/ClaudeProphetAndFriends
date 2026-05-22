@@ -24,6 +24,11 @@ type Config struct {
 	DataRetentionDays int
 	OperatorEmail     string // SEC EDGAR User-Agent contact; set via OPERATOR_EMAIL env var
 
+	// AlpacaDataRatePerMin is the shared Alpaca data-API rate cap (requests/min)
+	// governing bar + options-chain fetches. Default 180 leaves headroom under
+	// the Basic plan's 200/min account limit; raise on higher tiers. <=0 disables.
+	AlpacaDataRatePerMin int
+
 	// Trade guard limits
 	PennyMaxCapitalPct      float64 // fraction of portfolio, e.g. 0.20
 	PennyMaxPositionDollars float64 // max dollars per single penny trade, e.g. 500
@@ -66,6 +71,8 @@ func Load() error {
 		AlpacaSecretKey:   os.Getenv("ALPACA_SECRET_KEY"),
 		AlpacaBaseURL:     firstEnvOrDefault("https://paper-api.alpaca.markets", "ALPACA_BASE_URL", "ALPACA_ENDPOINT"),
 		AlpacaPaper:       getEnvOrDefault("ALPACA_PAPER", "true") == "true",
+
+		AlpacaDataRatePerMin: parseIntOrDefault("ALPACA_DATA_RATE_PER_MIN", 180),
 		ClaudeAPIKey:      os.Getenv("CLAUDE_API_KEY"),
 		XAIAPIKey:         os.Getenv("XAI_API_KEY"),
 		AIProvider:        resolveAIProvider(os.Getenv("AI_PROVIDER"), os.Getenv("CLAUDE_API_KEY"), os.Getenv("XAI_API_KEY")),
@@ -143,4 +150,13 @@ func firstEnvOrDefault(defaultValue string, keys ...string) string {
 func parseFloat(s string) float64 {
 	v, _ := strconv.ParseFloat(s, 64)
 	return v
+}
+
+func parseIntOrDefault(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
 }

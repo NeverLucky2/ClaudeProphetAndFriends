@@ -2,12 +2,14 @@ package services
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math"
 	"prophet-trader/interfaces"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/alpacahq/alpaca-trade-api-go/v3/alpaca"
 	"github.com/sirupsen/logrus"
@@ -185,5 +187,103 @@ func TestResolveOptionsClientOrderID(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestGetOptionsChain_RetriesOnRateLimit(t *testing.T) {
+	attempts := 0
+	svc := newTestAlpacaService()
+	svc.optionsRetryBackoff = 0 // no real sleeping in tests
+	svc.fetchChainOnce = func(ctx context.Context, underlying string, exp time.Time) ([]*interfaces.OptionContract, error) {
+		attempts++
+		if attempts == 1 {
+			return nil, &RateLimitedError{RetryAfter: 0, Body: "too many requests"}
+		}
+		return []*interfaces.OptionContract{{Symbol: "SPY_C"}}, nil
+	}
+
+	got, err := svc.GetOptionsChain(context.Background(), "SPY", time.Now())
+	if err != nil {
+		t.Fatalf("GetOptionsChain: %v", err)
+	}
+	if attempts != 2 {
+		t.Errorf("attempts: got %d, want 2 (one retry after 429)", attempts)
+	}
+	if len(got) != 1 || got[0].Symbol != "SPY_C" {
+		t.Errorf("expected the recovered chain, got %#v", got)
+	}
+}
+
+func TestGetOptionsChain_DoesNotRetryNonTransient(t *testing.T) {
+	attempts := 0
+	svc := newTestAlpacaService()
+	svc.optionsRetryBackoff = 0
+	svc.fetchChainOnce = func(ctx context.Context, underlying string, exp time.Time) ([]*interfaces.OptionContract, error) {
+		attempts++
+		return nil, fmt.Errorf("options chain API error (HTTP 422): bad params")
+	}
+
+	_, err := svc.GetOptionsChain(context.Background(), "SPY", time.Now())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if attempts != 1 {
+		t.Errorf("attempts: got %d, want 1 (4xx must not retry)", attempts)
+	}
+}
+
+func TestGetOptionsChain_StopsAfterMaxRetries(t *testing.T) {
+	attempts := 0
+	svc := newTestAlpacaService()
+	svc.optionsRetryBackoff = 0
+	svc.fetchChainOnce = func(ctx context.Context, underlying string, exp time.Time) ([]*interfaces.OptionContract, error) {
+		attempts++
+		return nil, &RateLimitedError{RetryAfter: 0, Body: "still throttled"}
+	}
+
+	_, err := svc.GetOptionsChain(context.Background(), "SPY", time.Now())
+	var rle *RateLimitedError
+	if !errors.As(err, &rle) {
+		t.Fatalf("final error must remain a RateLimitedError, got %v", err)
+	}
+	if attempts != 3 {
+		t.Errorf("attempts: got %d, want 3 (1 initial + 2 retries)", attempts)
+	}
+}
+
+func TestGetOptionsChain_AcquiresBeforeFetch(t *testing.T) {
+	sentinel := errors.New("limiter blocked")
+	called := false
+	svc := newTestAlpacaService()
+	svc.limiter = &fakeLimiter{err: sentinel}
+	svc.fetchChainOnce = func(ctx context.Context, underlying string, exp time.Time) ([]*interfaces.OptionContract, error) {
+		called = true
+		return nil, nil
+	}
+
+	_, err := svc.GetOptionsChain(context.Background(), "SPY", time.Now())
+	if !errors.Is(err, sentinel) {
+		t.Errorf("must short-circuit on limiter error, got %v", err)
+	}
+	if called {
+		t.Error("fetch must not run when the limiter blocks")
+	}
+}
+
+func TestChainRetryBackoff(t *testing.T) {
+	base := 250 * time.Millisecond
+	if got := chainRetryBackoff(1, base, nil); got != 250*time.Millisecond {
+		t.Errorf("attempt 1: got %v, want 250ms", got)
+	}
+	if got := chainRetryBackoff(2, base, nil); got != 500*time.Millisecond {
+		t.Errorf("attempt 2: got %v, want 500ms", got)
+	}
+	// Retry-After under the cap is honored verbatim.
+	if got := chainRetryBackoff(1, base, &RateLimitedError{RetryAfter: 1 * time.Second}); got != 1*time.Second {
+		t.Errorf("retry-after 1s: got %v, want 1s", got)
+	}
+	// Retry-After over the 2s cap is clamped.
+	if got := chainRetryBackoff(1, base, &RateLimitedError{RetryAfter: 9 * time.Second}); got != 2*time.Second {
+		t.Errorf("retry-after 9s: got %v, want 2s (capped)", got)
 	}
 }
