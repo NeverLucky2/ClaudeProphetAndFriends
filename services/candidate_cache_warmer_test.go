@@ -64,3 +64,22 @@ func TestWarmCandidatesOnce_OutOfWindowSkips(t *testing.T) {
 		t.Fatalf("expected no refresh out-of-window; got %d", r.calls)
 	}
 }
+
+// With no refreshers the warmer must return immediately (never enter the ticker
+// loop). main.go's per-agent gating relies on this: a bot with neither
+// ENABLE_MEANREV_WARMER nor ENABLE_DRIFT_WARMER builds an empty slice, and the
+// outer len>0 guard plus this early return mean no warmer goroutine spins.
+func TestRunCandidateCacheWarmer_EmptyRefreshers_Noop(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		RunCandidateCacheWarmer(ctx, time.Second, nil)
+		close(done)
+	}()
+	select {
+	case <-done: // returned immediately, as required
+	case <-ctx.Done():
+		t.Error("RunCandidateCacheWarmer with empty refreshers did not return immediately")
+	}
+}
