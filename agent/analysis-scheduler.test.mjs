@@ -5,6 +5,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'path';
+import fs from 'fs/promises';
+import { fileURLToPath } from 'url';
 
 import {
   buildRegimeComputeArgv,
@@ -13,6 +15,8 @@ import {
   buildMarketTopSkillAppendix,
   buildBubbleSkillAppendix,
   shouldTriggerWeeklyScreenerOnStartup,
+  isLockStale,
+  STALE_LOCK_MS,
   AnalysisScheduler,
 } from './analysis-scheduler.js';
 
@@ -296,5 +300,79 @@ test('triggerJob: failure leaves state unadvanced for all 4 upstream regime skil
     } finally {
       if (prevKey === undefined) delete process.env.FMP_API_KEY; else process.env.FMP_API_KEY = prevKey;
     }
+  }
+});
+
+// Lock staleness: a `.running` lock is released only in triggerJob's finally.
+// A killed process (e.g., a bot restart mid-job) leaks the file permanently,
+// and because lock keys are date-stamped, a stale lock from today blocks that
+// job's self-heal for the rest of the day. isLockStale lets _acquireLock /
+// _isLocked reclaim a lock left by a dead process.
+test('STALE_LOCK_MS comfortably exceeds the longest job timeout (15 min)', () => {
+  // The longest scheduler job timeout is 15 min (e.g. parameter reviews). The
+  // staleness window must clear that with margin so a legitimately long-running
+  // job is never reclaimed out from under itself.
+  assert.ok(STALE_LOCK_MS > 15 * 60 * 1000, `STALE_LOCK_MS (${STALE_LOCK_MS}) must exceed 15 min`);
+});
+
+test('isLockStale: a just-created lock is fresh', () => {
+  const now = 1_000_000_000_000;
+  assert.equal(isLockStale(now, now), false);
+});
+
+test('isLockStale: a lock just under the window is fresh', () => {
+  const now = 1_000_000_000_000;
+  const mtime = now - (STALE_LOCK_MS - 1000);
+  assert.equal(isLockStale(mtime, now), false);
+});
+
+test('isLockStale: a lock older than the window is stale', () => {
+  const now = 1_000_000_000_000;
+  const mtime = now - (STALE_LOCK_MS + 1000);
+  assert.equal(isLockStale(mtime, now), true);
+});
+
+test('isLockStale: a future mtime (clock skew) is treated as fresh, not stale', () => {
+  // Defensive: never reclaim a lock whose mtime is ahead of now.
+  const now = 1_000_000_000_000;
+  assert.equal(isLockStale(now + 60_000, now), false);
+});
+
+// Integration: exercise the real fs-touching lock methods, not just the
+// predicate. REPORTS_DIR is module-private; reconstruct it the same way the
+// module does (this test file is also in agent/).
+const REPORTS_DIR_FOR_TEST = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data', 'reports');
+
+test('_acquireLock + _isLocked reclaim a stale lock left by a killed process', async () => {
+  const scheduler = new AnalysisScheduler();
+  scheduler._log = () => {};
+  const key = '__test_stale_lock__';
+  const lockPath = path.join(REPORTS_DIR_FOR_TEST, `${key}.running`);
+  await fs.mkdir(REPORTS_DIR_FOR_TEST, { recursive: true });
+  try {
+    await fs.writeFile(lockPath, '', 'utf-8');
+    // Back-date the lock past the staleness window (simulate a dead process).
+    const old = new Date(Date.now() - (STALE_LOCK_MS + 60_000));
+    await fs.utimes(lockPath, old, old);
+
+    assert.equal(await scheduler._isLocked(key), false, 'a stale lock must not read as locked');
+    assert.equal(await scheduler._acquireLock(key), true, 'acquire must reclaim a stale lock');
+  } finally {
+    await fs.unlink(lockPath).catch(() => {});
+  }
+});
+
+test('_acquireLock + _isLocked respect a fresh lock held by a live job', async () => {
+  const scheduler = new AnalysisScheduler();
+  scheduler._log = () => {};
+  const key = '__test_fresh_lock__';
+  const lockPath = path.join(REPORTS_DIR_FOR_TEST, `${key}.running`);
+  await fs.mkdir(REPORTS_DIR_FOR_TEST, { recursive: true });
+  try {
+    await fs.writeFile(lockPath, '', 'utf-8'); // mtime = now → fresh
+    assert.equal(await scheduler._isLocked(key), true, 'a fresh lock must read as locked');
+    assert.equal(await scheduler._acquireLock(key), false, 'acquire must not steal a fresh lock');
+  } finally {
+    await fs.unlink(lockPath).catch(() => {});
   }
 });
