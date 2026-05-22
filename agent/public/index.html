@@ -840,6 +840,53 @@
     .stat-value.positive { color: var(--success); }
     .stat-value.negative { color: var(--error); }
 
+    /* ── Go Console split pane (per-agent backend logs) ── */
+    .go-pane {
+      display: flex; flex-direction: column;
+      flex: 0.8 1 0; min-width: 0;
+      border-left: 1px solid var(--rule);
+      background: var(--paper); overflow: hidden;
+    }
+    .go-pane-header {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 10px; flex-shrink: 0;
+      border-bottom: 1px solid var(--rule-light);
+      font-size: 10px; text-transform: uppercase; letter-spacing: 1px;
+      color: var(--ink-muted);
+    }
+    .go-pane-title { font-weight: 700; }
+    .go-pane-port { color: var(--ink-faint); font-family: 'IBM Plex Mono', monospace; letter-spacing: 0; text-transform: none; }
+    .go-pane-count { color: var(--ink-faint); font-family: 'IBM Plex Mono', monospace; letter-spacing: 0; }
+    .go-pane-search {
+      margin-left: auto; width: 110px; max-width: 45%;
+      padding: 2px 6px; font-size: 11px;
+      background: var(--paper-dark); color: var(--ink);
+      border: 1px solid var(--rule); border-radius: 3px;
+    }
+    .go-pane-search:focus { outline: none; border-color: var(--accent); }
+    .go-pane-search::placeholder { color: var(--ink-faint); }
+    .go-pane-collapse {
+      flex-shrink: 0; cursor: pointer;
+      background: var(--paper-dark); color: var(--ink-muted);
+      border: 1px solid var(--rule); border-radius: 3px;
+      padding: 1px 7px; font-size: 12px; line-height: 1.2;
+    }
+    .go-pane-collapse:hover { border-color: var(--ink-muted); }
+    .go-console {
+      flex: 1; overflow-y: auto; padding: 8px 10px;
+      font-family: 'IBM Plex Mono', monospace; min-height: 0;
+    }
+    .go-console::-webkit-scrollbar { width: 4px; }
+    .go-console::-webkit-scrollbar-thumb { background: var(--rule); }
+    /* Collapsed: fold to a slim bar; reasoning reclaims the width. */
+    .go-pane.collapsed { flex: 0 0 auto; }
+    .go-pane.collapsed .go-console,
+    .go-pane.collapsed .go-pane-search { display: none; }
+    .go-pane.collapsed .go-pane-header { border-bottom: none; }
+    @media (max-width: 768px) {
+      .go-pane { flex: 1 1 auto; border-left: none; border-top: 1px solid var(--rule); }
+    }
+
     .card {
       background: var(--paper); border: 1px solid var(--rule); padding: 10px;
       margin-bottom: 8px; transition: border-color 0.2s;
@@ -1504,6 +1551,12 @@
   <div class="modal" id="modal-content"></div>
 </div>
 
+<script type="module">
+  // Share the pure classifier with the inline script below via a global.
+  import { classifyLogPanes } from './log-source.js';
+  window.classifyLogPanes = classifyLogPanes;
+</script>
+
 <script>
 // ── State ──────────────────────────────────
 let config = { accounts: [], agents: [], strategies: [], models: [] };
@@ -1853,8 +1906,10 @@ function connectSSE() {
   es.addEventListener('agent_log', e => {
     const d = JSON.parse(e.data);
     const sid = d.sandboxId || getEffectiveSandboxId();
+    const route = (window.classifyLogPanes || (() => ({ main: true, go: false })))(d);
     const html = `<div class="log-entry ${d.level||'info'}"><span class="time">${fmtTime()}</span>${esc(d.message)}</div>`;
-    logToSandbox(sid, html);
+    if (route.main) logToSandbox(sid, html);
+    if (route.go) logToGoConsole(sid, html, d.message);
     log(formatSandboxPrefix(d) + d.message, d.level || 'info');
   });
   es.addEventListener('agent_text', e => {
@@ -2868,6 +2923,17 @@ function ensureSandboxTerminal(sandboxId, label) {
           <div class="log-entry info"><span class="time">--:--:--</span>${esc(label)} ready. Press Start to begin.</div>
         </div>
       </div>
+      <div class="go-pane ${goConsoleCollapsed() ? 'collapsed' : ''}" data-go-pane="${sandboxId}">
+        <div class="go-pane-header">
+          <span class="go-pane-title">Go Console</span>
+          <span class="go-pane-port" data-go-port="${sandboxId}"></span>
+          <span class="go-pane-count" data-go-count="${sandboxId}"></span>
+          <input type="text" class="go-pane-search" placeholder="Filter…" autocomplete="off"
+                 oninput="filterGoConsole('${sandboxId}')" data-go-search="${sandboxId}">
+          <button class="go-pane-collapse" onclick="toggleGoConsole()" title="Collapse / expand Go console">${goConsoleCollapsed() ? '+' : '–'}</button>
+        </div>
+        <div class="terminal go-console" data-terminal-go="${sandboxId}"></div>
+      </div>
       <div class="sidebar">
         <div class="section">
           <div class="section-title">Account</div>
@@ -2928,7 +2994,7 @@ function ensureSandboxTerminal(sandboxId, label) {
     <button class="sidebar-toggle" onclick="toggleMobileSidebar('${sandboxId}')">&#9776;</button>
     <div class="sidebar-overlay" data-overlay="${sandboxId}" onclick="toggleMobileSidebar('${sandboxId}')"></div>`;
   container.appendChild(wrapper);
-  sandboxTerminals[sandboxId] = { el: wrapper, termEl: wrapper.querySelector('[data-terminal]') };
+  sandboxTerminals[sandboxId] = { el: wrapper, termEl: wrapper.querySelector('[data-terminal]'), goTermEl: wrapper.querySelector('[data-terminal-go]') };
   attachTerminalScrollControls(sandboxId);
   return sandboxTerminals[sandboxId];
 }
@@ -3235,6 +3301,45 @@ function logToSandbox(sandboxId, html) {
   if (!t) return;
   t.termEl.insertAdjacentHTML('beforeend', html);
   if (t.autoScroll !== false) t.termEl.scrollTop = t.termEl.scrollHeight; // undefined = uninitialized terminal, treat as "scroll"
+}
+
+const GO_CONSOLE_MAX = 500; // scrollback cap — Go output is high-volume
+function logToGoConsole(sandboxId, html, rawMessage) {
+  const t = sandboxTerminals[sandboxId];
+  if (!t || !t.goTermEl) return;
+  const el = t.goTermEl;
+  const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 50;
+  el.insertAdjacentHTML('beforeend', html);
+  while (el.children.length > GO_CONSOLE_MAX) el.removeChild(el.firstChild);
+  if (nearBottom) el.scrollTop = el.scrollHeight;
+  // Lazily label the pane with the backend port parsed from "[go:PORT]".
+  const portEl = document.querySelector(`[data-go-port="${sandboxId}"]`);
+  if (portEl && !portEl.textContent && rawMessage) {
+    const m = /^\[go:(\d+)\]/.exec(rawMessage);
+    if (m) portEl.textContent = ':' + m[1];
+  }
+  const countEl = document.querySelector(`[data-go-count="${sandboxId}"]`);
+  if (countEl) countEl.textContent = '· ' + el.children.length;
+}
+
+const GO_CONSOLE_COLLAPSED_KEY = 'goConsoleCollapsed';
+function goConsoleCollapsed() { return localStorage.getItem(GO_CONSOLE_COLLAPSED_KEY) === '1'; }
+function toggleGoConsole() {
+  const next = !goConsoleCollapsed();
+  localStorage.setItem(GO_CONSOLE_COLLAPSED_KEY, next ? '1' : '0');
+  document.querySelectorAll('.go-pane').forEach(pane => {
+    pane.classList.toggle('collapsed', next);
+    const btn = pane.querySelector('.go-pane-collapse');
+    if (btn) btn.textContent = next ? '+' : '–';
+  });
+}
+function filterGoConsole(sandboxId) {
+  const search = (document.querySelector(`[data-go-search="${sandboxId}"]`)?.value || '').toLowerCase();
+  const el = sandboxTerminals[sandboxId]?.goTermEl;
+  if (!el) return;
+  el.querySelectorAll('.log-entry').forEach(entry => {
+    entry.style.display = !search || entry.textContent.toLowerCase().includes(search) ? '' : 'none';
+  });
 }
 
 function filterTerminalFor(sandboxId) {

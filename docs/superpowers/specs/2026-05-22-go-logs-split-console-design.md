@@ -1,7 +1,7 @@
 # Go Logs → Per-Agent Split Console — Design
 
 **Date:** 2026-05-22
-**Status:** ✅ Design — approved in brainstorming, ready for implementation planning.
+**Status:** ✅ Implemented (branch `go-logs-split-console`). Pending live-dashboard visual confirmation.
 **Derives from:** `docs/superpowers/specs/2026-05-22-go-logs-console-tab-brainstorming-brief.md`
 (sub-project 2 of 3 from the cross-agent 429-storm work).
 

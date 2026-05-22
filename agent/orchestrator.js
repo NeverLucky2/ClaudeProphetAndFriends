@@ -8,6 +8,7 @@ import axios from 'axios';
 
 import { AgentHarness } from './harness.js';
 import { candidateWarmerFlags } from './candidate-warmer-flags.js';
+import { goLog } from './go-log.js';
 import {
   getSandbox,
   getSandboxes,
@@ -209,49 +210,29 @@ export class AgentOrchestrator extends EventEmitter {
     runtime.goProc.stdout.on('data', chunk => {
       const message = chunk.toString().trim();
       if (message && !isGinAccessLog(message)) {
-        this.emit('agent_log', {
-          sandboxId,
-          level: 'info',
-          message: `[go:${runtime.port}] ${message}`,
-        });
+        this.emit('agent_log', goLog(sandboxId, 'info', `[go:${runtime.port}] ${message}`));
       }
     });
 
     runtime.goProc.stderr.on('data', chunk => {
       const message = chunk.toString().trim();
       if (message && !isGinAccessLog(message)) {
-        this.emit('agent_log', {
-          sandboxId,
-          level: 'warning',
-          message: `[go:${runtime.port}] ${message}`,
-        });
+        this.emit('agent_log', goLog(sandboxId, 'warning', `[go:${runtime.port}] ${message}`));
       }
     });
 
     runtime.goProc.on('exit', (code, signal) => {
       runtime.goReady = false;
       runtime.goProc = null;
-      this.emit('agent_log', {
-        sandboxId,
-        level: code === 0 || signal === 'SIGTERM' ? 'info' : 'error',
-        message: `Trading backend exited (code: ${code}, signal: ${signal})`,
-      });
+      this.emit('agent_log', goLog(sandboxId, code === 0 || signal === 'SIGTERM' ? 'info' : 'error', `Trading backend exited (code: ${code}, signal: ${signal})`));
       // Auto-restart on unexpected crash (mirrors the prior singleton safety net).
       // SIGTERM means we asked it to stop (manual stop, shutdown, or restart) — don't bounce it.
       if (code !== 0 && code !== null && signal !== 'SIGTERM') {
-        this.emit('agent_log', {
-          sandboxId,
-          level: 'error',
-          message: 'Trading backend crashed — auto-restarting in 5s...',
-        });
+        this.emit('agent_log', goLog(sandboxId, 'error', 'Trading backend crashed — auto-restarting in 5s...'));
         setTimeout(() => {
           if (!this.runtimes.has(sandboxId)) return; // runtime was torn down
           this.startGoBackend(sandboxId).catch(err => {
-            this.emit('agent_log', {
-              sandboxId,
-              level: 'error',
-              message: `Auto-restart failed: ${err.message}`,
-            });
+            this.emit('agent_log', goLog(sandboxId, 'error', `Auto-restart failed: ${err.message}`));
           });
         }, 5000);
       }
@@ -262,11 +243,7 @@ export class AgentOrchestrator extends EventEmitter {
       try {
         await runtime.goAxios.get('/health', { timeout: 2000 });
         runtime.goReady = true;
-        this.emit('agent_log', {
-          sandboxId,
-          level: 'success',
-          message: `Trading backend ready on port ${runtime.port} for ${account.name}`,
-        });
+        this.emit('agent_log', goLog(sandboxId, 'success', `Trading backend ready on port ${runtime.port} for ${account.name}`));
         return runtime;
       } catch {
         // keep waiting
