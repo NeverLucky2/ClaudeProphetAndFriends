@@ -535,6 +535,80 @@ test('harvest: monitor_enabled + open condors + entries available → run (entri
   assert.equal(r.skip, false);
 });
 
+// ── harvestPreflight closed-phase guard ────────────────────────────
+//
+// During closed-market hours (8pm-4am ET weekdays + full weekends) the broker
+// is shut. With monitor_enabled=true the Go service owns exits — the LLM has
+// nothing to do regardless of condor count. Without the monitor, if condors=0
+// there is also nothing to do. The case of condors>0 + monitor=false is handled
+// by the existing guard (returns skip:false before reaching the phase check).
+
+test('harvest: closed phase + monitor_enabled=false + 0 condors → skip', async () => {
+  const rt = makeRuntime([
+    ['/api/v1/harvest/state', () => harvestState(0, 0, false)],
+    ['/api/v1/harvest/fomc', () => fomcStatus(false)],
+    // The fomc fetch is in the initial Promise.all so it IS mocked above.
+    // Regime, econ, and chain-probe routes (everything after the phase check)
+    // must not be consulted — leave them unmocked. Any unmocked call would
+    // throw "unmocked URL" and land as fail-open skip:false, falsifying the
+    // skip:true assertion below.
+  ]);
+  const r = await withFrozenTime(ET_CLOSED, () => resolvePreflight('harvest', rt, {}));
+  assert.equal(r.skip, true);
+  assert.match(r.reason, /closed phase/);
+});
+
+test('harvest: closed phase + monitor_enabled=true + 0 condors → skip', async () => {
+  const rt = makeRuntime([
+    ['/api/v1/harvest/state', () => harvestState(0, 0, true)],
+    ['/api/v1/harvest/fomc', () => fomcStatus(false)],
+  ]);
+  const r = await withFrozenTime(ET_CLOSED, () => resolvePreflight('harvest', rt, {}));
+  assert.equal(r.skip, true);
+  assert.match(r.reason, /closed phase/);
+});
+
+test('harvest: closed phase + monitor_enabled=true + open condors → skip (monitor owns exits)', async () => {
+  // The new case: condors>0 but monitor owns exits; LLM can't enter either.
+  // Existing guard only fires when monitor=false, so this falls through to
+  // our new closed-phase check.
+  const rt = makeRuntime([
+    ['/api/v1/harvest/state', () => harvestState(2, 5.0, true)],
+    ['/api/v1/harvest/fomc', () => fomcStatus(false)],
+  ]);
+  const r = await withFrozenTime(ET_CLOSED, () => resolvePreflight('harvest', rt, {}));
+  assert.equal(r.skip, true);
+  assert.match(r.reason, /closed phase/);
+});
+
+test('harvest: closed phase + monitor_enabled=false + open condors → run (existing guard fires first)', async () => {
+  // The existing guard (condors>0 + monitor=false) returns before the new guard.
+  // This test proves the existing path is not changed by the new guard.
+  const rt = makeRuntime([
+    ['/api/v1/harvest/state', () => harvestState(2, 5.0, false)],
+    ['/api/v1/harvest/fomc', () => fomcStatus(false)],
+  ]);
+  const r = await withFrozenTime(ET_CLOSED, () => resolvePreflight('harvest', rt, {}));
+  assert.equal(r.skip, false);
+  assert.match(r.reason, /open condor/);
+});
+
+test('harvest: open phase + monitor_enabled=true + 0 condors → closed-phase guard does not fire', async () => {
+  // Guard must be a no-op during open phase; execution continues to FOMC/chain checks.
+  const rt = makeRuntime([
+    ['/api/v1/harvest/state', () => harvestState(0, 0, true)],
+    ['/api/v1/harvest/fomc', () => fomcStatus(false)],
+    ['/api/v1/regime-gate/status', () => regimeAllow()],
+    ['/api/v1/econ/blackout', () => blackoutOff()],
+    ['/api/v1/harvest/expirations/SPY', () => harvestExpiration()],
+    [/^\/api\/v1\/options\/chain\/SPY/, () => chainNonEmpty()],
+    ['/api/v1/iv/SPY', () => ivSpread(0.15, 0.04)],
+  ]);
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('harvest', rt, {}));
+  assert.equal(r.skip, false);
+  assert.doesNotMatch(r.reason, /closed phase/);
+});
+
 // ── trendPreflight kill switch ────────────────────────────────────
 //
 // When TURTLE_SCHEDULER_ENABLED=true, the Go service runs the full

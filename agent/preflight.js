@@ -441,6 +441,11 @@ async function harvestPreflight(runtime, agentConfig) {
     return { skip: false, reason: `${openCondors} open condor(s) to evaluate` };
   }
 
+  const phase = isClosedPhase(new Date());
+  if (phase.closed) {
+    return { skip: true, reason: `closed phase (${phase.reason}), harvest LLM not needed` };
+  }
+
   if (fomc.is_blackout) {
     return { skip: true, reason: 'no open condors and FOMC blackout' };
   }
