@@ -376,7 +376,7 @@ test('harvest: no condors + econ blackout (non-FOMC) → skip', async () => {
     ['/api/v1/econ/blackout', () => blackoutOn('Core PCE release')],
     // chain probe routes shouldn't be reached because we skip before them.
   ]);
-  const r = await resolvePreflight('harvest', rt, {});
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('harvest', rt, {}));
   assert.equal(r.skip, true);
   assert.match(r.reason, /econ blackout/);
 });
@@ -387,7 +387,7 @@ test('harvest: open condor + econ blackout → run (exits must happen)', async (
     ['/api/v1/harvest/fomc', () => fomcStatus(false)],
     ['/api/v1/econ/blackout', () => blackoutOn('CPI release')],
   ]);
-  const r = await resolvePreflight('harvest', rt, {});
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('harvest', rt, {}));
   assert.equal(r.skip, false);
 });
 
@@ -398,7 +398,7 @@ test('harvest: existing 24h FOMC blackout still skips (econ check not required)'
     // The FOMC path returns before econ blackout is consulted — leave the
     // econ route unmocked to assert it is not called.
   ]);
-  const r = await resolvePreflight('harvest', rt, {});
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('harvest', rt, {}));
   assert.equal(r.skip, true);
   assert.match(r.reason, /FOMC blackout/);
 });
@@ -428,7 +428,7 @@ test('harvest: IV > RV → run (premium edge present)', async () => {
     [/^\/api\/v1\/options\/chain\/SPY/, () => chainNonEmpty()],
     ['/api/v1/iv/SPY', () => ivSpread(0.15, 0.04)], // IV 19, RV 15 → spread +4
   ]);
-  const r = await resolvePreflight('harvest', rt, {});
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('harvest', rt, {}));
   assert.equal(r.skip, false, `expected run, got skip: ${r.reason}`);
 });
 
@@ -441,7 +441,7 @@ test('harvest: IV ≤ RV with positive RV → skip (no premium edge)', async () 
     [/^\/api\/v1\/options\/chain\/SPY/, () => chainNonEmpty()],
     ['/api/v1/iv/SPY', () => ivSpread(0.20, -0.02)], // IV 18, RV 20 → spread -2
   ]);
-  const r = await resolvePreflight('harvest', rt, {});
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('harvest', rt, {}));
   assert.equal(r.skip, true);
   assert.match(r.reason, /IV.*RV|premium edge/i);
 });
@@ -455,7 +455,7 @@ test('harvest: IV = RV exactly → skip (spread ≤ 0)', async () => {
     [/^\/api\/v1\/options\/chain\/SPY/, () => chainNonEmpty()],
     ['/api/v1/iv/SPY', () => ivSpread(0.20, 0)],
   ]);
-  const r = await resolvePreflight('harvest', rt, {});
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('harvest', rt, {}));
   assert.equal(r.skip, true);
 });
 
@@ -470,7 +470,7 @@ test('harvest: RV = 0 (no signal) → fall through, do not skip', async () => {
     [/^\/api\/v1\/options\/chain\/SPY/, () => chainNonEmpty()],
     ['/api/v1/iv/SPY', () => ({ data: { current_iv: 0.20, realized_vol_20d: 0, iv_minus_rv: 0 } })],
   ]);
-  const r = await resolvePreflight('harvest', rt, {});
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('harvest', rt, {}));
   assert.equal(r.skip, false);
 });
 
@@ -483,7 +483,7 @@ test('harvest: IV endpoint errors → fall through (soft-fail)', async () => {
     [/^\/api\/v1\/options\/chain\/SPY/, () => chainNonEmpty()],
     ['/api/v1/iv/SPY', () => { throw new Error('iv endpoint down'); }],
   ]);
-  const r = await resolvePreflight('harvest', rt, {});
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('harvest', rt, {}));
   assert.equal(r.skip, false, 'soft-fail expected on IV endpoint error');
 });
 
@@ -494,7 +494,7 @@ test('harvest: open condor + IV ≤ RV → run (exits must happen)', async () =>
     // IV endpoint should not even be hit because open condors > 0 returns
     // before the gate runs. Leave it unmocked to assert it isn't called.
   ]);
-  const r = await resolvePreflight('harvest', rt, {});
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('harvest', rt, {}));
   assert.equal(r.skip, false);
 });
 
@@ -515,7 +515,7 @@ test('harvest: monitor_enabled + open condors but otherwise no entries → skip'
     ['/api/v1/econ/blackout', () => blackoutOff()],
     ['/api/v1/harvest/expirations/SPY', () => ({ data: { expiration_date: null } })],
   ]);
-  const r = await resolvePreflight('harvest', rt, {});
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('harvest', rt, {}));
   assert.equal(r.skip, true);
 });
 
@@ -531,8 +531,82 @@ test('harvest: monitor_enabled + open condors + entries available → run (entri
     [/^\/api\/v1\/options\/chain\/SPY/, () => chainNonEmpty()],
     ['/api/v1/iv/SPY', () => ivSpread(0.15, 0.04)], // positive premium edge
   ]);
-  const r = await resolvePreflight('harvest', rt, {});
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('harvest', rt, {}));
   assert.equal(r.skip, false);
+});
+
+// ── harvestPreflight closed-phase guard ────────────────────────────
+//
+// During closed-market hours (8pm-4am ET weekdays + full weekends) the broker
+// is shut. With monitor_enabled=true the Go service owns exits — the LLM has
+// nothing to do regardless of condor count. Without the monitor, if condors=0
+// there is also nothing to do. The case of condors>0 + monitor=false is handled
+// by the existing guard (returns skip:false before reaching the phase check).
+
+test('harvest: closed phase + monitor_enabled=false + 0 condors → skip', async () => {
+  const rt = makeRuntime([
+    ['/api/v1/harvest/state', () => harvestState(0, 0, false)],
+    ['/api/v1/harvest/fomc', () => fomcStatus(false)],
+    // The fomc fetch is in the initial Promise.all so it IS mocked above.
+    // Regime, econ, and chain-probe routes (everything after the phase check)
+    // must not be consulted — leave them unmocked. Any unmocked call would
+    // throw "unmocked URL" and land as fail-open skip:false, falsifying the
+    // skip:true assertion below.
+  ]);
+  const r = await withFrozenTime(ET_CLOSED, () => resolvePreflight('harvest', rt, {}));
+  assert.equal(r.skip, true);
+  assert.match(r.reason, /closed phase/);
+});
+
+test('harvest: closed phase + monitor_enabled=true + 0 condors → skip', async () => {
+  const rt = makeRuntime([
+    ['/api/v1/harvest/state', () => harvestState(0, 0, true)],
+    ['/api/v1/harvest/fomc', () => fomcStatus(false)],
+  ]);
+  const r = await withFrozenTime(ET_CLOSED, () => resolvePreflight('harvest', rt, {}));
+  assert.equal(r.skip, true);
+  assert.match(r.reason, /closed phase/);
+});
+
+test('harvest: closed phase + monitor_enabled=true + open condors → skip (monitor owns exits)', async () => {
+  // The new case: condors>0 but monitor owns exits; LLM can't enter either.
+  // Existing guard only fires when monitor=false, so this falls through to
+  // our new closed-phase check.
+  const rt = makeRuntime([
+    ['/api/v1/harvest/state', () => harvestState(2, 5.0, true)],
+    ['/api/v1/harvest/fomc', () => fomcStatus(false)],
+  ]);
+  const r = await withFrozenTime(ET_CLOSED, () => resolvePreflight('harvest', rt, {}));
+  assert.equal(r.skip, true);
+  assert.match(r.reason, /closed phase/);
+});
+
+test('harvest: closed phase + monitor_enabled=false + open condors → run (existing guard fires first)', async () => {
+  // The existing guard (condors>0 + monitor=false) returns before the new guard.
+  // This test proves the existing path is not changed by the new guard.
+  const rt = makeRuntime([
+    ['/api/v1/harvest/state', () => harvestState(2, 5.0, false)],
+    ['/api/v1/harvest/fomc', () => fomcStatus(false)],
+  ]);
+  const r = await withFrozenTime(ET_CLOSED, () => resolvePreflight('harvest', rt, {}));
+  assert.equal(r.skip, false);
+  assert.match(r.reason, /open condor/);
+});
+
+test('harvest: open phase + monitor_enabled=true + 0 condors → closed-phase guard does not fire', async () => {
+  // Guard must be a no-op during open phase; execution continues to FOMC/chain checks.
+  const rt = makeRuntime([
+    ['/api/v1/harvest/state', () => harvestState(0, 0, true)],
+    ['/api/v1/harvest/fomc', () => fomcStatus(false)],
+    ['/api/v1/regime-gate/status', () => regimeAllow()],
+    ['/api/v1/econ/blackout', () => blackoutOff()],
+    ['/api/v1/harvest/expirations/SPY', () => harvestExpiration()],
+    [/^\/api\/v1\/options\/chain\/SPY/, () => chainNonEmpty()],
+    ['/api/v1/iv/SPY', () => ivSpread(0.15, 0.04)],
+  ]);
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('harvest', rt, {}));
+  assert.equal(r.skip, false);
+  assert.doesNotMatch(r.reason, /closed phase/);
 });
 
 // ── trendPreflight kill switch ────────────────────────────────────
@@ -745,4 +819,64 @@ test('drift: positions response wrong shape (object not array) → fail open (ru
   ]);
   const r = await resolvePreflight('earnings-drift', rt, {});
   assert.equal(r.skip, false, 'ambiguous positions shape must fail open');
+});
+
+// ── harvestPreflight: expirations 404 = skip ───────────────────────
+//
+// GET /api/v1/harvest/expirations/:symbol returns HTTP 404 when
+// GetNextMonthlyExpiration finds no qualifying contract in [35,55] DTE.
+// This is a semantic "not found", identical in meaning to the !exp branch
+// (expiration_date: null) which already returns skip:true. The catch block
+// must distinguish 404 (skip) from transient errors like 500 or ECONNREFUSED
+// (fail open — let the LLM investigate).
+
+test('harvest: expirations endpoint 404 → skip (no qualifying DTE window)', async () => {
+  const rt = makeRuntime([
+    ['/api/v1/harvest/state', () => harvestState(0)],
+    ['/api/v1/harvest/fomc', () => fomcStatus(false)],
+    ['/api/v1/regime-gate/status', () => regimeAllow()],
+    ['/api/v1/econ/blackout', () => blackoutOff()],
+    ['/api/v1/harvest/expirations/SPY', () => {
+      const e = new Error('Request failed with status code 404');
+      e.response = { status: 404 };
+      throw e;
+    }],
+  ]);
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('harvest', rt, {}));
+  assert.equal(r.skip, true);
+  assert.match(r.reason, /404/);
+});
+
+test('harvest: expirations endpoint 500 → run (fail open on non-404 error)', async () => {
+  const rt = makeRuntime([
+    ['/api/v1/harvest/state', () => harvestState(0)],
+    ['/api/v1/harvest/fomc', () => fomcStatus(false)],
+    ['/api/v1/regime-gate/status', () => regimeAllow()],
+    ['/api/v1/econ/blackout', () => blackoutOff()],
+    ['/api/v1/harvest/expirations/SPY', () => {
+      const e = new Error('Internal server error');
+      e.response = { status: 500 };
+      throw e;
+    }],
+  ]);
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('harvest', rt, {}));
+  assert.equal(r.skip, false);
+  assert.match(r.reason, /harvest chain probe error/);
+});
+
+test('harvest: expirations network error (no response object) → run (fail open)', async () => {
+  // ECONNREFUSED / timeout throws an Error with no .response property.
+  // Must not be treated as 404 — the endpoint may be temporarily unreachable.
+  const rt = makeRuntime([
+    ['/api/v1/harvest/state', () => harvestState(0)],
+    ['/api/v1/harvest/fomc', () => fomcStatus(false)],
+    ['/api/v1/regime-gate/status', () => regimeAllow()],
+    ['/api/v1/econ/blackout', () => blackoutOff()],
+    ['/api/v1/harvest/expirations/SPY', () => {
+      throw new Error('ECONNREFUSED');
+    }],
+  ]);
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('harvest', rt, {}));
+  assert.equal(r.skip, false);
+  assert.match(r.reason, /harvest chain probe error/);
 });

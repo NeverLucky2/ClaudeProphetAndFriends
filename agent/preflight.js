@@ -441,6 +441,11 @@ async function harvestPreflight(runtime, agentConfig) {
     return { skip: false, reason: `${openCondors} open condor(s) to evaluate` };
   }
 
+  const phase = isClosedPhase(new Date());
+  if (phase.closed) {
+    return { skip: true, reason: `closed phase (${phase.reason}), harvest LLM not needed` };
+  }
+
   if (fomc.is_blackout) {
     return { skip: true, reason: 'no open condors and FOMC blackout' };
   }
@@ -481,6 +486,9 @@ async function harvestPreflight(runtime, agentConfig) {
       };
     }
   } catch (err) {
+    if (err.response?.status === 404) {
+      return { skip: true, reason: 'no qualifying monthly expiration in [35,55] DTE for SPY (404)' };
+    }
     return { skip: false, reason: `harvest chain probe error: ${err.message}` };
   }
 
