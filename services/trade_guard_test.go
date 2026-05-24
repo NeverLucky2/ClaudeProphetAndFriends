@@ -636,3 +636,35 @@ func TestTradeGuard_HasRawSymbol(t *testing.T) {
 		t.Fatal("raw symbol must be per-agent")
 	}
 }
+
+func TestCheckOptionsOpen_UniverseGate(t *testing.T) {
+	floor := map[string]bool{"NVDA": true, "SPY": true}
+	g := NewTradeGuard(nil, nil, TradeGuardConfig{
+		EnableUniverseGate:  true,
+		TradableUnderlyings: floor,
+	})
+
+	if err := g.CheckOptionsOpen(AgentMain, "NVDA", "NVDA251219C00400000", nil, time.Now()); err != nil {
+		t.Errorf("on-floor NVDA should pass universe gate, got %v", err)
+	}
+	if err := g.CheckOptionsOpen(AgentMain, "PLUG", "PLUG251219C00010000", nil, time.Now()); err == nil {
+		t.Error("off-floor PLUG should be rejected by universe gate")
+	}
+	if err := g.CheckOptionsOpen(AgentMain, "", "SPY251219C00500000", nil, time.Now()); err != nil {
+		t.Errorf("blank underlying with on-floor OCC root should pass, got %v", err)
+	}
+	if err := g.CheckOptionsOpen(AgentMain, "", "PLUG251219C00010000", nil, time.Now()); err == nil {
+		t.Error("blank underlying with off-floor OCC root should be rejected")
+	}
+	if err := g.CheckOptionsOpen(AgentPenny, "PLUG", "PLUG251219C00010000", nil, time.Now()); err != nil {
+		t.Errorf("non-main agent must not be universe-gated, got %v", err)
+	}
+	gOff := NewTradeGuard(nil, nil, TradeGuardConfig{EnableUniverseGate: false, TradableUnderlyings: floor})
+	if err := gOff.CheckOptionsOpen(AgentMain, "PLUG", "PLUG251219C00010000", nil, time.Now()); err != nil {
+		t.Errorf("gate off must not block, got %v", err)
+	}
+	gEmpty := NewTradeGuard(nil, nil, TradeGuardConfig{EnableUniverseGate: true, TradableUnderlyings: map[string]bool{}})
+	if err := gEmpty.CheckOptionsOpen(AgentMain, "PLUG", "PLUG251219C00010000", nil, time.Now()); err != nil {
+		t.Errorf("empty floor must fail open, got %v", err)
+	}
+}
