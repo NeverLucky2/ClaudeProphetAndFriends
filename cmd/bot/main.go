@@ -184,6 +184,12 @@ func main() {
 		"OTHER":                  0.15,
 	}
 
+	tradableUniverse, err := services.LoadTradableUniverse(cfg.TradableUniversePath)
+	if err != nil {
+		logger.WithError(err).Warn("Failed to load tradable universe floor — universe gate will fail open")
+		tradableUniverse = map[string]bool{}
+	}
+
 	// Create trade guard and wire into both controllers
 	tradeGuard := services.NewTradeGuard(
 		positionManager,
@@ -198,6 +204,11 @@ func main() {
 			EnablePositionCaps:      cfg.EnablePositionCaps,
 			MaxPositionPct:          cfg.MaxPositionPct,
 			MaxDeployedPct:          cfg.MaxDeployedPct,
+			EnableUniverseGate:      cfg.EnableUniverseGate,
+			TradableUnderlyings:     tradableUniverse,
+			EnableOptionsSpreadGate: cfg.EnableProphetOptionsSpread,
+			SpreadMaxPct:            cfg.ProphetSpreadMaxPct,
+			OptionsQuoteMaxAge:      time.Duration(cfg.ProphetQuoteMaxAgeSec) * time.Second,
 		},
 	)
 	positionManager.SetGuard(tradeGuard)
@@ -213,6 +224,11 @@ func main() {
 		"position_caps_enabled":      cfg.EnablePositionCaps,
 		"max_position_pct":           cfg.MaxPositionPct,
 		"max_deployed_pct":           cfg.MaxDeployedPct,
+		"universe_gate_enabled":       cfg.EnableUniverseGate,
+		"tradable_universe_count":     len(tradableUniverse),
+		"options_spread_gate_enabled": cfg.EnableProphetOptionsSpread,
+		"spread_max_pct":              cfg.ProphetSpreadMaxPct,
+		"quote_max_age_sec":           cfg.ProphetQuoteMaxAgeSec,
 	}).Info("Trade guard initialized")
 
 	// Regime gate service. Reads the daily-computed regime_gate.json snapshot;

@@ -50,6 +50,14 @@ type Config struct {
 	MaxPositionPct     float64 // per-position cap, fraction of portfolio (0.12 = 12%)
 	MaxDeployedPct     float64 // whole-account deployed ceiling (0.50 = 50%)
 
+	// Prophet tradable-universe gate + options spread gate. Both flag-gated,
+	// default OFF (observe-first). See the 2026-05-24 spec.
+	EnableUniverseGate         bool
+	TradableUniversePath       string
+	EnableProphetOptionsSpread bool
+	ProphetSpreadMaxPct        float64
+	ProphetQuoteMaxAgeSec      int
+
 	// Prophet options auto-stop monitor. Flag-gated, default OFF.
 	// Deep catastrophic loss floor on Prophet's long single-leg options.
 	EnableProphetOptionsStop          bool
@@ -109,6 +117,12 @@ func Load() error {
 		EnablePositionCaps: getEnvOrDefault("ENABLE_POSITION_CAPS", "true") == "true",
 		MaxPositionPct:     parseFloat(getEnvOrDefault("MAX_POSITION_PCT", "0.12")),
 		MaxDeployedPct:     parseFloat(getEnvOrDefault("MAX_DEPLOYED_PCT", "0.50")),
+
+		EnableUniverseGate:         getEnvOrDefault("ENABLE_PROPHET_UNIVERSE_GATE", "false") == "true",
+		TradableUniversePath:       getEnvOrDefault("PROPHET_TRADABLE_UNIVERSE_PATH", "./config/prophet_tradable_universe.txt"),
+		EnableProphetOptionsSpread: getEnvOrDefault("ENABLE_PROPHET_OPTIONS_SPREAD", "false") == "true",
+		ProphetSpreadMaxPct:        parseFloat(getEnvOrDefault("PROPHET_OPTIONS_SPREAD_MAX_PCT", "0.10")),
+		ProphetQuoteMaxAgeSec:      parseIntOrDefault("PROPHET_OPTIONS_QUOTE_MAX_AGE_SEC", 60),
 
 		EnableProphetOptionsStop:          getEnvOrDefault("ENABLE_PROPHET_OPTIONS_STOP", "false") == "true",
 		ProphetOptionsStopPct:             parseFloat(getEnvOrDefault("PROPHET_OPTIONS_STOP_PCT", "0.50")),
