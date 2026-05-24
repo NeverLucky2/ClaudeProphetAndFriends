@@ -11,6 +11,7 @@ import { resolvePreflight } from './preflight.js';
 import { renderIntradayBlock, shouldInjectIntraday } from './intraday-prompt.js';
 import { fetchBeatContext, renderBeatContextBlock } from './beat-context.js';
 import { resolveAllowedTools } from './tool-allowlists.js';
+import { resolveStrategyRules, computeStrategyVersion, buildVersionMarker, writeVersionMarker } from '../scripts/strategy-version.mjs';
 
 // Prophet's auto-pushed intraday watchlist. Symbols outside this set are
 // still reachable via the get_intraday_signals MCP tool on demand.
@@ -100,25 +101,10 @@ export function buildGuardrailBlock(perms = {}) {
 // ── System Prompt Builder ──────────────────────────────────────────
 export async function buildSystemPrompt(agentConfig, options = {}) {
   const { getStrategyById = () => null, permissions = null } = options;
-  let strategyRules = '';
-  if (agentConfig.customStrategyRules) {
-    strategyRules = agentConfig.customStrategyRules;
-  } else if (agentConfig.strategyId) {
-    const strategy = getStrategyById(agentConfig.strategyId);
-    if (strategy) {
-      if (strategy.rulesFile) {
-        try { strategyRules = await fs.readFile(path.join(process.cwd(), strategy.rulesFile), 'utf-8'); } catch (err) { console.error(`Warning: Failed to load strategy rules file "${strategy.rulesFile}":`, err.message); }
-      } else if (strategy.customRules) {
-        strategyRules = strategy.customRules;
-      }
-    }
-  }
-
-  // Build trading rules from strategy
-  let tradingRules = strategyRules;
-  if (!tradingRules) {
-    try { tradingRules = await fs.readFile(path.join(process.cwd(), 'TRADING_RULES.md'), 'utf-8'); } catch (err) { tradingRules = ''; }
-  }
+  const strategy = agentConfig.strategyId && typeof getStrategyById === 'function'
+    ? getStrategyById(agentConfig.strategyId)
+    : null;
+  const tradingRules = await resolveStrategyRules(agentConfig, strategy, { readFile: fs.readFile });
 
   // Layer 1: Agent Identity (custom or default)
   const identity = (agentConfig.systemPromptTemplate === 'custom' && agentConfig.customSystemPrompt)
@@ -274,6 +260,7 @@ export class AgentHarness {
     this._timer = null;
     this._beating = false;
     this._agentConfig = null;
+    this._strategyVersion = null;
     this._sandboxConfig = null;
     this._sessionId = null; // persist session across beats for context
     this._proc = null;       // current opencode subprocess
@@ -390,6 +377,26 @@ export class AgentHarness {
       getStrategyById: this.getStrategyById,
       permissions: this._resolvePermissions(),
     });
+
+    // Epoch stamp: compute the version of the rules this agent is now running,
+    // expose it for the MCP env (Step 5), and publish the marker Spec C reads
+    // as its source of truth. Computed here — before any beat spawns the MCP
+    // server — so no decision can be logged with a null stamp due to ordering.
+    {
+      const strategyForVersion = this._agentConfig?.strategyId && typeof this.getStrategyById === 'function'
+        ? this.getStrategyById(this._agentConfig.strategyId)
+        : null;
+      const resolvedRules = await resolveStrategyRules(this._agentConfig, strategyForVersion, { readFile: fs.readFile });
+      this._strategyVersion = computeStrategyVersion(resolvedRules);
+      const accountDir = this.state.activeAccountId || this.accountId || '';
+      if (accountDir) {
+        try {
+          await writeVersionMarker(accountDir, buildVersionMarker(this._agentConfig, this._strategyVersion));
+        } catch (err) {
+          this.state.emit('agent_log', { message: `Failed to write strategy-version marker: ${err.message}`, level: 'warn' });
+        }
+      }
+    }
 
     if (resetSession) {
       this._sessionId = null;
@@ -984,6 +991,14 @@ ${userBlock}`;
    * Run opencode as subprocess with MCP tools and stream JSON events
    */
   _runClaude(prompt, model) {
+    // Invariant: _strategyVersion must be resolved before the MCP server spawns,
+    // otherwise early decisions stamp null. Set in the reload method that runs
+    // before any beat. `null` is valid (no-rules agent); `undefined` is a bug.
+    // MUST be synchronous (before `return new Promise`): a throw inside the async
+    // Promise executor becomes an unhandled rejection that bypasses _beat's catch.
+    if (this._strategyVersion === undefined) {
+      throw new Error('Harness invariant: _strategyVersion not computed before MCP spawn');
+    }
     return new Promise(async (resolve, reject) => {
       const sessionEpoch = this._sessionEpoch;
       // OpenCode model format: anthropic/claude-sonnet-4-6
@@ -1052,6 +1067,7 @@ ${userBlock}`;
           // ID on every place_*_order call. Empty string for agents whose
           // strategyId is unset (legacy/default behavior unchanged).
           OPENPROPHET_STRATEGY: this._agentConfig?.strategyId || '',
+          OPENPROPHET_STRATEGY_VERSION: this._strategyVersion || '',
           ...(allowedTools.length > 0 ? { OPENPROPHET_TOOL_ALLOWLIST: allowedTools.join(',') } : {}),
         },
         stdio: ['pipe', 'pipe', 'pipe'],

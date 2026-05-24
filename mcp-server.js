@@ -16,6 +16,7 @@ const PYTHON_BIN = process.platform === 'win32' ? 'python' : 'python3';
 const REPORTS_DIR = path.join(process.cwd(), 'data', 'reports');
 import { storeTrade, findSimilarTrades, getTradeStats, getEmbeddingCount } from './vectorDB.js';
 import { regimeAndGuardTools, handleRegimeAndGuardTool } from './mcp-tools/regime-and-guard.mjs';
+import { buildDecisionRecord } from './mcp-tools/decision-record.mjs';
 import {
   DAILY_BRIEF_FILENAME,
   parseBriefStaleness,
@@ -2213,15 +2214,12 @@ ${allNews.map((article, i) =>
         const filename = `${timestamp}_${args.action}${args.symbol ? '_' + args.symbol : ''}.json`;
         const filepath = path.join(DECISIONS_DIR, filename);
 
-        const decision = {
-          timestamp: new Date().toISOString(),
-          sandbox_id: OPENPROPHET_SANDBOX_ID,
-          account_id: OPENPROPHET_ACCOUNT_ID,
-          action: args.action,
-          symbol: args.symbol || null,
-          reasoning: args.reasoning,
-          market_data: args.market_data || {},
-        };
+        const decision = buildDecisionRecord(args, {
+          sandboxId: OPENPROPHET_SANDBOX_ID,
+          accountId: OPENPROPHET_ACCOUNT_ID,
+          strategyId: process.env.OPENPROPHET_STRATEGY,
+          strategyVersion: process.env.OPENPROPHET_STRATEGY_VERSION,
+        });
 
         await fs.writeFile(filepath, JSON.stringify(decision, null, 2));
 
