@@ -26,6 +26,9 @@ type recordingTradingService struct {
 	portfolio           float64
 	cash                float64
 	optionsOrdersPlaced int
+	optionsQuote        *interfaces.OptionsQuote
+	optionsQuoteErr     error
+	optionsQuoteCalls   int
 }
 
 func (r *recordingTradingService) PlaceOrder(_ context.Context, order *interfaces.Order) (*interfaces.OrderResult, error) {
@@ -59,7 +62,10 @@ func (r *recordingTradingService) GetOptionsChain(_ context.Context, _ string, _
 	return nil, nil
 }
 func (r *recordingTradingService) GetOptionsQuote(_ context.Context, _ string) (*interfaces.OptionsQuote, error) {
-	return nil, nil
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.optionsQuoteCalls++
+	return r.optionsQuote, r.optionsQuoteErr
 }
 func (r *recordingTradingService) GetOptionsPosition(_ context.Context, _ string) (*interfaces.OptionsPosition, error) {
 	return nil, nil
@@ -305,6 +311,71 @@ func TestPlaceOptionsOrder_CloseNotBlocked(t *testing.T) {
 	oc.PlaceOptionsOrder(c)
 	if rec.optionsOrdersPlaced != 1 {
 		t.Fatalf("close order must not be blocked, placed=%d", rec.optionsOrdersPlaced)
+	}
+}
+
+func postOptionsOrder(t *testing.T, oc *OrderController, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.POST("/options/order", oc.PlaceOptionsOrder)
+	req := httptest.NewRequest("POST", "/options/order", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	return w
+}
+
+func TestPlaceOptionsOrder_UniverseAndSpreadGates(t *testing.T) {
+	floor := map[string]bool{"NVDA": true}
+	guard := services.NewTradeGuard(nil, nil, services.TradeGuardConfig{
+		EnableUniverseGate:      true,
+		TradableUnderlyings:     floor,
+		EnableOptionsSpreadGate: true,
+		SpreadMaxPct:            0.10,
+		OptionsQuoteMaxAge:      60 * time.Second,
+	})
+
+	// (a) off-floor underlying via OCC fallback (blank Underlying) -> 422, never placed.
+	ts := &recordingTradingService{optionsQuote: &interfaces.OptionsQuote{BidPrice: 1, AskPrice: 1.02, Timestamp: time.Now()}}
+	oc := NewOrderController(ts, nil, nil)
+	oc.SetGuard(guard)
+	w := postOptionsOrder(t, oc, `{"symbol":"PLUG251219C00010000","qty":1,"side":"buy","type":"limit","limit_price":1.0,"strategy":"v2-options"}`)
+	if w.Code != 422 {
+		t.Fatalf("off-floor OCC fallback should 422, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	if ts.optionsOrdersPlaced != 0 {
+		t.Errorf("broker must not be called for off-floor open, placed=%d", ts.optionsOrdersPlaced)
+	}
+
+	// (b) on-floor + wide spread -> 422, exactly one quote fetch.
+	ts2 := &recordingTradingService{optionsQuote: &interfaces.OptionsQuote{BidPrice: 1.0, AskPrice: 1.3, Timestamp: time.Now()}}
+	oc2 := NewOrderController(ts2, nil, nil)
+	oc2.SetGuard(guard)
+	w2 := postOptionsOrder(t, oc2, `{"symbol":"NVDA251219C00400000","underlying":"NVDA","qty":1,"side":"buy","type":"limit","limit_price":1.0,"strategy":"v2-options"}`)
+	if w2.Code != 422 {
+		t.Fatalf("wide spread should 422, got %d (body=%s)", w2.Code, w2.Body.String())
+	}
+	if ts2.optionsQuoteCalls != 1 {
+		t.Errorf("expected exactly one quote fetch (shared), got %d", ts2.optionsQuoteCalls)
+	}
+
+	// (c) on-floor + tight spread -> placed (200 or 201).
+	ts3 := &recordingTradingService{optionsQuote: &interfaces.OptionsQuote{BidPrice: 5.0, AskPrice: 5.1, Timestamp: time.Now()}}
+	oc3 := NewOrderController(ts3, nil, noopStorage{})
+	oc3.SetGuard(guard)
+	w3 := postOptionsOrder(t, oc3, `{"symbol":"NVDA251219C00400000","underlying":"NVDA","qty":1,"side":"buy","type":"limit","limit_price":5.0,"strategy":"v2-options"}`)
+	if w3.Code != 200 && w3.Code != 201 {
+		t.Fatalf("tight-spread on-floor order should place, got %d (body=%s)", w3.Code, w3.Body.String())
+	}
+
+	// (d) close of an off-floor name is never gated.
+	ts4 := &recordingTradingService{optionsQuote: &interfaces.OptionsQuote{BidPrice: 1.0, AskPrice: 1.3, Timestamp: time.Now()}}
+	oc4 := NewOrderController(ts4, nil, noopStorage{})
+	oc4.SetGuard(guard)
+	w4 := postOptionsOrder(t, oc4, `{"symbol":"PLUG251219C00010000","qty":1,"side":"sell","position_intent":"sell_to_close","type":"limit","limit_price":1.0,"strategy":"v2-options"}`)
+	if w4.Code == 422 {
+		t.Error("closing an off-floor position must never be blocked by the open gates")
 	}
 }
 

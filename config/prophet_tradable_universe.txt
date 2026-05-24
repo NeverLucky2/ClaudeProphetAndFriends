@@ -1,0 +1,70 @@
+# Prophet tradable universe — the SINGLE bot-owned source of trade eligibility.
+#
+# Read at startup by services.LoadTradableUniverse (the Go guard) AND by the
+# analyst-actions / catalyst-news universe_builder.py modules as their static
+# floor. The FMP top-up appends to the catalyst SURVEILLANCE list in memory
+# only and MUST NOT be written back here — that is what keeps top-up names
+# physically unreachable by trade selection.
+#
+# Curation: mega caps + liquid ETFs with deep options liquidity (tight monthly
+# bid-ask). Review every 6-12 months. The options spread gate is the runtime
+# check that a name's options are still liquid; this file is the eligibility set.
+
+# Index ETFs
+SPY
+QQQ
+IWM
+DIA
+
+# Mega-cap tech
+AAPL
+MSFT
+GOOG
+GOOGL
+AMZN
+NVDA
+META
+TSLA
+AVGO
+AMD
+ORCL
+NFLX
+ADBE
+CRM
+
+# Financials
+JPM
+BAC
+GS
+MS
+V
+MA
+
+# Healthcare
+LLY
+UNH
+JNJ
+ABBV
+
+# Energy
+XOM
+CVX
+
+# Other mega-caps
+WMT
+COST
+HD
+PG
+DIS
+
+# Crypto-correlated (Prophet's active set)
+MSTR
+COIN
+MARA
+
+# High-volume active
+PLTR
+INTC
+MU
+QCOM
+BA

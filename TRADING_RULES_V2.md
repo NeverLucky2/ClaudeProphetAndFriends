@@ -42,6 +42,11 @@ policy still applies on tool error).
 - Prevents: Sector-wide correlation wipeouts
 - Allow: Multiple positions in strong trending sectors
 
+**Rule:** Trade only names in Prophet's tradable floor (`config/prophet_tradable_universe.txt`)
+- The floor is curated for deep options liquidity (mega-caps + liquid ETFs).
+- When `ENABLE_PROPHET_UNIVERSE_GATE` is on, the guard **rejects** an options open whose underlying is not in the floor (opens only — never blocks a close).
+- The daily-brief catalyst feeds (analyst actions, ticker catalysts) scan a *wider* surveillance universe that includes transient high-volume names. Those names are for **awareness only** — they are not tradable and the guard will reject orders on them. Do not propose trades on a catalyst name that is not in the floor.
+
 **Rule:** Maximum 10 positions simultaneously
 - Simplifies: Portfolio management and monitoring
 - Prevents: Over-diversification (diworsification)
@@ -144,6 +149,13 @@ policy still applies on tool error).
 - Prevents: Slippage eating into profits
 - Examples: SPY/QQQ/NVDA options (tight spreads)
 
+> **Code-enforced (flag-gated, default OFF) as of 2026-05-24:** when
+> `ENABLE_PROPHET_OPTIONS_SPREAD` is on, the guard rejects an options open whose
+> `(ask−bid)/mid ≥ 10%`, or whose quote is missing/stale (fail closed). This is
+> the only programmatic options-liquidity check; it backstops the floor curation,
+> which is human-asserted and can decay. Quote-unavailable rejections log
+> distinctly from genuine wide-spread rejections.
+
 **Rule:** LIMIT ORDERS ONLY
 - Never: Use market orders on options (too much slippage)
 - Always: Set limit at mid-price or better
@@ -163,7 +175,7 @@ policy still applies on tool error).
 
 ## Intraday Context Block
 
-During market hours (9:30 AM – 4:00 PM ET) you will see an **"Intraday Context"** table prepended to each heartbeat covering SPY, QQQ, NVDA, AMD, TSLA, MSTR. It is read-only context — not a checklist — but use it as follows:
+During market hours (9:30 AM – 4:00 PM ET) you will see an **"Intraday Context"** table prepended to each heartbeat covering SPY, QQQ, NVDA, TSLA, AAPL, MSFT, AMZN, META, AMD, AVGO, GOOGL, MSTR. This table is a **context sample of the tradable floor, not the tradable universe.** Your tradable universe is the full floor in `config/prophet_tradable_universe.txt`, code-enforced by the guard's underlying allowlist when `ENABLE_PROPHET_UNIVERSE_GATE` is on. Off-table floor names are reachable via `get_intraday_signals` on demand. It is read-only context — not a checklist — but use it as follows:
 
 - **Distance from VWAP (`vwap%`):** Positive = price above session VWAP (buyers in control); negative = below VWAP (sellers in control). Magnitude > 1% on a high-RVOL day usually means real one-sided flow.
 - **RVOL:** Time-of-day-adjusted relative volume. `rvol > 1.5` = heavy volume vs the 20-day pace; `rvol < 0.7` = thin tape, scale entries down or wait. Do not enter scalps when RVOL < 1.0 — there isn't enough flow to confirm direction.

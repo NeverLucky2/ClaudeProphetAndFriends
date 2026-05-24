@@ -17,8 +17,10 @@ from pathlib import Path
 from typing import Optional
 
 
+# Single source of truth lives at repo-root config/, shared with the Go guard.
+# parents: [0]=scripts [1]=analyst-actions [2]=skills [3]=.claude [4]=repo root
 DEFAULT_STATIC_PATH = (
-    Path(__file__).resolve().parent.parent / "universe.txt"
+    Path(__file__).resolve().parents[4] / "config" / "prophet_tradable_universe.txt"
 )
 
 

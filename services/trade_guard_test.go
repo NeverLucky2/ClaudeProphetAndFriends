@@ -6,6 +6,8 @@ import (
 	"prophet-trader/interfaces"
 	"testing"
 	"time"
+
+	"github.com/sirupsen/logrus/hooks/test"
 )
 
 // --- stubs ---
@@ -634,5 +636,138 @@ func TestTradeGuard_HasRawSymbol(t *testing.T) {
 	}
 	if g.HasRawSymbol(AgentPenny, "NVDA_C") {
 		t.Fatal("raw symbol must be per-agent")
+	}
+}
+
+func TestCheckOptionsOpen_SpreadGate(t *testing.T) {
+	now := time.Date(2026, 5, 24, 14, 30, 0, 0, time.UTC)
+	base := TradeGuardConfig{
+		EnableOptionsSpreadGate: true,
+		SpreadMaxPct:            0.10,
+		OptionsQuoteMaxAge:      60 * time.Second,
+	}
+	g := NewTradeGuard(nil, nil, base)
+
+	fresh := func(bid, ask float64) *interfaces.OptionsQuote {
+		return &interfaces.OptionsQuote{BidPrice: bid, AskPrice: ask, Timestamp: now}
+	}
+
+	if err := g.CheckOptionsOpen(AgentMain, "NVDA", "NVDA251219C00400000", fresh(5.00, 5.20), now); err != nil {
+		t.Errorf("tight spread should pass, got %v", err)
+	}
+	if err := g.CheckOptionsOpen(AgentMain, "NVDA", "NVDA251219C00400000", fresh(1.00, 1.30), now); err == nil {
+		t.Error("wide spread should be rejected")
+	}
+	if err := g.CheckOptionsOpen(AgentMain, "NVDA", "NVDA251219C00400000", nil, now); err == nil {
+		t.Error("nil quote should fail closed")
+	}
+	stale := &interfaces.OptionsQuote{BidPrice: 5.00, AskPrice: 5.20, Timestamp: now.Add(-5 * time.Minute)}
+	if err := g.CheckOptionsOpen(AgentMain, "NVDA", "NVDA251219C00400000", stale, now); err == nil {
+		t.Error("stale quote should fail closed")
+	}
+	if err := g.CheckOptionsOpen(AgentMain, "NVDA", "NVDA251219C00400000", fresh(0, 5.20), now); err == nil {
+		t.Error("zero bid should fail closed")
+	}
+	gOff := NewTradeGuard(nil, nil, TradeGuardConfig{EnableOptionsSpreadGate: false})
+	if err := gOff.CheckOptionsOpen(AgentMain, "NVDA", "NVDA251219C00400000", nil, now); err != nil {
+		t.Errorf("gate off must not block on nil quote, got %v", err)
+	}
+	if err := g.CheckOptionsOpen(AgentPenny, "NVDA", "NVDA251219C00400000", fresh(1.00, 1.30), now); err != nil {
+		t.Errorf("non-main agent must not be spread-gated, got %v", err)
+	}
+}
+
+func TestCheckOptionsOpen_DistinctReasonCodes(t *testing.T) {
+	now := time.Date(2026, 5, 24, 14, 30, 0, 0, time.UTC)
+	g := NewTradeGuard(nil, nil, TradeGuardConfig{
+		EnableOptionsSpreadGate: true,
+		SpreadMaxPct:            0.10,
+		OptionsQuoteMaxAge:      60 * time.Second,
+	})
+	hook := test.NewLocal(g.logger)
+
+	// Wide spread -> spread_exceeded, NOT quote_unavailable.
+	g.CheckOptionsOpen(AgentMain, "NVDA", "NVDA251219C00400000",
+		&interfaces.OptionsQuote{BidPrice: 1.0, AskPrice: 1.3, Timestamp: now}, now)
+	e := hook.LastEntry()
+	if e == nil || e.Data["guard_options_spread_exceeded"] != true {
+		t.Fatalf("wide spread must log guard_options_spread_exceeded, got %+v", e)
+	}
+	if _, ok := e.Data["guard_options_quote_unavailable"]; ok {
+		t.Error("wide spread must NOT log guard_options_quote_unavailable")
+	}
+	hook.Reset()
+
+	// Nil quote -> quote_unavailable, NOT spread_exceeded.
+	g.CheckOptionsOpen(AgentMain, "NVDA", "NVDA251219C00400000", nil, now)
+	e = hook.LastEntry()
+	if e == nil || e.Data["guard_options_quote_unavailable"] != true {
+		t.Fatalf("nil quote must log guard_options_quote_unavailable, got %+v", e)
+	}
+	if _, ok := e.Data["guard_options_spread_exceeded"]; ok {
+		t.Error("nil quote must NOT log guard_options_spread_exceeded")
+	}
+}
+
+func TestCheckOptionsOpen_StalenessCeiling(t *testing.T) {
+	now := time.Date(2026, 5, 24, 14, 30, 0, 0, time.UTC)
+	// Config sets a huge max age (2000s), but the 1020s ceiling must cap it:
+	// a 1200s-old quote is within config (2000) but beyond the ceiling -> rejected.
+	g := NewTradeGuard(nil, nil, TradeGuardConfig{
+		EnableOptionsSpreadGate: true,
+		SpreadMaxPct:            0.10,
+		OptionsQuoteMaxAge:      2000 * time.Second,
+	})
+	old := &interfaces.OptionsQuote{BidPrice: 5.0, AskPrice: 5.1, Timestamp: now.Add(-1200 * time.Second)}
+	if err := g.CheckOptionsOpen(AgentMain, "NVDA", "NVDA251219C00400000", old, now); err == nil {
+		t.Error("ceiling must cap max age: a 1200s-old quote should be rejected even though config allows 2000s")
+	}
+	// A quote within the ceiling passes.
+	fresh := &interfaces.OptionsQuote{BidPrice: 5.0, AskPrice: 5.1, Timestamp: now.Add(-30 * time.Second)}
+	if err := g.CheckOptionsOpen(AgentMain, "NVDA", "NVDA251219C00400000", fresh, now); err != nil {
+		t.Errorf("a 30s-old quote should pass, got %v", err)
+	}
+}
+
+func TestCheckOptionsOpen_CrossedQuote(t *testing.T) {
+	now := time.Date(2026, 5, 24, 14, 30, 0, 0, time.UTC)
+	g := NewTradeGuard(nil, nil, TradeGuardConfig{
+		EnableOptionsSpreadGate: true, SpreadMaxPct: 0.10, OptionsQuoteMaxAge: 60 * time.Second,
+	})
+	crossed := &interfaces.OptionsQuote{BidPrice: 5.2, AskPrice: 5.0, Timestamp: now} // ask < bid
+	if err := g.CheckOptionsOpen(AgentMain, "NVDA", "NVDA251219C00400000", crossed, now); err == nil {
+		t.Error("crossed quote (ask<bid) must be rejected as unusable")
+	}
+}
+
+func TestCheckOptionsOpen_UniverseGate(t *testing.T) {
+	floor := map[string]bool{"NVDA": true, "SPY": true}
+	g := NewTradeGuard(nil, nil, TradeGuardConfig{
+		EnableUniverseGate:  true,
+		TradableUnderlyings: floor,
+	})
+
+	if err := g.CheckOptionsOpen(AgentMain, "NVDA", "NVDA251219C00400000", nil, time.Now()); err != nil {
+		t.Errorf("on-floor NVDA should pass universe gate, got %v", err)
+	}
+	if err := g.CheckOptionsOpen(AgentMain, "PLUG", "PLUG251219C00010000", nil, time.Now()); err == nil {
+		t.Error("off-floor PLUG should be rejected by universe gate")
+	}
+	if err := g.CheckOptionsOpen(AgentMain, "", "SPY251219C00500000", nil, time.Now()); err != nil {
+		t.Errorf("blank underlying with on-floor OCC root should pass, got %v", err)
+	}
+	if err := g.CheckOptionsOpen(AgentMain, "", "PLUG251219C00010000", nil, time.Now()); err == nil {
+		t.Error("blank underlying with off-floor OCC root should be rejected")
+	}
+	if err := g.CheckOptionsOpen(AgentPenny, "PLUG", "PLUG251219C00010000", nil, time.Now()); err != nil {
+		t.Errorf("non-main agent must not be universe-gated, got %v", err)
+	}
+	gOff := NewTradeGuard(nil, nil, TradeGuardConfig{EnableUniverseGate: false, TradableUnderlyings: floor})
+	if err := gOff.CheckOptionsOpen(AgentMain, "PLUG", "PLUG251219C00010000", nil, time.Now()); err != nil {
+		t.Errorf("gate off must not block, got %v", err)
+	}
+	gEmpty := NewTradeGuard(nil, nil, TradeGuardConfig{EnableUniverseGate: true, TradableUnderlyings: map[string]bool{}})
+	if err := gEmpty.CheckOptionsOpen(AgentMain, "PLUG", "PLUG251219C00010000", nil, time.Now()); err != nil {
+		t.Errorf("empty floor must fail open, got %v", err)
 	}
 }

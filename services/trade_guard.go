@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"prophet-trader/interfaces"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/sirupsen/logrus"
 )
@@ -22,6 +24,13 @@ const (
 )
 
 const agentTagPrefix = "agent:"
+
+// optionsQuoteMaxAgeCeiling is the hard upper bound on the effective options
+// quote staleness window, applied regardless of the configured
+// OptionsQuoteMaxAge. It is set at the delayed-feed bound (~17 min) so a
+// legitimately delayed OPRA feed still passes, but an absurd or misconfigured
+// value cannot let a frozen quote through. See the 2026-05-24 spec §C2.
+const optionsQuoteMaxAgeCeiling = 1020 * time.Second
 
 // AgentTag returns the managed-position tag string for an agent.
 func AgentTag(agent AgentSource) string {
@@ -87,6 +96,24 @@ type TradeGuardConfig struct {
 	// MaxDeployedPct caps whole-account deployment after the trade:
 	// (PortfolioValue - Cash + notional) / PortfolioValue. Zero disables.
 	MaxDeployedPct float64 `json:"max_deployed_pct"`
+
+	// EnableUniverseGate flag-gates the Prophet (AgentMain) options-open
+	// underlying allowlist. Default off (observe-first rollout).
+	EnableUniverseGate bool `json:"enable_universe_gate"`
+	// TradableUnderlyings is the set of underlyings Prophet may open options on.
+	// Empty = not configured -> gate fails OPEN (never blocks). Loaded from the
+	// bot-owned floor file at startup.
+	TradableUnderlyings map[string]bool `json:"-"`
+
+	// EnableOptionsSpreadGate flag-gates the Prophet (AgentMain) options-open
+	// spread/liquidity check. Default off (observe-first).
+	EnableOptionsSpreadGate bool `json:"enable_options_spread_gate"`
+	// SpreadMaxPct rejects an options open whose (ask-bid)/mid >= this fraction
+	// (0.10 = 10%, matching the advisory rule).
+	SpreadMaxPct float64 `json:"spread_max_pct"`
+	// OptionsQuoteMaxAge is the staleness bound: a quote older than this (or with
+	// a zero timestamp) fails closed when the spread gate is enabled.
+	OptionsQuoteMaxAge time.Duration `json:"options_quote_max_age"`
 }
 
 // SectorBucket categorizes a symbol's primary factor exposure for cross-agent
@@ -305,6 +332,78 @@ func (g *TradeGuard) CheckBuy(ctx context.Context, agent AgentSource, symbol str
 			if err := g.checkPennyCapCap(capAcct, capErr, allocationDollars); err != nil {
 				return err
 			}
+		}
+	}
+
+	return nil
+}
+
+// CheckOptionsOpen runs the Prophet-scoped options-OPEN gates: the tradable
+// underlying allowlist and (a later task) the options spread gate. It is called
+// from PlaceOptionsOrder before CheckBuy, on opening buys only — so it can never
+// block a close/exit. quote may be nil (the spread gate handles that); now is
+// passed in for testable staleness.
+//
+// Scope: AgentMain (Prophet) only. Other agents pass through untouched.
+func (g *TradeGuard) CheckOptionsOpen(agent AgentSource, underlying, symbol string, quote *interfaces.OptionsQuote, now time.Time) error {
+	if agent != AgentMain {
+		return nil
+	}
+
+	// --- Universe allowlist ---
+	// Empty set = not configured -> fail OPEN (a missing/unpopulated floor must
+	// not halt trading the moment the flag is flipped).
+	if g.cfg.EnableUniverseGate && len(g.cfg.TradableUnderlyings) > 0 {
+		u := strings.ToUpper(strings.TrimSpace(underlying))
+		if u == "" {
+			u = strings.ToUpper(ParseOCCUnderlying(symbol))
+		}
+		if u == "" || !g.cfg.TradableUnderlyings[u] {
+			g.logger.WithFields(logrus.Fields{
+				"guard_universe_not_tradable": true,
+				"underlying":                  u,
+				"symbol":                      symbol,
+			}).Warn("guard: options open blocked — underlying not in tradable floor")
+			return fmt.Errorf("guard: universe — %q is not in Prophet's tradable floor", symbol)
+		}
+	}
+
+	// --- Options spread / liquidity gate ---
+	// Fail CLOSED on missing/stale/unpriced quote: a missing runtime quote means
+	// "can't verify liquidity right now" (contrast the universe gate's fail-open
+	// on missing config). Distinct log reasons so the operator can tell a
+	// degraded feed (quote_unavailable) from a genuinely illiquid market
+	// (spread_exceeded).
+	if g.cfg.EnableOptionsSpreadGate {
+		if quote == nil || quote.Timestamp.IsZero() || quote.BidPrice <= 0 || quote.AskPrice <= 0 || quote.AskPrice < quote.BidPrice {
+			g.logger.WithFields(logrus.Fields{
+				"guard_options_quote_unavailable": true,
+				"symbol":                          symbol,
+			}).Warn("guard: options open blocked — quote unavailable (fail closed)")
+			return fmt.Errorf("guard: options spread gate — no usable quote for %q (fail closed)", symbol)
+		}
+		effectiveMaxAge := g.cfg.OptionsQuoteMaxAge
+		if effectiveMaxAge <= 0 || effectiveMaxAge > optionsQuoteMaxAgeCeiling {
+			effectiveMaxAge = optionsQuoteMaxAgeCeiling
+		}
+		if now.Sub(quote.Timestamp) > effectiveMaxAge {
+			g.logger.WithFields(logrus.Fields{
+				"guard_options_quote_unavailable": true,
+				"symbol":                          symbol,
+				"quote_age_sec":                   now.Sub(quote.Timestamp).Seconds(),
+			}).Warn("guard: options open blocked — quote stale (fail closed)")
+			return fmt.Errorf("guard: options spread gate — quote for %q is stale (fail closed)", symbol)
+		}
+		mid := (quote.BidPrice + quote.AskPrice) / 2
+		spreadPct := (quote.AskPrice - quote.BidPrice) / mid
+		if spreadPct >= g.cfg.SpreadMaxPct {
+			g.logger.WithFields(logrus.Fields{
+				"guard_options_spread_exceeded": true,
+				"symbol":                        symbol,
+				"spread_pct":                    spreadPct,
+			}).Warn("guard: options open blocked — spread too wide")
+			return fmt.Errorf("guard: options spread gate — %q spread %.1f%% exceeds %.1f%% cap",
+				symbol, spreadPct*100, g.cfg.SpreadMaxPct*100)
 		}
 	}
 

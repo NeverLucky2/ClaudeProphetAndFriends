@@ -598,13 +598,53 @@ func parseRetryAfter(h http.Header) time.Duration {
 	return 0
 }
 
-// GetOptionsQuote retrieves a quote for a specific options contract
-func (s *AlpacaTradingService) GetOptionsQuote(ctx context.Context, symbol string) (*interfaces.OptionsQuote, error) {
-	// Note: This would use Alpaca's options quotes API
-	// For now, return nil as placeholder
-	s.logger.WithField("symbol", symbol).Info("Getting options quote")
+// optionsQuoteFromSnapshot maps an Alpaca options snapshot into our
+// OptionsQuote, preserving the quote's exchange timestamp (required by the
+// spread gate's staleness check). Pure; unit-tested without network.
+func optionsQuoteFromSnapshot(snap AlpacaOptionsSnapshot, symbol string) (*interfaces.OptionsQuote, error) {
+	c, ok := snap.Snapshots[symbol]
+	if !ok {
+		return nil, fmt.Errorf("no snapshot data for %s", symbol)
+	}
+	return &interfaces.OptionsQuote{
+		Symbol:    symbol,
+		BidPrice:  c.LatestQuote.BidPrice,
+		BidSize:   int64(c.LatestQuote.BidSize),
+		AskPrice:  c.LatestQuote.AskPrice,
+		AskSize:   int64(c.LatestQuote.AskSize),
+		LastPrice: c.LatestTrade.Price,
+		Timestamp: c.LatestQuote.Timestamp,
+	}, nil
+}
 
-	return nil, fmt.Errorf("options quote not implemented yet")
+// GetOptionsQuote fetches a live options snapshot from Alpaca's data API and
+// returns bid/ask/last + the quote timestamp. Replaces the previous stub.
+// It does its own snapshot fetch (rather than reusing GetOptionSnapshot)
+// because that method returns interfaces.OptionContract, which drops the quote
+// timestamp the spread gate needs for its staleness check.
+func (s *AlpacaTradingService) GetOptionsQuote(ctx context.Context, symbol string) (*interfaces.OptionsQuote, error) {
+	url := fmt.Sprintf("https://data.alpaca.markets/v1beta1/options/snapshots/%s", symbol)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("APCA-API-KEY-ID", s.apiKey)
+	req.Header.Set("APCA-API-SECRET-KEY", s.apiSecret)
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch options snapshot: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("options snapshot API error %d: %s", resp.StatusCode, string(body))
+	}
+	var snapshot AlpacaOptionsSnapshot
+	if err := json.NewDecoder(resp.Body).Decode(&snapshot); err != nil {
+		return nil, fmt.Errorf("failed to decode options snapshot: %w", err)
+	}
+	return optionsQuoteFromSnapshot(snapshot, symbol)
 }
 
 // GetOptionsPosition retrieves a specific options position

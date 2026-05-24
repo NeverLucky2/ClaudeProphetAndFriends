@@ -497,22 +497,21 @@ func isOpeningOption(intent, side string) bool {
 	}
 }
 
-// optionsNotional returns the dollar outlay for an options order: per-contract
-// price x qty x 100. Uses the limit price when present, else a fetched quote
-// (mid, then ask, then last). Returns 0 when no price is obtainable — the guard
-// then fails closed if position caps are enabled.
-func optionsNotional(ctx context.Context, ts interfaces.TradingService, order *interfaces.OptionsOrder) float64 {
+// optionsNotional returns the dollar outlay: per-contract price x qty x 100.
+// Uses the limit price when present, else the provided quote (mid, then ask,
+// then last). quote may be nil. Returns 0 when no price is obtainable.
+func optionsNotional(order *interfaces.OptionsOrder, quote *interfaces.OptionsQuote) float64 {
 	price := 0.0
 	if order.LimitPrice != nil && *order.LimitPrice > 0 {
 		price = *order.LimitPrice
-	} else if q, err := ts.GetOptionsQuote(ctx, order.Symbol); err == nil && q != nil {
+	} else if quote != nil {
 		switch {
-		case q.BidPrice > 0 && q.AskPrice > 0:
-			price = (q.BidPrice + q.AskPrice) / 2
-		case q.AskPrice > 0:
-			price = q.AskPrice
-		case q.LastPrice > 0:
-			price = q.LastPrice
+		case quote.BidPrice > 0 && quote.AskPrice > 0:
+			price = (quote.BidPrice + quote.AskPrice) / 2
+		case quote.AskPrice > 0:
+			price = quote.AskPrice
+		case quote.LastPrice > 0:
+			price = quote.LastPrice
 		}
 	}
 	return price * order.Qty * 100
@@ -573,7 +572,21 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 	opening := isOpeningOption(req.PositionIntent, req.Side)
 	if oc.guard != nil {
 		if opening && req.Side == "buy" {
-			notional := optionsNotional(ctx, oc.tradingService, order)
+			// One quote fetch, reused by both the new gates and the notional cap.
+			var quote *interfaces.OptionsQuote
+			if oc.tradingService != nil {
+				if q, err := oc.tradingService.GetOptionsQuote(ctx, order.Symbol); err == nil {
+					quote = q
+				}
+			}
+			// Universe allowlist + spread/staleness gate (Prophet-scoped, flag-gated).
+			if err := oc.guard.CheckOptionsOpen(agent, order.Underlying, order.Symbol, quote, time.Now()); err != nil {
+				oc.logger.WithError(err).Warn("Options open blocked by trade guard (universe/spread)")
+				c.JSON(422, gin.H{"error": err.Error()})
+				return
+			}
+			// Existing dollar caps + daily-loss breaker.
+			notional := optionsNotional(order, quote)
 			if err := oc.guard.CheckBuy(ctx, agent, order.Symbol, notional); err != nil {
 				oc.logger.WithError(err).Warn("Options buy blocked by trade guard")
 				c.JSON(422, gin.H{"error": err.Error()})

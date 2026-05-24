@@ -13,9 +13,11 @@ import { fetchBeatContext, renderBeatContextBlock } from './beat-context.js';
 import { resolveAllowedTools } from './tool-allowlists.js';
 import { resolveStrategyRules, computeStrategyVersion, buildVersionMarker, writeVersionMarker } from '../scripts/strategy-version.mjs';
 
-// Prophet's auto-pushed intraday watchlist. Symbols outside this set are
-// still reachable via the get_intraday_signals MCP tool on demand.
-const PROPHET_INTRADAY_WATCHLIST = ['SPY', 'QQQ', 'NVDA', 'AMD', 'TSLA', 'MSTR'];
+// Auto-pushed intraday context sample — the ~12 deepest-chain names from the
+// tradable floor (config/prophet_tradable_universe.txt). NOT the tradable
+// universe itself (the guard enforces that); just what each beat pre-loads.
+// Off-watchlist floor names remain reachable via get_intraday_signals on demand.
+export const PROPHET_INTRADAY_WATCHLIST = ['SPY', 'QQQ', 'NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMZN', 'META', 'AMD', 'AVGO', 'GOOGL', 'MSTR'];
 
 // Default max tool rounds; overridden by permissions config at runtime
 

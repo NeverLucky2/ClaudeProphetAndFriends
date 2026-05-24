@@ -287,3 +287,26 @@ func TestChainRetryBackoff(t *testing.T) {
 		t.Errorf("retry-after 9s: got %v, want 2s (capped)", got)
 	}
 }
+
+func TestOptionsQuoteFromSnapshot(t *testing.T) {
+	ts := time.Date(2026, 5, 24, 14, 30, 0, 0, time.UTC)
+	snap := AlpacaOptionsSnapshot{Snapshots: map[string]AlpacaOptionContract{
+		"NVDA251219C00400000": {
+			LatestQuote: AlpacaQuote{Timestamp: ts, BidPrice: 5.00, AskPrice: 5.20, BidSize: 10, AskSize: 12},
+			LatestTrade: AlpacaTrade{Price: 5.10},
+		},
+	}}
+	q, err := optionsQuoteFromSnapshot(snap, "NVDA251219C00400000")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if q.BidPrice != 5.00 || q.AskPrice != 5.20 || q.LastPrice != 5.10 {
+		t.Errorf("bad price mapping: %+v", q)
+	}
+	if !q.Timestamp.Equal(ts) {
+		t.Errorf("timestamp must be preserved for staleness checks, got %v", q.Timestamp)
+	}
+	if _, err := optionsQuoteFromSnapshot(AlpacaOptionsSnapshot{Snapshots: map[string]AlpacaOptionContract{}}, "MISSING"); err == nil {
+		t.Error("missing symbol in snapshot should error")
+	}
+}
