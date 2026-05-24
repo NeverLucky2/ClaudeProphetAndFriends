@@ -36,6 +36,18 @@ This skill targets the **`penny-prophet`** agent (name "PennyProphet"). Sandboxe
 
 State the resolved sandbox list (sandbox name → accountId directory) before continuing. Steps 3 and 4 below glob across **every** directory in `<PENNY_DIRS>` and merge results.
 
+6. **Determine the current epoch.** Build the input for `scripts/resolve-current-epoch.mjs`:
+   - `markers`: for each `<DIR>` in `<PENNY_DIRS>`, read `data/sandboxes/<DIR>/.current_strategy_version.json` if it exists; collect the objects.
+   - `newestStampedVersion`: pass `null` here — markers are the primary source and are already available from this step. ONLY if the result returns `source: "config-inferred"` AND Step 3 later loads at least one trade carrying a `strategyVersion`, re-run this step with that trade's `strategyVersion` as `newestStampedVersion` before proceeding to Step 3.4.
+   - `configVersion`: resolve the strategy's current rules with `resolveStrategyRules` (from `scripts/strategy-version.mjs`) and hash with `computeStrategyVersion`.
+
+   Pipe that JSON to `node scripts/resolve-current-epoch.mjs`. Record the returned `currentVersions` (call it `CURRENT_VERSIONS`), `source`, `consistencyWarning`, and `divergent`. Also read the strategy's `updatedAt` (may be absent) for the Step 3.4 fallback.
+
+   State to the user:
+   > Current ruleset: `<CURRENT_STRATEGY_ID>` @ `<CURRENT_VERSIONS>` (source: `<source>`; updatedAt: `<updatedAt|none>`).
+
+   If `consistencyWarning` is non-null, surface it prominently (the config has an un-deployed edit; loaded trades reflect the running rules). If `divergent` is true, note that sandboxes are running different rulesets. If `source === 'none'` (no marker, no stamped trades, config rules empty), stop — there is nothing coherent to adapt toward.
+
 ## Step 3 — Load recent decisions (last 30 days, all Penny sandboxes)
 
 For each `<DIR>` in `<PENNY_DIRS>`: glob `data/sandboxes/<DIR>/decisive_actions/*.friction.json`. Merge all matched files into one list, sort by file mtime descending, read the **100 most recent overall** (not 100 per sandbox). If fewer than 100 `.friction.json` files exist across all sandboxes, use what's available; if fewer than 20 exist in total, warn the user explicitly that adaptation may be premature on this little data and offer to abort. For each, extract:
@@ -45,12 +57,37 @@ For each `<DIR>` in `<PENNY_DIRS>`: glob `data/sandboxes/<DIR>/decisive_actions/
 - `symbol`
 - `reasoning` (full text)
 - Any `details` fields containing `composite_score`, `dominant_signal`, `position_size_pct`, `stop_pct`, `target_pct`
+- `strategyId` and `strategyVersion` (both may be absent on pre-stamp records)
 
 Penny generates more decisions per day than Prophet, so 100 files across one sandbox typically covers ~2–4 weeks. Across multiple sandboxes it'll be tighter; that's fine — recency matters more than depth.
 
 **Join regime label:** After loading each `.friction.json`, also load `data/reports/regime_history.json` (if Step 0.5 succeeded). For each trade, convert `action.timestamp` to America/New_York using `Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date(timestamp))` and look up the date in `regime_history.labels`. If the date is a weekend/holiday or otherwise missing, walk back up to 5 calendar days for the previous trading day's label. Still missing → tag the trade `regime: "unknown"`. Add the resolved label as a top-level `regime` field on each loaded record.
 
+## Step 3.4 — Epoch segmentation
+
+Pipe the loaded trades (JSON array) on stdin to `scripts/segment-by-epoch.mjs` (e.g. `echo '<TRADES_JSON>' | node scripts/segment-by-epoch.mjs ...`) with flags:
+
+```
+node scripts/segment-by-epoch.mjs --current-versions <CURRENT_VERSIONS joined by commas> --updated-at <updatedAt or omit> --min-current 20 [--min-current-override <N> only if the user explicitly opts in]
+```
+
+Read `recommended_case` and act:
+
+- **Case 1 (single epoch):** proceed to Step 3.5 on the **full** loaded set, unchanged.
+  > Single ruleset across all N loaded trades. Proceeding normally.
+- **Case 2 (straddled, enough current-epoch data):** proceed to Step 3.5 on `current_epoch_set` only.
+  > ⚠️ Window straddles a rule change. Adapting on `counts.current` current-epoch trades. Dropped `drop.dropped` of `drop.total` (`drop.pct` is a fraction — render as a percent via `drop.pct × 100`, e.g. 0.333 → 33.3%). Hold-out drawn only from the current epoch.
+  > If `counts.unknown > counts.prior` (the drop is mostly pre-stamp `unknown`, not a prior epoch): "Most dropped trades are pre-stamp `unknown` — expected this soon after epoch-stamping rollout, not a bug."
+- **Case 3 (too little current-epoch data):** run Step 5 gap analysis for information, then **STOP — emit no proposals** (skip Steps 6-8).
+  > 🛑 Only `counts.current` trades under the current ruleset; need ≥20. You are `trades_needed` short. If `rate_per_day` is non-null, append "at ~`rate_per_day`/day that's ≈ `eta_days` days"; if `rate_per_day` is null (fewer than 2 current-epoch trades), omit the rate/ETA clause entirely. To escape sooner: iterate less often, or re-run with `--min-current-override <N>` for low-confidence proposals.
+
+Always print the breakdown prominently: `current=<counts.current>, prior=<counts.prior>, unknown=<counts.unknown>` and the `stamped_vs_fallback` split. If `mixed_provenance` is true, warn: "Mixed-provenance window — un-stamped labels are heuristic and may disagree with stamped neighbors near the boundary." If `override_applied`, tag every resulting proposal **low-confidence**.
+
+**Steps 5-6 operate ONLY on the set Step 3.4 forwards** (full set in Case 1, `current_epoch_set` in Case 2).
+
 ## Step 3.5 — Split into adapt set and hold-out set
+
+Operate on the set forwarded by Step 3.4 (the full loaded set in Case 1, or `current_epoch_set` in Case 2). Step 3.5 is not reached in Case 3. The 80/20 split, significance gate, and hold-out scorer are otherwise unchanged — they now receive a single-epoch set, so the hold-out is guaranteed the same ruleset as the adapt set.
 
 Sort all loaded decisions by timestamp ascending. Compute `holdout_size = ceil(N × 0.20)` where N is the number of loaded decisions. The **adapt set** is the oldest `N − holdout_size` decisions; the **hold-out set** is the newest `holdout_size`.
 

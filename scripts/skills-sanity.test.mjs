@@ -32,6 +32,28 @@ for (const path of ADAPT_SKILLS) {
   });
 }
 
+const EPOCH_ADAPT_SKILLS = [
+  '.claude/skills/adapt-strategy/SKILL.md',
+  '.claude/skills/adapt-strategy-penny/SKILL.md',
+];
+for (const path of EPOCH_ADAPT_SKILLS) {
+  test(`${path}: references segment-by-epoch.mjs`, () => {
+    assert.match(readFileSync(path, 'utf8'), /scripts\/segment-by-epoch\.mjs/);
+  });
+  test(`${path}: references resolve-current-epoch.mjs`, () => {
+    assert.match(readFileSync(path, 'utf8'), /scripts\/resolve-current-epoch\.mjs/);
+  });
+  test(`${path}: has a Step 3.4 epoch segmentation section`, () => {
+    assert.match(readFileSync(path, 'utf8'), /## Step 3\.4 — Epoch segmentation/);
+  });
+  test(`${path}: references the recommended_case branch field`, () => {
+    assert.match(readFileSync(path, 'utf8'), /recommended_case/);
+  });
+  test(`${path}: references the --min-current flag`, () => {
+    assert.match(readFileSync(path, 'utf8'), /--min-current/);
+  });
+}
+
 const REVIEW_SKILLS = [
   '.claude/skills/review-performance/SKILL.md',
   '.claude/skills/review-performance-penny/SKILL.md',
