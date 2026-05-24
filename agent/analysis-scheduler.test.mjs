@@ -15,6 +15,7 @@ import {
   buildMarketTopSkillAppendix,
   buildBubbleSkillAppendix,
   shouldTriggerWeeklyScreenerOnStartup,
+  weeklyReportIsForDate,
   isLockStale,
   STALE_LOCK_MS,
   AnalysisScheduler,
@@ -180,6 +181,7 @@ test('shouldTriggerWeeklyScreenerOnStartup: true on Sunday when not yet run toda
       dayOfWeek: 0,
       isoDate: '2026-05-17',
       lastWeeklyScreenDate: '2026-05-10',
+      weeklyReportPresent: false,
     }),
     true,
   );
@@ -192,6 +194,7 @@ test('shouldTriggerWeeklyScreenerOnStartup: true on Sunday when state is null (f
       dayOfWeek: 0,
       isoDate: '2026-05-17',
       lastWeeklyScreenDate: null,
+      weeklyReportPresent: false,
     }),
     true,
   );
@@ -204,6 +207,23 @@ test('shouldTriggerWeeklyScreenerOnStartup: false on Sunday when already run tod
       dayOfWeek: 0,
       isoDate: '2026-05-17',
       lastWeeklyScreenDate: '2026-05-17',
+    }),
+    false,
+  );
+});
+
+test("shouldTriggerWeeklyScreenerOnStartup: false on Sunday when today's report file already exists (restart idempotency)", () => {
+  // The real bug: _lastWeeklyScreenDate is in-memory only and resets to null
+  // on restart, so the date check alone re-fires the whole pipeline on every
+  // Sunday restart. The durable guard is the presence of today's
+  // weekly_regime report file — when it's already on disk, do NOT re-run even
+  // though in-memory state looks like a cold start.
+  assert.equal(
+    shouldTriggerWeeklyScreenerOnStartup({
+      dayOfWeek: 0,
+      isoDate: '2026-05-17',
+      lastWeeklyScreenDate: null,
+      weeklyReportPresent: true,
     }),
     false,
   );
@@ -222,6 +242,32 @@ test('shouldTriggerWeeklyScreenerOnStartup: false on non-Sunday regardless of st
       `dayOfWeek=${dayOfWeek} must not trigger`,
     );
   }
+});
+
+// weeklyReportIsForDate is the pure core of the Sunday-restart idempotency
+// guard: given the (possibly null) contents of today's weekly_regime file, is
+// it a valid report stamped for today? Every "treat as absent → re-run" path
+// (missing file, unreadable, malformed JSON, wrong/absent date) must collapse
+// to false here so the fs.readFile wrapper in runStartupChecks stays trivial.
+test('weeklyReportIsForDate: true when the JSON date matches today', () => {
+  assert.equal(weeklyReportIsForDate('{"date":"2026-05-24","breadth_score":32}', '2026-05-24'), true);
+});
+
+test('weeklyReportIsForDate: false when the JSON is stamped for a different day', () => {
+  // A lingering prior-week file must not suppress this week's run.
+  assert.equal(weeklyReportIsForDate('{"date":"2026-05-17"}', '2026-05-24'), false);
+});
+
+test('weeklyReportIsForDate: false on null (file missing / read failed)', () => {
+  assert.equal(weeklyReportIsForDate(null, '2026-05-24'), false);
+});
+
+test('weeklyReportIsForDate: false on malformed JSON', () => {
+  assert.equal(weeklyReportIsForDate('{not valid json', '2026-05-24'), false);
+});
+
+test('weeklyReportIsForDate: false when the date field is absent', () => {
+  assert.equal(weeklyReportIsForDate('{"breadth_score":32}', '2026-05-24'), false);
 });
 
 // Stub the side-effects so triggerJob can run in-process without touching the
