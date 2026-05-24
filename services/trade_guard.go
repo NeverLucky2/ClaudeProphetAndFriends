@@ -25,6 +25,13 @@ const (
 
 const agentTagPrefix = "agent:"
 
+// optionsQuoteMaxAgeCeiling is the hard upper bound on the effective options
+// quote staleness window, applied regardless of the configured
+// OptionsQuoteMaxAge. It is set at the delayed-feed bound (~17 min) so a
+// legitimately delayed OPRA feed still passes, but an absurd or misconfigured
+// value cannot let a frozen quote through. See the 2026-05-24 spec §C2.
+const optionsQuoteMaxAgeCeiling = 1020 * time.Second
+
 // AgentTag returns the managed-position tag string for an agent.
 func AgentTag(agent AgentSource) string {
 	return agentTagPrefix + string(agent)
@@ -368,14 +375,18 @@ func (g *TradeGuard) CheckOptionsOpen(agent AgentSource, underlying, symbol stri
 	// degraded feed (quote_unavailable) from a genuinely illiquid market
 	// (spread_exceeded).
 	if g.cfg.EnableOptionsSpreadGate {
-		if quote == nil || quote.Timestamp.IsZero() || quote.BidPrice <= 0 || quote.AskPrice <= 0 {
+		if quote == nil || quote.Timestamp.IsZero() || quote.BidPrice <= 0 || quote.AskPrice <= 0 || quote.AskPrice < quote.BidPrice {
 			g.logger.WithFields(logrus.Fields{
 				"guard_options_quote_unavailable": true,
 				"symbol":                          symbol,
 			}).Warn("guard: options open blocked — quote unavailable (fail closed)")
 			return fmt.Errorf("guard: options spread gate — no usable quote for %q (fail closed)", symbol)
 		}
-		if g.cfg.OptionsQuoteMaxAge > 0 && now.Sub(quote.Timestamp) > g.cfg.OptionsQuoteMaxAge {
+		effectiveMaxAge := g.cfg.OptionsQuoteMaxAge
+		if effectiveMaxAge <= 0 || effectiveMaxAge > optionsQuoteMaxAgeCeiling {
+			effectiveMaxAge = optionsQuoteMaxAgeCeiling
+		}
+		if now.Sub(quote.Timestamp) > effectiveMaxAge {
 			g.logger.WithFields(logrus.Fields{
 				"guard_options_quote_unavailable": true,
 				"symbol":                          symbol,

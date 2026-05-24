@@ -619,6 +619,9 @@ func optionsQuoteFromSnapshot(snap AlpacaOptionsSnapshot, symbol string) (*inter
 
 // GetOptionsQuote fetches a live options snapshot from Alpaca's data API and
 // returns bid/ask/last + the quote timestamp. Replaces the previous stub.
+// It does its own snapshot fetch (rather than reusing GetOptionSnapshot)
+// because that method returns interfaces.OptionContract, which drops the quote
+// timestamp the spread gate needs for its staleness check.
 func (s *AlpacaTradingService) GetOptionsQuote(ctx context.Context, symbol string) (*interfaces.OptionsQuote, error) {
 	url := fmt.Sprintf("https://data.alpaca.markets/v1beta1/options/snapshots/%s", symbol)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
