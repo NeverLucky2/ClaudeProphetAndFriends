@@ -637,6 +637,44 @@ func TestTradeGuard_HasRawSymbol(t *testing.T) {
 	}
 }
 
+func TestCheckOptionsOpen_SpreadGate(t *testing.T) {
+	now := time.Date(2026, 5, 24, 14, 30, 0, 0, time.UTC)
+	base := TradeGuardConfig{
+		EnableOptionsSpreadGate: true,
+		SpreadMaxPct:            0.10,
+		OptionsQuoteMaxAge:      60 * time.Second,
+	}
+	g := NewTradeGuard(nil, nil, base)
+
+	fresh := func(bid, ask float64) *interfaces.OptionsQuote {
+		return &interfaces.OptionsQuote{BidPrice: bid, AskPrice: ask, Timestamp: now}
+	}
+
+	if err := g.CheckOptionsOpen(AgentMain, "NVDA", "NVDA251219C00400000", fresh(5.00, 5.20), now); err != nil {
+		t.Errorf("tight spread should pass, got %v", err)
+	}
+	if err := g.CheckOptionsOpen(AgentMain, "NVDA", "NVDA251219C00400000", fresh(1.00, 1.30), now); err == nil {
+		t.Error("wide spread should be rejected")
+	}
+	if err := g.CheckOptionsOpen(AgentMain, "NVDA", "NVDA251219C00400000", nil, now); err == nil {
+		t.Error("nil quote should fail closed")
+	}
+	stale := &interfaces.OptionsQuote{BidPrice: 5.00, AskPrice: 5.20, Timestamp: now.Add(-5 * time.Minute)}
+	if err := g.CheckOptionsOpen(AgentMain, "NVDA", "NVDA251219C00400000", stale, now); err == nil {
+		t.Error("stale quote should fail closed")
+	}
+	if err := g.CheckOptionsOpen(AgentMain, "NVDA", "NVDA251219C00400000", fresh(0, 5.20), now); err == nil {
+		t.Error("zero bid should fail closed")
+	}
+	gOff := NewTradeGuard(nil, nil, TradeGuardConfig{EnableOptionsSpreadGate: false})
+	if err := gOff.CheckOptionsOpen(AgentMain, "NVDA", "NVDA251219C00400000", nil, now); err != nil {
+		t.Errorf("gate off must not block on nil quote, got %v", err)
+	}
+	if err := g.CheckOptionsOpen(AgentPenny, "NVDA", "NVDA251219C00400000", fresh(1.00, 1.30), now); err != nil {
+		t.Errorf("non-main agent must not be spread-gated, got %v", err)
+	}
+}
+
 func TestCheckOptionsOpen_UniverseGate(t *testing.T) {
 	floor := map[string]bool{"NVDA": true, "SPY": true}
 	g := NewTradeGuard(nil, nil, TradeGuardConfig{

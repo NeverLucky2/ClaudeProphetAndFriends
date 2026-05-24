@@ -97,6 +97,16 @@ type TradeGuardConfig struct {
 	// Empty = not configured -> gate fails OPEN (never blocks). Loaded from the
 	// bot-owned floor file at startup.
 	TradableUnderlyings map[string]bool `json:"-"`
+
+	// EnableOptionsSpreadGate flag-gates the Prophet (AgentMain) options-open
+	// spread/liquidity check. Default off (observe-first).
+	EnableOptionsSpreadGate bool `json:"enable_options_spread_gate"`
+	// SpreadMaxPct rejects an options open whose (ask-bid)/mid >= this fraction
+	// (0.10 = 10%, matching the advisory rule).
+	SpreadMaxPct float64 `json:"spread_max_pct"`
+	// OptionsQuoteMaxAge is the staleness bound: a quote older than this (or with
+	// a zero timestamp) fails closed when the spread gate is enabled.
+	OptionsQuoteMaxAge time.Duration `json:"options_quote_max_age"`
 }
 
 // SectorBucket categorizes a symbol's primary factor exposure for cross-agent
@@ -348,6 +358,41 @@ func (g *TradeGuard) CheckOptionsOpen(agent AgentSource, underlying, symbol stri
 				"symbol":                      symbol,
 			}).Warn("guard: options open blocked — underlying not in tradable floor")
 			return fmt.Errorf("guard: universe — %q is not in Prophet's tradable floor", symbol)
+		}
+	}
+
+	// --- Options spread / liquidity gate ---
+	// Fail CLOSED on missing/stale/unpriced quote: a missing runtime quote means
+	// "can't verify liquidity right now" (contrast the universe gate's fail-open
+	// on missing config). Distinct log reasons so the operator can tell a
+	// degraded feed (quote_unavailable) from a genuinely illiquid market
+	// (spread_exceeded).
+	if g.cfg.EnableOptionsSpreadGate {
+		if quote == nil || quote.Timestamp.IsZero() || quote.BidPrice <= 0 || quote.AskPrice <= 0 {
+			g.logger.WithFields(logrus.Fields{
+				"guard_options_quote_unavailable": true,
+				"symbol":                          symbol,
+			}).Warn("guard: options open blocked — quote unavailable (fail closed)")
+			return fmt.Errorf("guard: options spread gate — no usable quote for %q (fail closed)", symbol)
+		}
+		if g.cfg.OptionsQuoteMaxAge > 0 && now.Sub(quote.Timestamp) > g.cfg.OptionsQuoteMaxAge {
+			g.logger.WithFields(logrus.Fields{
+				"guard_options_quote_unavailable": true,
+				"symbol":                          symbol,
+				"quote_age_sec":                   now.Sub(quote.Timestamp).Seconds(),
+			}).Warn("guard: options open blocked — quote stale (fail closed)")
+			return fmt.Errorf("guard: options spread gate — quote for %q is stale (fail closed)", symbol)
+		}
+		mid := (quote.BidPrice + quote.AskPrice) / 2
+		spreadPct := (quote.AskPrice - quote.BidPrice) / mid
+		if spreadPct >= g.cfg.SpreadMaxPct {
+			g.logger.WithFields(logrus.Fields{
+				"guard_options_spread_exceeded": true,
+				"symbol":                        symbol,
+				"spread_pct":                    spreadPct,
+			}).Warn("guard: options open blocked — spread too wide")
+			return fmt.Errorf("guard: options spread gate — %q spread %.1f%% exceeds %.1f%% cap",
+				symbol, spreadPct*100, g.cfg.SpreadMaxPct*100)
 		}
 	}
 
