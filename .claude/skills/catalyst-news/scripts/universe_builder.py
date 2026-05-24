@@ -16,9 +16,10 @@ from pathlib import Path
 from typing import Optional
 
 
-# Shared static file lives in analyst-actions (single source of truth).
+# Shared bot-owned floor at repo-root config/ (single source of truth).
+# parents: [0]=scripts [1]=catalyst-news [2]=skills [3]=.claude [4]=repo root
 DEFAULT_STATIC_PATH = (
-    Path(__file__).resolve().parent.parent.parent / "analyst-actions" / "universe.txt"
+    Path(__file__).resolve().parents[4] / "config" / "prophet_tradable_universe.txt"
 )
 
 

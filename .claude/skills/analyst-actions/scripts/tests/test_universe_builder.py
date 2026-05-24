@@ -132,5 +132,16 @@ def test_build_universe_disables_topup_when_count_zero(tmp_path: Path):
     assert result["tickers"] == ["SPY", "QQQ"]
 
 
+def test_default_static_path_points_at_bot_owned_floor():
+    # The floor must be the repo-root config file, not a skill-local copy,
+    # so the Go guard and the catalyst skills share one source of truth.
+    from universe_builder import DEFAULT_STATIC_PATH
+    assert DEFAULT_STATIC_PATH.name == "prophet_tradable_universe.txt"
+    assert DEFAULT_STATIC_PATH.parent.name == "config"
+    assert DEFAULT_STATIC_PATH.exists(), f"floor file missing at {DEFAULT_STATIC_PATH}"
+    names = DEFAULT_STATIC_PATH.read_text(encoding="utf-8")
+    assert "NVDA" in names and "SPY" in names
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
