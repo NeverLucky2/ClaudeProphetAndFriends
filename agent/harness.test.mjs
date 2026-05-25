@@ -18,8 +18,10 @@ test('weekday after the last boundary looks ahead to next day 04:00', () => {
 });
 
 test('weekend looks ahead to Monday 04:00 (never returns null)', () => {
-  // Sun 2026-05-24 23:00Z = 19:00 ET Sunday. Next boundary = Mon 04:00 ET = 9h.
-  assert.equal(secondsToNextPhaseBoundary(new Date('2026-05-24T23:00:00Z')), 9 * 3600);
+  // Sun 2026-05-17 23:00Z = 19:00 ET Sunday. Next boundary = Mon 2026-05-18 04:00 ET = 9h.
+  // (Uses 05-17, not 05-24: the latter's Monday is 2026-05-25 Memorial Day, which the
+  // holiday skip now rolls past — see the dedicated holiday cases in market-calendar.test.mjs.)
+  assert.equal(secondsToNextPhaseBoundary(new Date('2026-05-17T23:00:00Z')), 9 * 3600);
 });
 
 test('exactly on a boundary skips it and returns seconds to the next one', () => {
