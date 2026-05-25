@@ -183,10 +183,35 @@ class TestResponseNormalization:
         stable_resp = _mock_response(200, batch_data)
         v3_resp = _mock_response(403)
 
-        client.session.get = MagicMock(side_effect=[stable_resp, v3_resp])
+        # Three historical endpoints now: EOD, legacy stable, v3. EOD gets the
+        # no-match batch (rejected), the other two 403 -> overall None.
+        client.session.get = MagicMock(side_effect=[stable_resp, v3_resp, v3_resp])
 
         result = client.get_historical_prices("^GSPC", days=80)
         assert result is None
+
+    def test_historical_eod_flat_array_normalized(self):
+        """stable EOD flat list -> normalized to {symbol, historical}, sliced to timeseries."""
+        client = _make_client()
+        eod_rows = [
+            {
+                "date": f"2026-05-{20 - i:02d}",
+                "open": 5000.0,
+                "high": 5010.0,
+                "low": 4990.0,
+                "close": 5000.0,
+                "volume": 3_000_000_000,
+            }
+            for i in range(5)
+        ]
+        resp = _mock_response(200, eod_rows)
+        client.session.get = MagicMock(return_value=resp)
+
+        result = client.get_historical_prices("^GSPC", days=3)
+        assert result is not None
+        assert result["symbol"] == "^GSPC"
+        assert len(result["historical"]) == 3
+        assert client.session.get.call_count == 1
 
 
 # =========================================================================
@@ -273,6 +298,27 @@ class TestSymbolMismatch:
         result = client.get_quote("^GSPC,^VIX")
         assert result == batch_data
         assert client.session.get.call_count == 1
+
+    def test_batch_quotes_one_request_per_symbol(self):
+        """get_batch_quotes issues one stable/quote request per symbol (no comma batching).
+
+        FMP's stable/quote serves a single symbol per request; comma batches
+        return [] and stable/batch-quote is HTTP 402. So get_batch_quotes must
+        fetch individually, never join symbols with commas.
+        """
+        client = _make_client()
+
+        def per_symbol(url, params=None, timeout=None):
+            sym = (params or {}).get("symbol")
+            return _mock_response(200, [{"symbol": sym, "price": 1.0}])
+
+        client.session.get = MagicMock(side_effect=per_symbol)
+        result = client.get_batch_quotes(["AAA", "BBB", "CCC"])
+        assert set(result.keys()) == {"AAA", "BBB", "CCC"}
+        # One request per symbol — never a comma-joined batch
+        assert client.session.get.call_count == 3
+        for call in client.session.get.call_args_list:
+            assert "," not in (call.kwargs.get("params") or {}).get("symbol", "")
 
 
 # =========================================================================

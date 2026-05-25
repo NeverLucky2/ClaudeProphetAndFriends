@@ -15,6 +15,7 @@ Features:
 import os
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -61,14 +62,32 @@ def _v3_quote_url(base, symbols_str, params):
     return f"{base}/{symbols_str}", params
 
 
+def _eod_hist_url(base, symbols_str, params):
+    """stable/historical-price-eod/full?symbol=^GSPC&from=YYYY-MM-DD&to=YYYY-MM-DD
+
+    Replaces the deprecated /historical-price-full. Translates legacy
+    'timeseries=N' (N trading days) into a from/to date range with a
+    1.5x calendar buffer so we cover N trading days even with weekends.
+    """
+    params["symbol"] = symbols_str
+    if "timeseries" in params:
+        days = int(params.pop("timeseries"))
+        calendar_span = int(days * 1.5) + 30
+        to_d = datetime.now(timezone.utc).date()
+        from_d = to_d - timedelta(days=calendar_span)
+        params["from"] = from_d.isoformat()
+        params["to"] = to_d.isoformat()
+    return base, params
+
+
 def _stable_hist_url(base, symbols_str, params):
-    """stable/historical-price-full?symbol=^GSPC&timeseries=80"""
+    """stable/historical-price-full?symbol=^GSPC&timeseries=80 (legacy)"""
     params["symbol"] = symbols_str
     return base, params
 
 
 def _v3_hist_url(base, symbols_str, params):
-    """api/v3/historical-price-full/^GSPC?timeseries=80"""
+    """api/v3/historical-price-full/^GSPC?timeseries=80 (legacy)"""
     return f"{base}/{symbols_str}", params
 
 
@@ -78,6 +97,7 @@ _FMP_ENDPOINTS = {
         ("https://financialmodelingprep.com/api/v3/quote", _v3_quote_url),
     ],
     "historical": [
+        ("https://financialmodelingprep.com/stable/historical-price-eod/full", _eod_hist_url),
         ("https://financialmodelingprep.com/stable/historical-price-full", _stable_hist_url),
         ("https://financialmodelingprep.com/api/v3/historical-price-full", _v3_hist_url),
     ],
@@ -184,7 +204,17 @@ class FMPClient:
                     valid = False
 
             if endpoint_key == "historical":
-                if not isinstance(data, dict):
+                # New stable EOD endpoint returns a flat list of OHLCV records.
+                # Normalize into the v3-compatible {"symbol", "historical": [...]} shape.
+                if isinstance(data, list):
+                    if not data or not isinstance(data[0], dict) or "date" not in data[0]:
+                        valid = False
+                    else:
+                        max_records = params.get("timeseries")
+                        records = data[: int(max_records)] if max_records else data
+                        self._endpoint_failures[base_url] = 0
+                        return {"symbol": symbols_str, "historical": records}
+                elif not isinstance(data, dict):
                     valid = False
                 elif "historicalStockList" in data:
                     norm = symbols_str.replace("-", ".")
@@ -241,14 +271,17 @@ class FMPClient:
         return data
 
     def get_batch_quotes(self, symbols: list[str]) -> dict[str, dict]:
-        """Fetch quotes for a list of symbols, batching up to 5 per request"""
+        """Fetch quotes for a list of symbols, one request per symbol.
+
+        FMP's stable/quote serves a single symbol per request — a
+        comma-separated multi-symbol query returns [], and the dedicated
+        stable/batch-quote endpoint requires a paid tier (HTTP 402). Legacy
+        v3 accepted comma batches, but single-symbol works on both tiers, so
+        we fetch individually (get_quote retains the stable->v3 fallback).
+        """
         results = {}
-        # FMP supports comma-separated symbols in quote endpoint
-        batch_size = 5
-        for i in range(0, len(symbols), batch_size):
-            batch = symbols[i : i + batch_size]
-            batch_str = ",".join(batch)
-            quotes = self.get_quote(batch_str)
+        for sym in symbols:
+            quotes = self.get_quote(sym)
             if quotes:
                 for q in quotes:
                     results[q["symbol"]] = q
