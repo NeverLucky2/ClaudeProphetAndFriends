@@ -11,6 +11,8 @@
 //
 // See docs/preflight-skip-spec.md for the full design.
 
+import { isMarketHoliday } from './market-calendar.js';
+
 // isEconomicBlackout queries /api/v1/econ/blackout for the shared US-release
 // blackout window (30 min before / 15 min after CPI, NFP, FOMC, PCE, PPI,
 // core retail). Fails open: any error → { blackout: false, error } so the
@@ -212,8 +214,9 @@ async function pennyPreflight(runtime, agentConfig) {
 }
 
 // isClosedPhase returns { closed, reason } for a given Date. Mirrors the
-// 'closed' bucket from harness.js getCurrentPhase(): weekends, OR weekdays
-// before 04:00 ET (240 min), OR weekdays at/after 20:00 ET (1200 min).
+// 'closed' bucket from harness.js getCurrentPhase(): weekends, full-close
+// market holidays, OR weekdays before 04:00 ET (240 min), OR weekdays at/after
+// 20:00 ET (1200 min). The holiday list is shared via market-calendar.js.
 //
 // Duplicated from harness.js to avoid an import cycle (harness.js imports
 // from preflight.js). Same pattern as outOfTrendWindow below. If the phase
@@ -222,6 +225,9 @@ export function isClosedPhase(now) {
   const day = now.getDay();
   if (day === 0 || day === 6) {
     return { closed: true, reason: 'weekend' };
+  }
+  if (isMarketHoliday(now)) {
+    return { closed: true, reason: 'market holiday' };
   }
   const etTime = now.toLocaleTimeString('en-US', {
     timeZone: 'America/New_York',
@@ -294,6 +300,9 @@ export function outOfTrendWindow(now) {
   const day = now.getDay();
   if (day === 0 || day === 6) {
     return { out: true, reason: 'weekend (TrendProphet runs weekdays only)' };
+  }
+  if (isMarketHoliday(now)) {
+    return { out: true, reason: 'market holiday (TrendProphet runs trading days only)' };
   }
   const etTime = now.toLocaleTimeString('en-US', {
     timeZone: 'America/New_York',

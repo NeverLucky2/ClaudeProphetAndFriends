@@ -8,6 +8,7 @@ import { EventEmitter } from 'events';
 import fs from 'fs/promises';
 import path from 'path';
 import { resolvePreflight } from './preflight.js';
+import { isMarketHoliday } from './market-calendar.js';
 import { renderIntradayBlock, shouldInjectIntraday } from './intraday-prompt.js';
 import { fetchBeatContext, renderBeatContextBlock } from './beat-context.js';
 import { resolveAllowedTools } from './tool-allowlists.js';
@@ -31,13 +32,12 @@ export const PHASE_DEFAULTS = {
   closed:       { seconds: 28800, label: 'Markets Closed', range: null },
 };
 
-export function getCurrentPhase() {
-  const now = new Date();
+export function getCurrentPhase(now = new Date()) {
   const et = now.toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false });
   const [h, m] = et.split(':').map(Number);
   const mins = h * 60 + m;
   const weekday = now.getDay() >= 1 && now.getDay() <= 5;
-  if (!weekday) return 'closed';
+  if (!weekday || isMarketHoliday(now)) return 'closed';
   for (const [phase, cfg] of Object.entries(PHASE_DEFAULTS)) {
     if (cfg.range && mins >= cfg.range[0] && mins < cfg.range[1]) return phase;
   }
@@ -69,6 +69,8 @@ export function secondsToNextPhaseBoundary(now) {
   for (let dayOffset = 0; dayOffset < 8; dayOffset++) {
     const dow = ((nowDow - 1 + dayOffset) % 7) + 1; // 1=Mon..7=Sun
     if (dow === 6 || dow === 7) continue;            // skip weekends — no boundaries
+    // skip full-close holidays — no boundaries that day (same as weekends)
+    if (isMarketHoliday(new Date(now.getTime() + dayOffset * 86400 * 1000))) continue;
     for (const bSecs of boundaries) {
       const offset = dayOffset * 86400 + bSecs - nowSecs;
       if (offset > 0) return offset;
