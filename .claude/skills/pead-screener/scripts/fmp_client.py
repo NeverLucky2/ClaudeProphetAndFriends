@@ -17,6 +17,7 @@ Features:
 import os
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -52,23 +53,60 @@ def _load_dotenv_from_ancestors(key: str) -> Optional[str]:
 # --- FMP endpoint fallback: stable (new users) -> v3 (legacy users) ---
 
 
+def _eod_hist_url(base, symbols_str, params):
+    """stable/historical-price-eod/full?symbol=^GSPC&from=YYYY-MM-DD&to=YYYY-MM-DD
+
+    Replaces the deprecated /historical-price-full. Translates legacy
+    'timeseries=N' (N trading days) into a from/to date range with a
+    1.5x calendar buffer so we cover N trading days even with weekends.
+    """
+    params["symbol"] = symbols_str
+    if "timeseries" in params:
+        days = int(params.pop("timeseries"))
+        calendar_span = int(days * 1.5) + 30
+        to_d = datetime.now(timezone.utc).date()
+        from_d = to_d - timedelta(days=calendar_span)
+        params["from"] = from_d.isoformat()
+        params["to"] = to_d.isoformat()
+    return base, params
+
+
 def _stable_hist_url(base, symbols_str, params):
-    """stable/historical-price-full?symbol=SPY&timeseries=90"""
+    """stable/historical-price-full?symbol=SPY&timeseries=90 (legacy)"""
     params["symbol"] = symbols_str
     return base, params
 
 
 def _v3_hist_url(base, symbols_str, params):
-    """api/v3/historical-price-full/SPY?timeseries=90"""
+    """api/v3/historical-price-full/SPY?timeseries=90 (legacy)"""
     return f"{base}/{symbols_str}", params
 
 
 _FMP_ENDPOINTS = {
     "historical": [
+        ("https://financialmodelingprep.com/stable/historical-price-eod/full", _eod_hist_url),
         ("https://financialmodelingprep.com/stable/historical-price-full", _stable_hist_url),
         ("https://financialmodelingprep.com/api/v3/historical-price-full", _v3_hist_url),
     ],
 }
+
+
+def _normalize_stable_profile(profile: dict) -> dict:
+    """Map stable /profile field names onto the v3 keys callers expect.
+
+    The stable profile endpoint renames several fields (marketCap vs v3's
+    mktCap, exchange vs exchangeShortName). Add the v3 aliases so the rest of
+    the screener — written against v3 — reads market cap and exchange unchanged
+    regardless of which tier served the profile. Without this, every profile
+    from the stable fallback reads mktCap=0 and is dropped at the cap filter.
+    """
+    if not isinstance(profile, dict):
+        return profile
+    if "mktCap" not in profile and "marketCap" in profile:
+        profile["mktCap"] = profile["marketCap"]
+    if "exchangeShortName" not in profile and "exchange" in profile:
+        profile["exchangeShortName"] = profile["exchange"]
+    return profile
 
 
 class ApiCallBudgetExceeded(Exception):
@@ -189,7 +227,17 @@ class FMPClient:
             # Shape validation: reject truthy-but-wrong-shape responses
             valid = True
             if endpoint_key == "historical":
-                if not isinstance(data, dict):
+                # New stable EOD endpoint returns a flat list of OHLCV records.
+                # Normalize into the v3-compatible {"symbol", "historical": [...]} shape.
+                if isinstance(data, list):
+                    if not data or not isinstance(data[0], dict) or "date" not in data[0]:
+                        valid = False
+                    else:
+                        max_records = params.get("timeseries")
+                        records = data[: int(max_records)] if max_records else data
+                        self._endpoint_failures[base_url] = 0
+                        return {"symbol": symbols_str, "historical": records}
+                elif not isinstance(data, dict):
                     valid = False
                 elif "historicalStockList" in data:
                     # stable batch format -> v3 single format (exact match only)
@@ -308,8 +356,9 @@ class FMPClient:
                 continue
             data = self._rate_limited_get(stable_url, {"symbol": symbol}, quiet=True)
             if data and isinstance(data, list) and data:
-                self.cache[cache_key] = data[0]
-                results[symbol] = data[0]
+                prof = _normalize_stable_profile(data[0])
+                self.cache[cache_key] = prof
+                results[symbol] = prof
             else:
                 self.cache[cache_key] = None
         return results

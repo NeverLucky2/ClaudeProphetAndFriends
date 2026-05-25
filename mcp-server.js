@@ -2810,11 +2810,11 @@ Worst Trade: ${stats.worst_result_pct.toFixed(1)}% ($${stats.worst_result_dollar
         const fmpKey = process.env.FMP_API_KEY;
         if (!fmpKey) return { content: [{ type: 'text', text: 'Error: FMP_API_KEY environment variable not set. Cannot run PEAD screener.' }], isError: true };
 
-        // Observability: capture output to a per-run log. NOTE: PEAD is not yet
-        // scoped to the tradable universe, so on the starter tier it exhausts its
-        // FMP call budget fanning out profiles across the whole earnings calendar
-        // (see the run log for the failure). Universe-scoping is a tracked
-        // follow-up; this at least makes the failure visible instead of silent.
+        // Scope the screen to Prophet's tradable universe and capture output to a
+        // per-run log. Without --universe, Mode A pulls the whole-market earnings
+        // calendar and fetches a profile per symbol, exhausting the FMP starter-tier
+        // call budget before it can write a report (mirror of run_vcp_screener).
+        const universe = await loadProphetUniverse(PROPHET_UNIVERSE_PATH);
         const pts = new Date().toISOString();
         const peadLog = path.join(REPORTS_DIR, `pead_screener_${pts.slice(0, 10)}_${pts.slice(11, 19).replace(/:/g, '')}.log`);
         let peadLogFd = null;
@@ -2823,6 +2823,7 @@ Worst Trade: ${stats.worst_result_pct.toFixed(1)}% ($${stats.worst_result_dollar
         const proc = spawnBg(PYTHON_BIN, [
           path.join(process.cwd(), '.claude/skills/pead-screener/scripts/screen_pead.py'),
           '--output-dir', REPORTS_DIR,
+          '--universe', ...universe,
         ], {
           cwd: process.cwd(),
           env: { ...process.env, FMP_API_KEY: fmpKey },
@@ -2832,7 +2833,7 @@ Worst Trade: ${stats.worst_result_pct.toFixed(1)}% ($${stats.worst_result_dollar
         const pid = proc.pid;
         proc.unref();
         if (peadLogFd !== null) { try { closeSync(peadLogFd); } catch {} }
-        return { content: [{ type: 'text', text: `PEAD screener launched (PID: ${pid}). Expected completion: 1-2 minutes.\n\nResults will appear in data/reports/pead_screener_*.json (run log: ${path.basename(peadLog)}).\n\nRecommended: call wait(120) then read_latest_report("pead")` }] };
+        return { content: [{ type: 'text', text: `PEAD screener launched (PID: ${pid}) over ${universe.length} universe symbols. Expected completion: 1-2 minutes.\n\nResults will appear in data/reports/pead_screener_*.json (run log: ${path.basename(peadLog)}).\n\nRecommended: call wait(120) then read_latest_report("pead")` }] };
       }
 
       case 'run_market_top_check': {

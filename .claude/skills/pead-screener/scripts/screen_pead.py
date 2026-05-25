@@ -142,6 +142,13 @@ def parse_arguments():
         default=500_000_000,
         help="Minimum market cap (Mode A, default: 500000000)",
     )
+    parser.add_argument(
+        "--universe",
+        nargs="+",
+        help="Restrict the earnings calendar to these symbols (Mode A). "
+        "Bypasses the whole-market profile fan-out that exhausts the API budget "
+        "on the starter tier; mirror of the VCP screener's --universe.",
+    )
 
     # Mode B arguments
     parser.add_argument(
@@ -612,6 +619,16 @@ def _get_candidates_mode_a(client: FMPClient, args) -> list[dict]:
         return []
 
     print(f"  Raw earnings events: {len(earnings)}")
+
+    # Scope to the tradable universe BEFORE the profile fan-out. Without this,
+    # Mode A pulls a whole-market calendar (~3.7k events) and fetches one profile
+    # per symbol, blowing the --max-api-calls budget on the starter tier before
+    # the market-cap filter can run.
+    universe = getattr(args, "universe", None)
+    if universe:
+        allowed = {u.upper() for u in universe}
+        earnings = [e for e in earnings if (e.get("symbol") or "").upper() in allowed]
+        print(f"  After universe filter ({len(allowed)} symbols): {len(earnings)} events")
 
     # Get unique symbols
     symbols = list(set(e.get("symbol", "") for e in earnings if e.get("symbol")))

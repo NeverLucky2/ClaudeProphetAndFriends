@@ -1022,6 +1022,105 @@ class TestFMPClient:
         except ApiCallBudgetExceeded as e:
             assert "budget exhausted" in str(e).lower()
 
+    @patch("fmp_client.requests.Session")
+    def test_historical_eod_flat_array_normalized(self, mock_session_class):
+        """stable EOD endpoint returns a flat list -> normalized to {symbol, historical} and sliced."""
+        mock_session = MagicMock()
+        eod_rows = [
+            {
+                "date": f"2026-05-{20 - i:02d}",
+                "open": 1.0,
+                "high": 2.0,
+                "low": 0.5,
+                "close": 1.5,
+                "volume": 100,
+            }
+            for i in range(5)
+        ]
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = eod_rows
+        resp.text = "ok"
+        mock_session.get.return_value = resp
+        mock_session_class.return_value = mock_session
+
+        client = FMPClient(api_key="test_key", max_api_calls=200)
+        client.session = mock_session
+        client.RATE_LIMIT_DELAY = 0
+
+        result = client.get_historical_prices("AAPL", days=3)
+        assert result is not None
+        assert result["symbol"] == "AAPL"
+        assert len(result["historical"]) == 3  # sliced to timeseries
+        assert result["historical"][0]["close"] == 1.5
+        # EOD is the first endpoint -> exactly one HTTP call
+        assert mock_session.get.call_count == 1
+
+    @patch("fmp_client.requests.Session")
+    def test_stable_profile_marketcap_aliased_to_mktcap(self, mock_session_class):
+        """Stable /profile (v3 batch 403) exposes v3 aliases mktCap + exchangeShortName.
+
+        The stable profile endpoint renames marketCap->mktCap and
+        exchange->exchangeShortName; without normalization every universe member
+        reads mktCap=0 and is dropped at the market-cap filter.
+        """
+        mock_session = MagicMock()
+
+        def fake_get(url, params=None, timeout=None):
+            if "/profile/" in url:  # v3 batch -> 403 (legacy, dead on starter tier)
+                r = MagicMock(status_code=403, text="Legacy Endpoint")
+                r.json.return_value = None
+                return r
+            sym = (params or {}).get("symbol")  # stable /profile?symbol=
+            r = MagicMock(status_code=200, text="ok")
+            r.json.return_value = [
+                {"symbol": sym, "marketCap": 4_500_000_000, "exchange": "NASDAQ"}
+            ]
+            return r
+
+        mock_session.get.side_effect = fake_get
+        mock_session_class.return_value = mock_session
+
+        client = FMPClient(api_key="test_key", max_api_calls=200)
+        client.session = mock_session
+        client.RATE_LIMIT_DELAY = 0
+
+        profiles = client.get_company_profiles(["AAPL"])
+        assert profiles["AAPL"]["mktCap"] == 4_500_000_000
+        assert profiles["AAPL"]["exchangeShortName"] == "NASDAQ"
+
+
+# ===========================================================================
+# TestUniverseFilter (Mode A scoping)
+# ===========================================================================
+
+
+class TestUniverseFilter:
+    """Mode A filters the earnings calendar to the tradable universe BEFORE profile fan-out."""
+
+    def test_universe_filters_before_profiles(self):
+        import screen_pead
+        from types import SimpleNamespace
+
+        client = MagicMock()
+        client.get_earnings_calendar.return_value = [
+            {"symbol": "AAPL", "date": "2026-05-20", "time": "amc"},
+            {"symbol": "ZZZZ", "date": "2026-05-20", "time": "bmo"},  # not in universe
+            {"symbol": "MSFT", "date": "2026-05-21", "time": "amc"},
+        ]
+        # profiles returns mktCap for whatever symbols it is asked about
+        client.get_company_profiles.side_effect = lambda syms: {
+            s: {"mktCap": 3_000_000_000} for s in syms
+        }
+
+        args = SimpleNamespace(
+            lookback_days=14, min_market_cap=500_000_000, universe=["AAPL", "MSFT"]
+        )
+        candidates = screen_pead._get_candidates_mode_a(client, args)
+
+        symbols_profiled = set(client.get_company_profiles.call_args[0][0])
+        assert symbols_profiled == {"AAPL", "MSFT"}  # ZZZZ filtered out pre-profile
+        assert {c["symbol"] for c in candidates} == {"AAPL", "MSFT"}
+
 
 # ===========================================================================
 # TestPartialWeekBoundary
