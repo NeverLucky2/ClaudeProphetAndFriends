@@ -162,12 +162,33 @@ export function buildBubbleSkillAppendix(date) {
 }
 
 // Pure gate for the Sunday weekly_screeners startup catch-up. Returns true
-// when the bot is starting up on a Sunday and weekly_screeners hasn't run yet
-// that Sunday. No hour cap — Sunday 18:00 is the primary trigger; this catch-up
-// must fire at any hour on Sunday if the primary was missed (including after
-// 18:00, when the bot came back online late).
-export function shouldTriggerWeeklyScreenerOnStartup({ dayOfWeek, isoDate, lastWeeklyScreenDate }) {
-  return dayOfWeek === 0 && lastWeeklyScreenDate !== isoDate;
+// when the bot is starting up on a Sunday, today's weekly_regime report is NOT
+// already on disk (`weeklyReportPresent`), and weekly_screeners hasn't run yet
+// this session. The file presence is the durable idempotency guard:
+// `lastWeeklyScreenDate` is in-memory only and resets to null on restart, so
+// without the file check every Sunday restart re-fires the whole pipeline
+// (mirrors how daily_briefing guards on daily_brief.json). No hour cap —
+// Sunday 18:00 is the primary trigger; this catch-up must fire at any hour on
+// Sunday if the primary was missed (including after 18:00, when the bot came
+// back online late).
+export function shouldTriggerWeeklyScreenerOnStartup({ dayOfWeek, isoDate, lastWeeklyScreenDate, weeklyReportPresent }) {
+  return dayOfWeek === 0 && !weeklyReportPresent && lastWeeklyScreenDate !== isoDate;
+}
+
+// Pure core of the Sunday-restart idempotency guard. Given the raw contents of
+// today's weekly_regime report file (or null when it couldn't be read),
+// returns true iff it parses and its `date` field equals `isoDate`. Every
+// "can't prove today's report exists" case — null, malformed JSON, missing or
+// mismatched date — collapses to false so the caller (re)runs the pipeline.
+// Keeping this pure leaves only a trivial fs.readFile wrapper in the caller.
+// Exported for tests.
+export function weeklyReportIsForDate(raw, isoDate) {
+  if (typeof raw !== 'string') return false;
+  try {
+    return JSON.parse(raw)?.date === isoDate;
+  } catch {
+    return false;
+  }
 }
 
 export class AnalysisScheduler extends EventEmitter {
@@ -461,11 +482,26 @@ export class AnalysisScheduler extends EventEmitter {
       }
     }
 
-    // 1.6 Weekly screeners catch-up (state-based, Sunday-only) — catches the
-    // case where the bot was offline at the Sunday 18:00 ET tick-trigger. No
-    // hour cap on purpose: fires at any time on Sunday if it hasn't run yet,
-    // including after 18:00 (a late restart that missed the primary trigger).
-    if (shouldTriggerWeeklyScreenerOnStartup({ dayOfWeek, isoDate, lastWeeklyScreenDate: this._lastWeeklyScreenDate })) {
+    // 1.6 Weekly screeners catch-up (Sunday-only) — catches the case where the
+    // bot was offline at the Sunday 18:00 ET tick-trigger. No hour cap: fires
+    // at any time on Sunday if it hasn't run yet. Idempotency is anchored on
+    // today's weekly_regime report file (not in-memory state, which resets on
+    // restart), mirroring how daily_briefing guards on daily_brief.json — so a
+    // Sunday restart doesn't re-run the whole pipeline.
+    let weeklyReportPresent = false;
+    if (dayOfWeek === 0) {
+      const slug = isoDate.replace(/-/g, '');
+      let raw = null;
+      try {
+        raw = await fs.readFile(path.join(REPORTS_DIR, `weekly_regime_${slug}.json`), 'utf-8');
+      } catch {
+        // ENOENT etc → leave raw null; weeklyReportIsForDate treats it as
+        // absent so we (re)run, matching daily_briefing's "can't prove it's
+        // current → regenerate" stance.
+      }
+      weeklyReportPresent = weeklyReportIsForDate(raw, isoDate);
+    }
+    if (shouldTriggerWeeklyScreenerOnStartup({ dayOfWeek, isoDate, lastWeeklyScreenDate: this._lastWeeklyScreenDate, weeklyReportPresent })) {
       if (await this._isLocked(this._getLockKey('weekly_screeners', isoDate))) {
         this._log('Weekly screeners already running in another process — skipping startup trigger.', 'info');
       } else {
