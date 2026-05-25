@@ -902,6 +902,74 @@ class TestFMPClient:
         assert "max_api_calls" in stats
         assert stats["max_api_calls"] == 100
 
+    def test_historical_eod_flat_array_normalized(self):
+        """stable EOD flat list -> get_historical_prices returns the sliced historical LIST."""
+        client = FMPClient(api_key="test_key", max_api_calls=200)
+        client.RATE_LIMIT_DELAY = 0
+        eod_rows = [
+            {
+                "date": f"2026-05-{20 - i:02d}",
+                "open": 1.0,
+                "high": 2.0,
+                "low": 0.5,
+                "close": 1.5,
+                "volume": 100,
+            }
+            for i in range(5)
+        ]
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = eod_rows
+        resp.text = "ok"
+        client.session.get = MagicMock(return_value=resp)
+
+        result = client.get_historical_prices("AAPL", days=3)  # returns a LIST here
+        assert isinstance(result, list)
+        assert len(result) == 3
+        assert client.session.get.call_count == 1
+
+    def test_earnings_calendar_stable_first_v3_fallback(self):
+        """stable earnings-calendar 403 -> falls back to v3 earning_calendar."""
+        client = FMPClient(api_key="test_key", max_api_calls=200)
+        client.RATE_LIMIT_DELAY = 0
+        cal = [{"symbol": "AAPL", "date": "2026-05-20", "time": "amc"}]
+        stable_403 = MagicMock(status_code=403, text="Legacy Endpoint")
+        stable_403.json.return_value = None
+        v3_ok = MagicMock(status_code=200, text="ok")
+        v3_ok.json.return_value = cal
+        client.session.get = MagicMock(side_effect=[stable_403, v3_ok])
+
+        result = client.get_earnings_calendar("2026-05-18", "2026-05-20")
+        assert result == cal
+        assert client.session.get.call_count == 2
+
+    def test_company_profiles_stable_per_symbol_when_v3_batch_fails(self):
+        """v3 batch profile 403 -> stable per-symbol fallback, with v3 field aliases.
+
+        The stable /profile endpoint renames marketCap->mktCap and
+        exchange->exchangeShortName; normalize them so the market-cap and
+        US-exchange filters in analyze_earnings_trades keep working.
+        """
+        client = FMPClient(api_key="test_key", max_api_calls=200)
+        client.RATE_LIMIT_DELAY = 0
+
+        def fake_get(url, params=None, timeout=None):
+            if "/profile/" in url:  # v3 batch -> 403 (legacy, dead on starter tier)
+                r = MagicMock(status_code=403, text="Legacy Endpoint")
+                r.json.return_value = None
+                return r
+            sym = (params or {}).get("symbol")  # stable /profile?symbol=
+            r = MagicMock(status_code=200, text="ok")
+            r.json.return_value = [
+                {"symbol": sym, "marketCap": 1_000_000_000, "exchange": "NASDAQ"}
+            ]
+            return r
+
+        client.session.get = MagicMock(side_effect=fake_get)
+        profiles = client.get_company_profiles(["AAA", "BBB"])
+        assert set(profiles.keys()) == {"AAA", "BBB"}
+        assert profiles["AAA"]["mktCap"] == 1_000_000_000
+        assert profiles["AAA"]["exchangeShortName"] == "NASDAQ"
+
 
 # ===========================================================================
 # Gap Boundary Cases

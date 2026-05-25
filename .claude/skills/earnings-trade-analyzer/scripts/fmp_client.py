@@ -17,6 +17,7 @@ Features:
 import os
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -52,23 +53,59 @@ def _load_dotenv_from_ancestors(key: str) -> Optional[str]:
 # --- FMP endpoint fallback: stable (new users) -> v3 (legacy users) ---
 
 
+def _eod_hist_url(base, symbols_str, params):
+    """stable/historical-price-eod/full?symbol=^GSPC&from=YYYY-MM-DD&to=YYYY-MM-DD
+
+    Replaces the deprecated /historical-price-full. Translates legacy
+    'timeseries=N' (N trading days) into a from/to date range with a
+    1.5x calendar buffer so we cover N trading days even with weekends.
+    """
+    params["symbol"] = symbols_str
+    if "timeseries" in params:
+        days = int(params.pop("timeseries"))
+        calendar_span = int(days * 1.5) + 30
+        to_d = datetime.now(timezone.utc).date()
+        from_d = to_d - timedelta(days=calendar_span)
+        params["from"] = from_d.isoformat()
+        params["to"] = to_d.isoformat()
+    return base, params
+
+
 def _stable_hist_url(base, symbols_str, params):
-    """stable/historical-price-full?symbol=SPY&timeseries=90"""
+    """stable/historical-price-full?symbol=SPY&timeseries=90 (legacy)"""
     params["symbol"] = symbols_str
     return base, params
 
 
 def _v3_hist_url(base, symbols_str, params):
-    """api/v3/historical-price-full/SPY?timeseries=90"""
+    """api/v3/historical-price-full/SPY?timeseries=90 (legacy)"""
     return f"{base}/{symbols_str}", params
 
 
 _FMP_ENDPOINTS = {
     "historical": [
+        ("https://financialmodelingprep.com/stable/historical-price-eod/full", _eod_hist_url),
         ("https://financialmodelingprep.com/stable/historical-price-full", _stable_hist_url),
         ("https://financialmodelingprep.com/api/v3/historical-price-full", _v3_hist_url),
     ],
 }
+
+
+def _normalize_stable_profile(profile: dict) -> dict:
+    """Map stable /profile field names onto the v3 keys callers expect.
+
+    The stable profile endpoint renames several fields (marketCap vs v3's
+    mktCap, exchange vs exchangeShortName). Add the v3 aliases so the market-cap
+    and US-exchange filters — written against v3 — keep working regardless of
+    which tier served the profile.
+    """
+    if not isinstance(profile, dict):
+        return profile
+    if "mktCap" not in profile and "marketCap" in profile:
+        profile["mktCap"] = profile["marketCap"]
+    if "exchangeShortName" not in profile and "exchange" in profile:
+        profile["exchangeShortName"] = profile["exchange"]
+    return profile
 
 
 class ApiCallBudgetExceeded(Exception):
@@ -186,7 +223,17 @@ class FMPClient:
             # Shape validation: reject truthy-but-wrong-shape responses
             valid = True
             if endpoint_key == "historical":
-                if not isinstance(data, dict):
+                # New stable EOD endpoint returns a flat list of OHLCV records.
+                # Normalize into the v3-compatible {"symbol", "historical": [...]} shape.
+                if isinstance(data, list):
+                    if not data or not isinstance(data[0], dict) or "date" not in data[0]:
+                        valid = False
+                    else:
+                        max_records = params.get("timeseries")
+                        records = data[: int(max_records)] if max_records else data
+                        self._endpoint_failures[base_url] = 0
+                        return {"symbol": symbols_str, "historical": records}
+                elif not isinstance(data, dict):
                     valid = False
                 elif "historicalStockList" in data:
                     # stable batch format -> v3 single format (exact match only)
@@ -236,15 +283,30 @@ class FMPClient:
         if cache_key in self.cache:
             return self.cache[cache_key]
 
-        url = f"{self.BASE_URL}/earning_calendar"
         params = {"from": from_date, "to": to_date}
-        data = self._rate_limited_get(url, params)
+        # Stable first (post-Aug-2025 accounts), v3 fallback (legacy). The v3
+        # earning_calendar 403s on the starter tier, so without the stable
+        # endpoint the analyzer dies in Phase 1 before any historical fetch.
+        candidates = [
+            ("https://financialmodelingprep.com/stable/earnings-calendar", True),
+            (f"{self.BASE_URL}/earning_calendar", False),
+        ]
+        data = None
+        for url, quiet in candidates:
+            data = self._rate_limited_get(url, params, quiet=quiet)
+            if data:
+                break
         if data:
             self.cache[cache_key] = data
         return data
 
     def get_company_profiles(self, symbols: list[str]) -> dict[str, dict]:
-        """Fetch company profiles for multiple symbols in batches of 100.
+        """Fetch company profiles. v3 batch first (legacy, fast); stable per-symbol fallback.
+
+        On the starter tier the v3 /profile batch 403s, so we fall through to the
+        stable /profile?symbol= endpoint one symbol at a time, normalizing its
+        renamed fields (marketCap->mktCap, exchange->exchangeShortName) so the
+        cap/exchange filters keep working.
 
         Args:
             symbols: List of ticker symbols
@@ -253,9 +315,12 @@ class FMPClient:
             Dictionary mapping symbol to profile data.
         """
         profiles = {}
-        batch_size = 100
 
+        batch_size = 100
+        v3_batch_works = True
         for i in range(0, len(symbols), batch_size):
+            if not v3_batch_works:
+                break
             batch = symbols[i : i + batch_size]
             symbols_str = ",".join(batch)
 
@@ -267,12 +332,37 @@ class FMPClient:
                 continue
 
             url = f"{self.BASE_URL}/profile/{symbols_str}"
-            data = self._rate_limited_get(url)
+            data = self._rate_limited_get(url, quiet=True)
             if data:
                 self.cache[cache_key] = data
                 for profile in data:
                     if isinstance(profile, dict):
                         profiles[profile.get("symbol")] = profile
+            else:
+                v3_batch_works = False
+                break
+
+        if v3_batch_works and len(profiles) >= len(symbols) * 0.5:
+            return profiles
+
+        # Stable per-symbol fallback for post-Aug-2025 accounts.
+        stable_url = "https://financialmodelingprep.com/stable/profile"
+        for symbol in symbols:
+            if symbol in profiles:
+                continue
+            cache_key = f"profile_stable_{symbol}"
+            if cache_key in self.cache:
+                cached = self.cache[cache_key]
+                if cached:
+                    profiles[symbol] = cached
+                continue
+            data = self._rate_limited_get(stable_url, {"symbol": symbol}, quiet=True)
+            if data and isinstance(data, list) and data:
+                prof = _normalize_stable_profile(data[0])
+                self.cache[cache_key] = prof
+                profiles[symbol] = prof
+            else:
+                self.cache[cache_key] = None
 
         return profiles
 
