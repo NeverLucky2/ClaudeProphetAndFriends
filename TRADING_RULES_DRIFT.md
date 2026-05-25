@@ -179,18 +179,18 @@ The −10% hard stop is set on the `place_managed_position` call itself; the age
 
 ## Risk Management — Portfolio Level
 
-**Rule:** Maximum 4 open Drift positions simultaneously
-- 4% per position × 4 positions = 16% max deployed in PEAD sleeve
+**Rule:** Maximum 3 open Drift positions simultaneously
+- 4% per position × 3 positions = 12% max deployed in PEAD sleeve
 
 **Rule:** Maximum 4% of portfolio per single Drift position (hard cap, regardless of computed size)
 
-**Rule:** Maximum 16% of portfolio deployed in Drift positions at any time
+**Rule:** Maximum 12% of portfolio deployed in Drift positions at any time
 
 **Daily Circuit Breaker:** If Drift-segment P&L ≤ −3% intraday, halt new entries for the rest of the session. Existing positions continue to be managed by the broker-side bracket (target/stop) and the agent's day-60 / MA50-break exit checks.
 
 To check this on each heartbeat, call `get_segment_pnl()`. The response field `unrealized_pnl_percent` is the metric to compare against the −3.0 threshold.
 
-**Cross-strategy coordination — operator note:** Drift's 16% cap is set assuming the other strategies stay within their own lanes (Prophet, Harvest 12%, Spark 30%, Turtle 18%, Coil 25%). Drift does not coordinate capital with other agents at runtime; it stays within its 16% lane and assumes the other strategies do the same.
+**Cross-strategy coordination — operator note:** Drift's 12% cap is its lane in the reconciled 100% capital model (2026-05-25): V2 (34%), COIL (18%), TREND (14%), DRIFT (12%), PENNY (12%), HARVEST (10%). Drift does not coordinate capital with other agents at runtime; it stays within its 12% lane and assumes the other strategies do the same.
 
 ---
 
@@ -238,7 +238,7 @@ Run this sequence each scheduled heartbeat, in order:
 2. Check the activity log. If today's date already has a completed Drift run, log "duplicate heartbeat" and exit.
 3. Read Drift-tagged positions from the Beat Context block.
 4. Read `get_segment_pnl()`. If `unrealized_pnl_percent` ≤ −3.0, trip the Drift-segment circuit breaker: log CIRCUIT_BREAKER and skip Step 3 (entries).
-5. Read `deployed_percent`. If ≥ 16.0, skip Step 3 (entries).
+5. Read `deployed_percent`. If ≥ 12.0, skip Step 3 (entries).
 6. Read econ blackout flag. If `is_blackout=true` or `error`, skip Step 3 (entries) but still run Step 2 (exits).
 
 ### Step 2: Exit checks (for each open Drift position)
@@ -257,8 +257,8 @@ The target (+20%) and hard stop (−10%) are broker-managed by the bracket attac
 
 Skip this step entirely if:
 - The Drift-segment circuit breaker tripped in Step 1
-- `drift_open_position_count` ≥ 4
-- `drift_deployed_pct` ≥ 16.0
+- `drift_open_position_count` ≥ 3
+- `drift_deployed_pct` ≥ 12.0
 - Econ blackout active
 - Regime gate `block_new_entries=true`
 
@@ -268,8 +268,8 @@ Otherwise:
 2. Apply the stage-bias re-sort: BREAKOUT candidates first, then SIGNAL_READY, then by composite score descending.
 3. For each candidate at the top of the sorted list:
    - Skip if Drift already holds this ticker (one position per ticker per quarter)
-   - Skip if total open Drift positions would exceed 4 after this entry
-   - Skip if total Drift deployed % would exceed 16% after this entry
+   - Skip if total open Drift positions would exceed 3 after this entry
+   - Skip if total Drift deployed % would exceed 12% after this entry
 4. Compute position size per Position Sizing (apply regime-gate multiplier, then 4% hard cap).
 5. Place the entry via `place_managed_position`:
    ```
@@ -284,7 +284,7 @@ Otherwise:
    ```
 6. On fill: log entry with `entry_reason: "pead_continuation"`, including `earnings_date`, `earnings_timing`, `composite_score`, `grade`, `pead.stage`, `gap.gap_pct`, and the computed `position_dollars`.
 
-Stop after the first 4 entries — even if more candidates qualify, the position cap binds.
+Stop after the first 3 entries — even if more candidates qualify, the position cap binds.
 
 ### Step 4: Heartbeat summary
 
@@ -306,8 +306,8 @@ Before every Drift entry:
 - [ ] `composite.grade` ∈ {"A", "B"}?
 - [ ] `pead.stage` ∈ {"SIGNAL_READY", "BREAKOUT"}?
 - [ ] No existing Drift position for this ticker this quarter?
-- [ ] Total open Drift positions < 4?
-- [ ] Total Drift-deployed capital < 16%?
+- [ ] Total open Drift positions < 3?
+- [ ] Total Drift-deployed capital < 12%?
 - [ ] Daily circuit breaker not triggered?
 - [ ] Regime gate not blocking new entries?
 - [ ] Heartbeat is within the 16:55–17:15 ET window?

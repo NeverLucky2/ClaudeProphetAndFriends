@@ -252,11 +252,11 @@ Do NOT enter a position if `get_penny_candidates` returns no results.
 
 **Rule:** Maximum 8% of portfolio in any single penny position, regardless of score.
 **Rule:** Maximum 10 open penny positions simultaneously.
-**Rule:** Maximum 30% of portfolio deployed in penny positions at any time (segment cap).
+**Rule:** Maximum 12% of portfolio deployed in penny positions at any time (segment cap).
 
-**Note on segment cap:** This is Spark's lane in the multi-agent capital model. The other lanes are V2 (40%), HARVEST (12%), and TREND (18%) — total ≤ 100%. The cap was reduced from 60% to 30% as part of the multi-strategy capital allocation; in the prior single-aggressive-strategy regime, 60% made sense, but in a shared account with V2 as the primary, 30% is the appropriate share.
+**Note on segment cap:** This is Spark's lane in the reconciled multi-agent capital model (2026-05-25). The six lanes are Prophet/V2 (34%), Coil (18%), Turtle/TREND (14%), Drift (12%), Spark/PENNY (12%), and Harvest (10%) — total = 100%. The lanes are maximum shares, not simultaneous mandates; the whole-account deploy cap (`MAX_DEPLOYED_PCT`) is the real simultaneous governor. Spark was trimmed from 30% (its prior largest-but-one lane) to 12% because penny momentum is the weakest-edge sleeve in the fleet — the trim is the main source of the prior 141% overcommit being reconciled to 100%. This cap is code-enforced via `PENNY_MAX_CAPITAL_PCT` in `.env`.
 
-**Note on which cap binds first:** With the 30% segment cap, the position count cap (10) is no longer the binding constraint in normal operation. At the 8% hard per-position cap, a maximum of ~3-4 high-conviction positions fit; at the 2-3% midcap-conviction tier, ~10 positions fit but the segment cap binds at 10 × 3% = 30%. In practice, the segment cap will be the first binding constraint when Spark is finding signals.
+**Note on which cap binds first:** With the 12% segment cap, the position count cap (10) is far from binding. At the 8% hard per-position cap, ~1 high-conviction position plus a small one fits; at the 2-3% midcap-conviction tier, ~4-5 positions fit before the 12% segment cap binds. In practice, the 12% segment cap is the first binding constraint whenever Spark is finding more than a single high-conviction signal.
 
 ---
 

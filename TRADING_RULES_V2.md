@@ -52,11 +52,11 @@ policy still applies on tool error).
 - Prevents: Over-diversification (diworsification)
 - Focus: Quality over quantity
 
-**Rule:** Maximum 40% of portfolio deployed in V2 positions at any time (segment cap)
-- Calculate: sum of `position_value` across all V2 positions / `portfolio_value` ≤ 0.40
-- This is the V2 strategy's lane in the multi-agent capital model. The other lanes are HARVEST (12%), PENNY (20% (default; env-tunable via `PENNY_MAX_CAPITAL_PCT`)), and TREND (18%) — total ≤ 100%
-- Reconciles with the existing "50-70% cash" rule under Portfolio Construction: at the 40% cap, V2 alone leaves 60% available; the other agents draw from that 60% within their own caps
-- If a candidate trade would push V2 deployed above 40%, skip the entry (or close an existing V2 position first to make room)
+**Rule:** Maximum 34% of portfolio deployed in V2 positions at any time (segment cap)
+- Calculate: sum of `position_value` across all V2 positions / `portfolio_value` ≤ 0.34
+- This is the V2 strategy's lane in the reconciled multi-agent capital model (2026-05-25). The six lanes are V2 (34%), COIL (18%), TREND (14%), DRIFT (12%), PENNY (12%), and HARVEST (10%) — total = 100%. V2 is the largest single lane by design — the operator's deliberate high-conviction allocation for the paper-trading phase.
+- The lanes are maximum shares, not simultaneous mandates; the whole-account deploy ceiling (`MAX_DEPLOYED_PCT`) is the real simultaneous governor and always leaves a cash buffer.
+- If a candidate trade would push V2 deployed above 34%, skip the entry (or close an existing V2 position first to make room)
 - This cap applies regardless of conviction; high-conviction setups do not override it
 
 > **Code-enforced (not advisory) as of 2026-05-21:** per-position size (12%) and
@@ -425,10 +425,9 @@ Flag-gated rollout: enforcement defaults off (`ENABLE_REGIME_GATE=false`). While
 
 ## Portfolio Construction
 
-**Rule:** Maintain 50-70% cash at all times
-- Rationale: Dry powder for opportunities
-- Prevents: Being fully invested at market tops
-- Allows: Deploying capital when great setups appear
+**Rule:** Stay within the 34% V2 segment lane; whole-account cash is governed centrally
+- The legacy "maintain 50-70% cash" rule was single-agent language and is retired (2026-05-25). In the multi-agent model, cash is a shared-account concern governed by `MAX_DEPLOYED_PCT`, not a per-agent target.
+- V2's own discipline is the 34% segment lane (see Position Sizing) plus the per-position 12% cap. Do not attempt to manage whole-account cash from inside V2 — deploy up to the lane when setups warrant.
 
 **Rule:** Diversify across time frames
 - Core swings: 50-120 DTE positions (60-70% of deployed capital)

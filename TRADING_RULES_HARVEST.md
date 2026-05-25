@@ -58,7 +58,7 @@ Run this sequence every heartbeat, in order:
 Call `get_harvest_state`. If any of the following are true, skip Steps 2–3 entirely:
 - `circuit_breaker_active` is true
 - `open_condors` >= 5
-- `deployed_buying_power_pct` >= 12.0
+- `deployed_buying_power_pct` >= 10.0
 
 Call `get_harvest_fomc`. If `is_blackout` is true, skip Steps 2–3 entirely.
 
@@ -94,7 +94,7 @@ If none of the above conditions fire, log the condor status and take no action.
 Skip this underlying if:
 - `get_harvest_state` shows an open condor for this underlying
 - `get_harvest_state` shows `open_condors` >= 5
-- `get_harvest_state` shows `deployed_buying_power_pct` >= 12.0
+- `get_harvest_state` shows `deployed_buying_power_pct` >= 10.0
 
 Call `get_harvest_ivr` for this underlying.
 - If `ivr` < 30 → skip, log "IVR {value} below 30 for {underlying}"
@@ -138,9 +138,14 @@ Call `get_account` to get current portfolio_value.
 Contracts = floor(portfolio_value × 0.015 / (wing_width × 100)).
 If contracts = 0 → skip, log "portfolio too small for {underlying}".
 
-Verify: adding this position keeps total deployed ≤ 12.0%.
+Verify: adding this position keeps total deployed ≤ 10.0%.
   new_bp_pct = (wing_width × contracts × 100) / portfolio_value × 100
-  if (deployed_buying_power_pct + new_bp_pct) > 12.0 → skip.
+  if (deployed_buying_power_pct + new_bp_pct) > 10.0 → skip.
+
+> **Capital lane (reconciled 2026-05-25):** Harvest's 10% buying-power cap is its
+> lane in the 100% capital model — V2 (34%), COIL (18%), TREND (14%), DRIFT (12%),
+> PENNY (12%), HARVEST (10%). Defined-risk condors use little capital, so 10% is
+> ample for the 5-underlying book.
 
 Call `open_iron_condor` with the full condor specification.
 
@@ -165,7 +170,7 @@ Before opening any new condor, call `get_regime_gate_status`. Harvest consumes *
 
 - If `block_new_entries=true` (tier=RED, score < 20): do not open new condors this beat. Open condors continue to be managed by the existing exit rules (50% profit target, 21 DTE rolldown, 200% loss stop).
 - If `tier=UNKNOWN` or the response contains `error`: treat as block-equivalent (fail closed). Condor entries during a missing-regime window are exactly the asymmetric exposure the operator wrote rules to avoid.
-- All other tiers (GREEN / NORMAL / DEFENSIVE): no effect on condor entry sizing. Continue applying the existing IVR ≥ 30, IV > RV, and 12% BP-cap rules.
+- All other tiers (GREEN / NORMAL / DEFENSIVE): no effect on condor entry sizing. Continue applying the existing IVR ≥ 30, IV > RV, and 10% BP-cap rules.
 
 Flag-gated rollout: `ENABLE_REGIME_GATE=false` by default; while off, the status payload reports the underlying tier for observation but always returns `block_new_entries=false`.
 

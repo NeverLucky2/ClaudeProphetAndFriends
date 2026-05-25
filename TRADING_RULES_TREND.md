@@ -254,7 +254,7 @@ For every entry:
 
 **Rule:** Maximum 4% of portfolio per single trend position (hard cap, regardless of computed size)
 
-**Rule:** Maximum 18% of portfolio deployed in trend positions at any time
+**Rule:** Maximum 14% of portfolio deployed in trend positions at any time
 - Position notional × count cannot exceed this. If a new entry would breach, skip and log
 
 **Rule:** Maximum 0.5% portfolio risk per position at entry (sized by stop distance)
@@ -268,7 +268,7 @@ To check this on each heartbeat, call `get_segment_pnl()` (no args needed — st
 
 **v1 limitation acknowledged in rules:** `get_segment_pnl` currently returns unrealized P&L only (intraday realized closes not yet included). For Turtle this is acceptable because the strategy rarely closes and re-opens within a single session — the trailing stop fires once per day, and realized residue is small relative to the unrealized exposure being measured.
 
-**Cross-strategy coordination — operator note:** Turtle's 18% cap is set assuming explicit segment caps exist for V2, HARVEST (12%), and PENNY summing to ≤ 100%. As of this rules version, V2 has no stated segment cap. This is a portfolio-level structural gap that lives outside Turtle's scope. Turtle does not coordinate capital with other agents at runtime; it stays within its 18% lane and assumes the other strategies do the same. Closing the gap requires adding segment caps to the other rule files or implementing harness-level capital arbitration.
+**Cross-strategy coordination — operator note:** Turtle's 14% cap is its lane in the reconciled 100% capital model (2026-05-25): V2 (34%), COIL (18%), TREND (14%), DRIFT (12%), PENNY (12%), HARVEST (10%) = 100%. This closes the prior structural gap where the lanes summed to 141% and V2 had no stated cap. Turtle does not coordinate capital with other agents at runtime; it stays within its 14% lane and assumes the other strategies do the same.
 
 ---
 
@@ -336,7 +336,7 @@ Run this sequence each scheduled heartbeat, in order:
 3. Call `get_positions`. Reconcile against the ledger. On mismatch, halt and log
 4. Call `get_account`. If trend-segment circuit breaker is tripped and a new session has begun, reset it. If still tripped, skip Steps 2–3
 5. Call `get_segment_pnl()`. If `unrealized_pnl_percent` ≤ −2.0, trip the trend-segment circuit breaker for the rest of the session: log a CIRCUIT_BREAKER decision and skip Step 3 (entries). Step 2 (exits) still runs so existing positions are managed
-6. From the same `get_segment_pnl` response, read `deployed_percent`. If `deployed_percent` ≥ 18.0, skip Step 3 (entries). Cross-check against the ledger; on disagreement >5%, halt and log "deployed_pct reconciliation failed"
+6. From the same `get_segment_pnl` response, read `deployed_percent`. If `deployed_percent` ≥ 14.0, skip Step 3 (entries). Cross-check against the ledger; on disagreement >5%, halt and log "deployed_pct reconciliation failed"
 
 ### Step 2: Exit checks (for each open ledger position)
 
@@ -361,7 +361,7 @@ For each ticker in [TLT, GLD, USO, DBC, UUP, EEM]:
 Skip this ticker if:
 - The ledger already contains an open position for this ticker
 - `trend_open_position_count` ≥ 5
-- `trend_deployed_pct` ≥ 18.0
+- `trend_deployed_pct` ≥ 14.0
 - Adding 0.5% risk would push aggregate risk above 2.5%
 
 Otherwise:
@@ -424,7 +424,7 @@ Before every trend entry:
 - [ ] If Cold Start mode active: `(donchian_100_high − last_close) ≤ atr_20`?
 - [ ] No existing ledger entry for this ticker?
 - [ ] Total open trend positions < 5?
-- [ ] Total trend-deployed capital < 18%?
+- [ ] Total trend-deployed capital < 14%?
 - [ ] Aggregate trend risk + new position risk ≤ 2.5%?
 - [ ] Daily circuit breaker not triggered?
 - [ ] Heartbeat is within scheduled window?
