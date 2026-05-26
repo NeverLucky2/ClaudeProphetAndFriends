@@ -30,6 +30,7 @@ import {
   parseBriefStaleness,
 } from './agent/daily-brief-freshness.js';
 import { computeOrderValue } from './mcp-order-value.js';
+import { formatTradingBotError } from './mcp-trading-bot-error.js';
 
 // Configuration
 const TRADING_BOT_URL = process.env.TRADING_BOT_URL || 'http://localhost:4534';
@@ -229,7 +230,9 @@ async function callTradingBot(endpoint, method = 'GET', data = null) {
     const response = await axios(config);
     return response.data;
   } catch (error) {
-    throw new Error(`Trading bot error: ${error.message}`);
+    // Preserve the bot's response body (the {error, details} a guard rejection
+    // or placement failure carries) — not just the bare HTTP status.
+    throw new Error(formatTradingBotError(error));
   }
 }
 

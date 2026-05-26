@@ -422,6 +422,13 @@ async function trendPreflight(runtime, agentConfig) {
   return { skip: false, reason: 'in window, entry signal available' };
 }
 
+// Minimum days of stored ATM-IV history before IVR is meaningful. Below this,
+// calcIVR floors at 0 for every underlying (the trailing-52-week range spans
+// too few days), so no condor can clear the IVR ≥ 30 entry gate and the LLM
+// beat is a guaranteed no-op. Matches the days_of_history < 20 low-confidence
+// convention used by Prophet's IV-rank gate (TRADING_RULES_V2.md).
+const MIN_IV_HISTORY_DAYS = 20;
+
 // Harvest predicate. Skips the LLM beat when:
 //   (a) open condors > 0 → false (exit checks must run)  [does NOT skip]
 //   (b) no open condors AND FOMC blackout → skip
@@ -536,6 +543,20 @@ async function harvestPreflight(runtime, agentConfig) {
   // Soft-fail on endpoint error: missing IV data should not block beats.
   try {
     const ivResp = await goAxios.get('/api/v1/iv/SPY');
+    // Insufficient IV history → IVR is floored at 0 across the universe, so no
+    // condor can clear IVR ≥ 30. Checked before the IV-RV gate because it is the
+    // more fundamental blocker. SPY's count is a safe proxy here: this gate is
+    // only active during the first ~20 trading days of collection, when all
+    // underlyings climb in lockstep from a shared start (see the design doc's
+    // correct-by-construction argument). Malformed/missing field → NaN → fail
+    // open (run the LLM).
+    const daysHist = Number(ivResp.data?.days_of_history);
+    if (Number.isFinite(daysHist) && daysHist < MIN_IV_HISTORY_DAYS) {
+      return {
+        skip: true,
+        reason: `insufficient IV history (SPY ${daysHist}d < ${MIN_IV_HISTORY_DAYS}) — IVR floored at 0, no condor entries possible`,
+      };
+    }
     const rv = Number(ivResp.data?.realized_vol_20d);
     const spread = Number(ivResp.data?.iv_minus_rv);
     if (rv > 0 && Number.isFinite(spread) && spread <= 0) {
