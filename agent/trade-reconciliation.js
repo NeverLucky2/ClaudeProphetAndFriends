@@ -5,6 +5,8 @@
 // orders are counted as `unresolved` and never flagged, so an in-flight order
 // can never produce a confident-but-wrong banner.
 
+import path from 'node:path';
+import nodeFs from 'node:fs/promises';
 import { _etDate } from './trades-store.js';
 
 // classifyBrokerStatus buckets a broker order status into 'took' | 'reject' |
@@ -126,4 +128,75 @@ export function assessCoverage(rawOrders, dayStartIso, limit = 500) {
     if (Number.isFinite(ms) && ms < oldestMs) oldestMs = ms;
   }
   return { covered: oldestMs <= dayStartMs };
+}
+
+// Stated on every report and the banner so a clean result is not misread as
+// "my positions match the broker." v1 checks opens, not closes/positions.
+export const SCOPE_NOTE = 'Covers order placements (opens/adds). Does NOT verify closes/exits or live position state — a logged-success close that did not execute will not be caught here.';
+
+function mismatchCountOf(counts) {
+  return (counts?.phantomSuccess || 0) + (counts?.falseFailure || 0) + (counts?.statusDivergence || 0);
+}
+
+function reportDir(projectRoot, sandboxId) {
+  return path.join(projectRoot, 'data', 'reconciliation', sandboxId);
+}
+
+// writeReconciliationReport writes <sandboxId>/<date>.json (machine) and .md
+// (human). fs is injected for tests; defaults to node:fs/promises.
+export async function writeReconciliationReport(projectRoot, report, { fs = nodeFs } = {}) {
+  const dir = reportDir(projectRoot, report.sandboxId);
+  await fs.mkdir(dir, { recursive: true });
+  const mismatchCount = mismatchCountOf(report.counts);
+  const json = { ...report, mismatchCount, scope: SCOPE_NOTE, generatedAt: report.generatedAt || new Date().toISOString() };
+  await fs.writeFile(path.join(dir, `${report.date}.json`), JSON.stringify(json, null, 2), 'utf-8');
+  await fs.writeFile(path.join(dir, `${report.date}.md`), renderReportMarkdown(json), 'utf-8');
+  return json;
+}
+
+function renderReportMarkdown(r) {
+  const lines = [
+    `# Reconciliation — ${r.agentName || r.sandboxId} — ${r.date}`,
+    '',
+    `Strategy: \`${r.strategy}\` · Mismatches: **${r.mismatchCount}** · Unresolved: ${r.counts.unresolved} · Matched: ${r.counts.matched}`,
+    '',
+    `> ${SCOPE_NOTE}`,
+    '',
+  ];
+  if (r.mismatches.length === 0) {
+    lines.push('No mismatches.');
+  } else {
+    for (const m of r.mismatches) {
+      lines.push(`- **${m.class}** ${m.symbol} ${m.side} — ${m.note}`);
+    }
+  }
+  return lines.join('\n') + '\n';
+}
+
+// readReconciliationSummary reads one sandbox's report (sandboxId given) or
+// aggregates across all sandbox dirs for the date. Missing/unparseable reports
+// contribute nothing (silent-when-clean). Returns { date, mismatchCount, items }.
+export async function readReconciliationSummary(projectRoot, { date, sandboxId } = {}, { fs = nodeFs } = {}) {
+  const root = path.join(projectRoot, 'data', 'reconciliation');
+  let sandboxIds;
+  if (sandboxId) {
+    sandboxIds = [sandboxId];
+  } else {
+    try { sandboxIds = await fs.readdir(root); }
+    catch { return { date, mismatchCount: 0, items: [] }; }
+  }
+  let mismatchCount = 0;
+  const items = [];
+  for (const sid of sandboxIds) {
+    let raw;
+    try { raw = await fs.readFile(path.join(root, sid, `${date}.json`), 'utf-8'); }
+    catch { continue; }
+    let r;
+    try { r = JSON.parse(raw); } catch { continue; }
+    mismatchCount += r.mismatchCount || 0;
+    for (const m of (r.mismatches || [])) {
+      items.push({ sandboxId: sid, agentName: r.agentName, ...m });
+    }
+  }
+  return { date, mismatchCount, items };
 }

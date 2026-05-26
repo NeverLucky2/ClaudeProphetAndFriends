@@ -87,3 +87,60 @@ test('assessCoverage: below limit is covered; at limit with oldest after day-sta
   const fullEarly = Array.from({ length: 500 }, (_, i) => ({ submittedAt: i === 0 ? '2026-05-26T03:00:00Z' : '2026-05-26T18:00:00Z' }));
   assert.equal(assessCoverage(fullEarly, dayStart, 500).covered, true);
 });
+
+import { writeReconciliationReport, readReconciliationSummary, SCOPE_NOTE } from './trade-reconciliation.js';
+
+// Minimal in-memory fs covering only the methods used.
+function fakeFs() {
+  const files = new Map();
+  return {
+    files,
+    async mkdir() {},
+    async writeFile(p, data) { files.set(p.replace(/\\/g, '/'), data); },
+    async readFile(p) {
+      const k = p.replace(/\\/g, '/');
+      if (!files.has(k)) { const e = new Error('ENOENT'); e.code = 'ENOENT'; throw e; }
+      return files.get(k);
+    },
+    async readdir(p) {
+      const base = p.replace(/\\/g, '/').replace(/\/$/, '') + '/';
+      const names = new Set();
+      for (const k of files.keys()) if (k.startsWith(base)) names.add(k.slice(base.length).split('/')[0]);
+      if (names.size === 0) { const e = new Error('ENOENT'); e.code = 'ENOENT'; throw e; }
+      return [...names];
+    },
+  };
+}
+
+test('writeReconciliationReport: writes JSON (with mismatchCount + scope) and a scoped .md', async () => {
+  const fs = fakeFs();
+  const report = { date: '2026-05-26', sandboxId: 'sbx_x', agentName: 'Prophet', strategy: 'v2',
+    mismatches: [{ class: 'phantom_success', symbol: 'AMD', side: 'buy', loggedTrades: [{}], brokerOrders: [], note: 'n' }],
+    counts: { phantomSuccess: 1, falseFailure: 0, statusDivergence: 0, unresolved: 0, matched: 0, total: 1 } };
+  await writeReconciliationReport('/root', report, { fs });
+  const json = JSON.parse(fs.files.get('/root/data/reconciliation/sbx_x/2026-05-26.json'));
+  assert.equal(json.mismatchCount, 1);
+  assert.equal(json.scope, SCOPE_NOTE);
+  const md = fs.files.get('/root/data/reconciliation/sbx_x/2026-05-26.md');
+  assert.match(md, /Covers order placements/);
+});
+
+test('readReconciliationSummary: aggregates across sandbox dirs for the date', async () => {
+  const fs = fakeFs();
+  const mk = (sid, count) => ({ date: '2026-05-26', sandboxId: sid, agentName: sid, strategy: 'v2',
+    mismatches: count ? [{ class: 'phantom_success', symbol: 'AMD', side: 'buy', loggedTrades: [{}], brokerOrders: [], note: 'n' }] : [],
+    counts: { phantomSuccess: count, falseFailure: 0, statusDivergence: 0, unresolved: 0, matched: 0, total: count } });
+  await writeReconciliationReport('/root', mk('sbx_a', 1), { fs });
+  await writeReconciliationReport('/root', mk('sbx_b', 0), { fs });
+  const summary = await readReconciliationSummary('/root', { date: '2026-05-26' }, { fs });
+  assert.equal(summary.mismatchCount, 1);
+  assert.equal(summary.items.length, 1);
+  assert.equal(summary.items[0].sandboxId, 'sbx_a');
+});
+
+test('readReconciliationSummary: no reports → zero, no throw', async () => {
+  const fs = fakeFs();
+  const summary = await readReconciliationSummary('/root', { date: '2026-05-26' }, { fs });
+  assert.equal(summary.mismatchCount, 0);
+  assert.deepEqual(summary.items, []);
+});
