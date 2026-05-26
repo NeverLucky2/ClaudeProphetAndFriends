@@ -173,6 +173,41 @@ function renderReportMarkdown(r) {
   return lines.join('\n') + '\n';
 }
 
+// runReconciliationForSandbox fetches the day's broker orders, applies the
+// coverage guard, filters to this sandbox's strategy + ET day, reads the day's
+// logged order-placements, reconciles, and writes a report. Soft-fail: returns
+// null (no report) on fetch error or incomplete coverage, so the banner stays
+// silent rather than wrong. All side-effecting deps are injected for testing.
+export async function runReconciliationForSandbox({
+  goAxios, sandboxId, strategy, agentName, isoDate, dayStartIso,
+  projectRoot, readTradesFn, fsImpl = nodeFs, limit = 500,
+}) {
+  let raw;
+  try {
+    const resp = await goAxios.get('/api/v1/orders?status=all', { timeout: 5000 });
+    raw = Array.isArray(resp?.data) ? resp.data : [];
+  } catch {
+    return null; // bot unreachable — soft-fail to silent
+  }
+  const norm = raw.map(normalizeBrokerOrder);
+  if (!assessCoverage(norm, dayStartIso, limit).covered) return null;
+
+  const dayOrders = norm.filter((o) => o.strategy === strategy && o.submittedAt && etDayOf(o.submittedAt) === isoDate);
+
+  let logged = [];
+  try {
+    const { trades } = await readTradesFn(projectRoot, { from: isoDate, to: isoDate, sandboxId });
+    logged = (trades || []).filter(isReconcilableTrade);
+  } catch {
+    return null;
+  }
+
+  const result = reconcileTrades(logged, dayOrders);
+  const report = { date: isoDate, sandboxId, agentName, strategy, generatedAt: new Date().toISOString(), ...result };
+  await writeReconciliationReport(projectRoot, report, { fs: fsImpl });
+  return report;
+}
+
 // readReconciliationSummary reads one sandbox's report (sandboxId given) or
 // aggregates across all sandbox dirs for the date. Missing/unparseable reports
 // contribute nothing (silent-when-clean). Returns { date, mismatchCount, items }.

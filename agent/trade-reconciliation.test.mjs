@@ -144,3 +144,53 @@ test('readReconciliationSummary: no reports → zero, no throw', async () => {
   assert.equal(summary.mismatchCount, 0);
   assert.deepEqual(summary.items, []);
 });
+
+import { runReconciliationForSandbox } from './trade-reconciliation.js';
+
+const dayStart = '2026-05-26T04:00:00.000Z';
+function deps(overrides = {}) {
+  const fs = fakeFs();
+  return {
+    fs,
+    args: {
+      goAxios: { get: async () => ({ data: [{ ID: 'o1', Symbol: 'AMD', Side: 'buy', Status: 'filled', FilledQty: 2, SubmittedAt: '2026-05-26T13:33:02Z', Strategy: 'v2' }] }) },
+      sandboxId: 'sbx_x', strategy: 'v2', agentName: 'Prophet',
+      isoDate: '2026-05-26', dayStartIso: dayStart, projectRoot: '/root',
+      readTradesFn: async () => ({ trades: [{ type: 'order', tool: 'place_options_order', symbol: 'AMD', side: 'buy', status: 'failed', timestamp: '2026-05-26T13:33:00Z' }] }),
+      fsImpl: fs, limit: 500,
+      ...overrides,
+    },
+  };
+}
+
+test('runner: writes a report flagging the false failure', async () => {
+  const { fs, args } = deps();
+  const report = await runReconciliationForSandbox(args);
+  assert.equal(report.counts.falseFailure, 1);
+  assert.ok(fs.files.get('/root/data/reconciliation/sbx_x/2026-05-26.json'));
+});
+
+test('runner: only reconciles broker orders matching the strategy tag and ET day', async () => {
+  const { args } = deps({
+    goAxios: { get: async () => ({ data: [
+      { ID: 'o1', Symbol: 'AMD', Side: 'buy', Status: 'filled', FilledQty: 2, SubmittedAt: '2026-05-26T13:33:02Z', Strategy: 'penny' },
+      { ID: 'o2', Symbol: 'AMD', Side: 'buy', Status: 'filled', FilledQty: 2, SubmittedAt: '2026-05-20T13:33:02Z', Strategy: 'v2' },
+    ] }) },
+    readTradesFn: async () => ({ trades: [{ type: 'order', tool: 'place_options_order', symbol: 'AMD', side: 'buy', status: 'success', timestamp: '2026-05-26T13:33:00Z' }] }),
+  });
+  const report = await runReconciliationForSandbox(args);
+  assert.equal(report.counts.phantomSuccess, 1);
+});
+
+test('runner: incomplete coverage → no report written, returns null', async () => {
+  const big = Array.from({ length: 500 }, () => ({ ID: 'x', Symbol: 'AMD', Side: 'buy', Status: 'filled', FilledQty: 2, SubmittedAt: '2026-05-26T18:00:00Z', Strategy: 'v2' }));
+  const { fs, args } = deps({ goAxios: { get: async () => ({ data: big }) } });
+  const report = await runReconciliationForSandbox(args);
+  assert.equal(report, null);
+  assert.equal(fs.files.size, 0);
+});
+
+test('runner: goAxios error → null, no throw', async () => {
+  const { args } = deps({ goAxios: { get: async () => { throw new Error('bot down'); } } });
+  assert.equal(await runReconciliationForSandbox(args), null);
+});
