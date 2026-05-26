@@ -5,6 +5,8 @@
 // orders are counted as `unresolved` and never flagged, so an in-flight order
 // can never produce a confident-but-wrong banner.
 
+import { _etDate } from './trades-store.js';
+
 // classifyBrokerStatus buckets a broker order status into 'took' | 'reject' |
 // 'unresolved'. done_for_day counts as took only if something filled.
 export function classifyBrokerStatus(status, filledQty = 0) {
@@ -78,4 +80,50 @@ export function reconcileTrades(loggedTrades, brokerOrders) {
   const flagged = mismatches.reduce((a, m) => a + m.loggedTrades.length, 0);
   counts.matched = Math.max(0, logged.length - flagged);
   return { mismatches, counts };
+}
+
+// etDayOf returns the America/New_York calendar day (YYYY-MM-DD) for an ISO
+// instant, reusing the exact conversion the trade log is bucketed with. Never a
+// UTC slice — after-hours orders (up to 20:00 ET) are the next UTC calendar day.
+export function etDayOf(iso) {
+  return _etDate(new Date(iso));
+}
+
+// isReconcilableTrade keeps only order placements that carry a real symbol. v1
+// excludes close-type rows (they store a position_id in `symbol`, not a tradable
+// symbol) and the '??' placeholder the harness writes when it can't resolve one.
+export function isReconcilableTrade(trade) {
+  if (!trade || trade.type === 'close') return false;
+  const sym = trade.symbol;
+  return typeof sym === 'string' && sym.length > 0 && sym !== '??';
+}
+
+// normalizeBrokerOrder maps the Go interfaces.Order JSON (PascalCase, no json
+// tags) to the lower-camel shape the matcher expects. Lowercase fallbacks guard
+// against future json-tag changes.
+export function normalizeBrokerOrder(o) {
+  return {
+    id: o.ID ?? o.id ?? '',
+    symbol: o.Symbol ?? o.symbol ?? '',
+    side: o.Side ?? o.side ?? '',
+    status: o.Status ?? o.status ?? '',
+    filledQty: o.FilledQty ?? o.filledQty ?? 0,
+    submittedAt: o.SubmittedAt ?? o.submittedAt ?? null,
+    strategy: o.Strategy ?? o.strategy ?? '',
+  };
+}
+
+// assessCoverage detects a truncated fetch: if the returned list hit the server
+// limit AND its oldest order was submitted after the ET-day start, the window
+// did not reach back far enough to cover the whole day. Returns { covered }.
+export function assessCoverage(rawOrders, dayStartIso, limit = 500) {
+  const list = Array.isArray(rawOrders) ? rawOrders : [];
+  if (list.length < limit) return { covered: true };
+  const dayStartMs = new Date(dayStartIso).getTime();
+  let oldestMs = Infinity;
+  for (const o of list) {
+    const ms = new Date(o.submittedAt ?? o.SubmittedAt ?? 0).getTime();
+    if (Number.isFinite(ms) && ms < oldestMs) oldestMs = ms;
+  }
+  return { covered: oldestMs <= dayStartMs };
 }

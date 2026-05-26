@@ -57,3 +57,33 @@ test('empty inputs: no throw, zero counts', () => {
   assert.equal(r.mismatches.length, 0);
   assert.equal(r.counts.total, 0);
 });
+
+import { etDayOf, isReconcilableTrade, normalizeBrokerOrder, assessCoverage } from './trade-reconciliation.js';
+
+test('etDayOf: a 20:00 ET order (next UTC day) maps to the correct ET day', () => {
+  // 2026-05-26T20:00 ET (EDT, UTC-4) === 2026-05-27T00:00:00Z. A naive UTC slice
+  // would say 2026-05-27; ET conversion must say 2026-05-26.
+  assert.equal(etDayOf('2026-05-27T00:00:00.000Z'), '2026-05-26');
+});
+
+test('isReconcilableTrade: keeps order placements with a real symbol, drops closes/no-symbol', () => {
+  assert.equal(isReconcilableTrade({ type: 'order', tool: 'place_options_order', symbol: 'AMD260717C00510000' }), true);
+  assert.equal(isReconcilableTrade({ type: 'order', tool: 'place_managed_position', symbol: 'WMT' }), true);
+  assert.equal(isReconcilableTrade({ type: 'close', tool: 'close_managed_position', symbol: 'pos_17793060' }), false);
+  assert.equal(isReconcilableTrade({ type: 'order', tool: 'place_buy_order', symbol: '??' }), false);
+  assert.equal(isReconcilableTrade({ type: 'order', symbol: '' }), false);
+});
+
+test('normalizeBrokerOrder: reads PascalCase Go JSON keys', () => {
+  const n = normalizeBrokerOrder({ ID: 'o1', Symbol: 'AMD', Side: 'buy', Status: 'filled', FilledQty: 2, SubmittedAt: '2026-05-26T13:33:02Z', Strategy: 'v2' });
+  assert.deepEqual(n, { id: 'o1', symbol: 'AMD', side: 'buy', status: 'filled', filledQty: 2, submittedAt: '2026-05-26T13:33:02Z', strategy: 'v2' });
+});
+
+test('assessCoverage: below limit is covered; at limit with oldest after day-start is not', () => {
+  const dayStart = '2026-05-26T04:00:00.000Z'; // 00:00 ET (EDT)
+  assert.equal(assessCoverage([{ submittedAt: '2026-05-26T13:00:00Z' }], dayStart, 500).covered, true);
+  const full = Array.from({ length: 500 }, () => ({ submittedAt: '2026-05-26T18:00:00Z' }));
+  assert.equal(assessCoverage(full, dayStart, 500).covered, false);
+  const fullEarly = Array.from({ length: 500 }, (_, i) => ({ submittedAt: i === 0 ? '2026-05-26T03:00:00Z' : '2026-05-26T18:00:00Z' }));
+  assert.equal(assessCoverage(fullEarly, dayStart, 500).covered, true);
+});
