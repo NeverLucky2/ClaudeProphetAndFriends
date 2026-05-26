@@ -32,6 +32,8 @@ import {
 } from './config-store.js';
 import { appendTrade, readTrades } from './trades-store.js';
 import { fetchFillsSummary, renderFillsSummaryLine, startOfEtTradingDayIso } from './fills-summary.js';
+import { runReconciliationForSandbox, readReconciliationSummary } from './trade-reconciliation.js';
+import nodeFs from 'node:fs/promises';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(__dirname, '..');
@@ -136,6 +138,31 @@ for (const evt of EVENTS) {
   });
 }
 
+// Cross-sandbox reconciliation runner injected into the scheduler. Iterates
+// running sandboxes, resolves each one's strategy tag + goAxios, and reconciles
+// its trade log against the broker. Untagged agents (no strategyId) are skipped
+// — their orders carry no tag to attribute. Soft-fail per sandbox.
+async function runTradeReconciliationAllSandboxes(isoDate) {
+  const dayStartIso = startOfEtTradingDayIso();
+  for (const runtime of orchestrator.runtimes.values()) {
+    try {
+      const sandboxId = runtime?.harness?.sandboxId;
+      if (!sandboxId) continue;
+      const resolved = getResolvedAgentForSandbox(sandboxId);
+      const strategy = resolved?.strategyId;
+      const goAxios = runtime.goAxios;
+      if (!strategy || !goAxios) continue;
+      await runReconciliationForSandbox({
+        goAxios, sandboxId, strategy, agentName: resolved?.name,
+        isoDate, dayStartIso, projectRoot: PROJECT_ROOT,
+        readTradesFn: readTrades, fsImpl: nodeFs,
+      });
+    } catch {
+      // soft-fail per sandbox — one bot down must not abort the rest
+    }
+  }
+}
+
 // ── Analysis Scheduler ─────────────────────────────────────────────
 const scheduler = new AnalysisScheduler({
   model: getConfig().activeModel || 'anthropic/claude-sonnet-4-6',
@@ -144,6 +171,7 @@ const scheduler = new AnalysisScheduler({
     const runtime = orchestrator.listRuntimes().find(r => r.goReady && r.port);
     return runtime ? `http://localhost:${runtime.port}` : null;
   },
+  runTradeReconciliation: runTradeReconciliationAllSandboxes,
 });
 scheduler.on('agent_log', (data) => broadcast('agent_log', data));
 scheduler.on('scheduler_job_start', ({ job, date }) => broadcast('agent_log', {
