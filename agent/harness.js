@@ -1305,6 +1305,7 @@ ${userBlock}`;
         const isClose    = fullToolName.includes('close_managed');
         if (isNewOrder || isClose) {
           this.state.stats.trades++;
+          const { failed, reason } = classifyOrderResult(part);
           if (isClose) {
             const posId = toolInput.position_id || toolInput.id || '';
             this.state.addTrade({
@@ -1314,6 +1315,8 @@ ${userBlock}`;
               side: 'close',
               quantity: null,
               price: null,
+              status: failed ? 'failed' : 'success',
+              ...(failed ? { errorReason: reason } : {}),
             });
           } else {
             const qty = toolInput.quantity || toolInput.qty;
@@ -1325,6 +1328,8 @@ ${userBlock}`;
               side: toolInput.side || (fullToolName.includes('buy') ? 'buy' : 'sell'),
               quantity: qty || (dollars ? `$${dollars}` : null),
               price: toolInput.limit_price,
+              status: failed ? 'failed' : 'success',
+              ...(failed ? { errorReason: reason } : {}),
             });
           }
         }
