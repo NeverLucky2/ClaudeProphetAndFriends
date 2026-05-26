@@ -796,6 +796,24 @@ app.get('/api/trades', async (req, res) => {
   }
 });
 
+// Reconciliation summary for a date (default: today ET). Aggregates across
+// sandboxes unless ?sandboxId= is given. Returns { date, mismatchCount, items }.
+app.get('/api/reconciliation', async (req, res) => {
+  const _etFmt = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' });
+  const today = _etFmt.format(new Date());
+  const date = String(req.query.date || today);
+  const sandboxId = req.query.sandboxId ? String(req.query.sandboxId) : undefined;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return res.status(400).json({ error: 'date must be YYYY-MM-DD' });
+  }
+  try {
+    const summary = await readReconciliationSummary(PROJECT_ROOT, { date, sandboxId }, { fs: nodeFs });
+    res.json(summary);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/sandboxes/:id/state', (req, res) => {
   try {
     res.json(orchestrator.getState(req.params.id));
