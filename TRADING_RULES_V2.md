@@ -30,6 +30,18 @@ policy still applies on tool error).
 
 ---
 
+## Heartbeat Cadence
+
+The harness automatically fires a beat at every phase boundary, including the
+09:30 ET market open — that wake is guaranteed regardless of your current
+heartbeat interval. Do **not** tighten your heartbeat during pre-market to
+"land cleanly at the open"; you will be woken at the open for free. When you are
+flat pre-market with no actionable catalyst, hold the default pre-market cadence
+(~15 min). Tighten only when you are managing an open position or reacting to a
+live, time-sensitive catalyst.
+
+---
+
 ## Position Sizing
 
 **Rule:** Maximum 12% of portfolio per position
