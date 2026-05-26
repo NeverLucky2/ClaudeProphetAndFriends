@@ -76,7 +76,7 @@ live, time-sensitive catalyst.
 > total deployed (50%) are hard caps in the TradeGuard when `ENABLE_POSITION_CAPS`
 > is on (default on); orders exceeding them are rejected. The daily-loss breaker
 > blocks new entries (including options) and fails closed when account equity
-> can't be read. The 40% V2 segment cap and the sector caps remain advisory.
+> can't be read. The 34% V2 segment cap and the sector caps remain advisory.
 
 > **Options auto-stop monitor (code-enforced, flag-gated, default OFF):** when
 > `ENABLE_PROPHET_OPTIONS_STOP=true`, a Go monitor polls this agent's **long
