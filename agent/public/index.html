@@ -969,6 +969,12 @@
     .trade-card .trade-side.buy { color: var(--success); }
     .trade-card .trade-side.sell { color: var(--error); }
     .trade-card .trade-side.close { color: var(--warning); }
+    .trade-card.is-failed { border-left: 3px solid var(--error); }
+    .trade-card .trade-failed-badge {
+      display: inline-block; font-size: 10px; font-weight: 700; text-transform: uppercase;
+      padding: 1px 6px; margin-left: 8px; border-radius: 4px;
+      color: #fff; background: var(--error);
+    }
     .trade-card .trade-details { font-size: 12px; color: var(--ink-muted); margin-top: 4px; }
     .trade-card .trade-time { font-size: 11px; color: var(--ink-faint); font-family: 'IBM Plex Mono', monospace; }
     .trades-filter-row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; font-size: 12px; color: var(--ink-muted); }
@@ -2494,8 +2500,9 @@ function addTradeCard(trade) {
   const agentId = agent ? agent.id : '__none__';
   const agentName = agent ? agent.name : (sandbox ? 'Unassigned' : '—');
 
+  const isFailed = trade.status === 'failed';
   const card = document.createElement('div');
-  card.className = 'trade-card';
+  card.className = 'trade-card' + (isFailed ? ' is-failed' : '');
   card.dataset.agentId = agentId;
   card.dataset.sandboxId = sandboxId;
   card.onclick = (ev) => toggleTradeCard(card, ev);
@@ -2511,6 +2518,7 @@ function addTradeCard(trade) {
       '</span>' +
       '<span style="display:flex;align-items:center">' +
         '<span class="trade-side ' + esc(trade.side||'') + '">' + esc((trade.side||'--').toUpperCase()) + '</span>' +
+        (isFailed ? '<span class="trade-failed-badge">Failed</span>' : '') +
         '<span class="trade-chevron">&#9662;</span>' +
       '</span>' +
     '</div>';
@@ -2528,6 +2536,10 @@ function addTradeCard(trade) {
     ['Price',     trade.price != null ? '$' + trade.price : '—'],
     ['Timestamp', trade.timestamp || '—'],
   ];
+  if (isFailed) {
+    fields.push(['Status', 'FAILED']);
+    if (trade.errorReason) fields.push(['Reason', trade.errorReason]);
+  }
   const expandedHtml = '<div class="trade-expanded">' +
     fields.map(([label, value]) =>
       '<div class="trade-field"><span class="trade-field-label">' + esc(label) + ':</span><span>' + esc(String(value)) + '</span></div>'
