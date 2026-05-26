@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"prophet-trader/interfaces"
 	"time"
 
@@ -96,7 +97,11 @@ type AlpacaOptionChainContract struct {
 
 // GetOptionSnapshot gets the latest snapshot for an option
 func (s *AlpacaOptionsDataService) GetOptionSnapshot(ctx context.Context, optionSymbol string) (*interfaces.OptionContract, error) {
-	url := fmt.Sprintf("%s/v1beta1/options/snapshots/%s", s.baseURL, optionSymbol)
+	// The OCC symbol goes in the `symbols` QUERY param. The path segment of
+	// .../options/snapshots/<X> is the UNDERLYING ticker; a full option symbol
+	// there makes Alpaca return HTTP 400 "invalid underlying symbol". See the
+	// matching note on AlpacaTradingService.GetOptionsQuote.
+	url := fmt.Sprintf("%s/v1beta1/options/snapshots?symbols=%s", s.baseURL, neturl.QueryEscape(optionSymbol))
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {

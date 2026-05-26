@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	neturl "net/url"
 	"prophet-trader/interfaces"
 	"strconv"
 	"strings"
@@ -78,6 +79,12 @@ type AlpacaTradingService struct {
 	// optionsRetryBackoff is the base backoff for the options-chain retry loop
 	// (doubled per attempt). Tests set to 0.
 	optionsRetryBackoff time.Duration
+
+	// optionsDataURL is the base URL for the Alpaca options market-data API.
+	// Defaults to https://data.alpaca.markets; overridden in tests to point at
+	// an httptest server so GetOptionsQuote's request shape can be verified
+	// without a network call.
+	optionsDataURL string
 }
 
 // NewAlpacaTradingService creates a new Alpaca trading service
@@ -112,6 +119,7 @@ func NewAlpacaTradingService(apiKey, secretKey, baseURL string, isPaper bool) (*
 	s.retryBackoff = 200 * time.Millisecond
 	s.fetchChainOnce = s.doFetchOptionsChain
 	s.optionsRetryBackoff = 250 * time.Millisecond
+	s.optionsDataURL = "https://data.alpaca.markets"
 	return s, nil
 }
 
@@ -623,7 +631,12 @@ func optionsQuoteFromSnapshot(snap AlpacaOptionsSnapshot, symbol string) (*inter
 // because that method returns interfaces.OptionContract, which drops the quote
 // timestamp the spread gate needs for its staleness check.
 func (s *AlpacaTradingService) GetOptionsQuote(ctx context.Context, symbol string) (*interfaces.OptionsQuote, error) {
-	url := fmt.Sprintf("https://data.alpaca.markets/v1beta1/options/snapshots/%s", symbol)
+	// Single-contract snapshot: the OCC symbol goes in the `symbols` QUERY
+	// param. The path segment of .../options/snapshots/<X> is the UNDERLYING
+	// ticker; passing a full option symbol there makes Alpaca reject it with
+	// HTTP 400 "invalid underlying symbol", which previously made this function
+	// always error and the Prophet spread gate fail closed on every open.
+	url := fmt.Sprintf("%s/v1beta1/options/snapshots?symbols=%s", s.optionsDataURL, neturl.QueryEscape(symbol))
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
