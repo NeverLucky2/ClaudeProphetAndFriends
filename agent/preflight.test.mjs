@@ -571,6 +571,95 @@ test('harvest: IV endpoint errors → fall through (soft-fail)', async () => {
   assert.equal(r.skip, false, 'soft-fail expected on IV endpoint error');
 });
 
+// ── harvest IV-history warm-up gate ────────────────────────────────
+// During IV warm-up, days_of_history is too low for calcIVR to form a
+// meaningful 52-week range, so IVR floors at 0 across the universe and no
+// condor can clear IVR ≥ 30. The gate skips that guaranteed no-op beat.
+// SPY is the universe proxy (see the design's correct-by-construction note).
+
+// IV response that also carries days_of_history. RV/spread set so the EXISTING
+// IV-RV gate would NOT fire (spread > 0), proving any skip comes from the new
+// history gate, not the IV-RV gate.
+const ivWithHistory = (daysOfHistory) => ({
+  data: {
+    current_iv: 0.20,
+    realized_vol_20d: 0.10,
+    iv_minus_rv: 0.10, // spread +0.10 → IV-RV gate does not fire
+    days_of_history: daysOfHistory,
+  },
+});
+
+test('harvest: SPY days_of_history < 20 → skip (IVR floored, no entries possible)', async () => {
+  const rt = makeRuntime([
+    ['/api/v1/harvest/state', () => harvestState(0)],
+    ['/api/v1/harvest/fomc', () => fomcStatus(false)],
+    ['/api/v1/econ/blackout', () => blackoutOff()],
+    ['/api/v1/harvest/expirations/SPY', () => harvestExpiration()],
+    [/^\/api\/v1\/options\/chain\/SPY/, () => chainNonEmpty()],
+    ['/api/v1/iv/SPY', () => ivWithHistory(2)],
+  ]);
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('harvest', rt, {}));
+  assert.equal(r.skip, true);
+  assert.match(r.reason, /insufficient IV history/i);
+});
+
+test('harvest: monitor on + open condor + days_of_history < 20 → skip (entries impossible)', async () => {
+  // Monitor handles exits out-of-band, so the LLM beat is only needed for
+  // entries — and none are possible during warm-up.
+  const rt = makeRuntime([
+    ['/api/v1/harvest/state', () => harvestState(2, 0, true)],
+    ['/api/v1/harvest/fomc', () => fomcStatus(false)],
+    ['/api/v1/econ/blackout', () => blackoutOff()],
+    ['/api/v1/harvest/expirations/SPY', () => harvestExpiration()],
+    [/^\/api\/v1\/options\/chain\/SPY/, () => chainNonEmpty()],
+    ['/api/v1/iv/SPY', () => ivWithHistory(2)],
+  ]);
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('harvest', rt, {}));
+  assert.equal(r.skip, true);
+  assert.match(r.reason, /insufficient IV history/i);
+});
+
+test('harvest: SPY days_of_history ≥ 20 → does not skip on history gate', async () => {
+  const rt = makeRuntime([
+    ['/api/v1/harvest/state', () => harvestState(0)],
+    ['/api/v1/harvest/fomc', () => fomcStatus(false)],
+    ['/api/v1/econ/blackout', () => blackoutOff()],
+    ['/api/v1/harvest/expirations/SPY', () => harvestExpiration()],
+    [/^\/api\/v1\/options\/chain\/SPY/, () => chainNonEmpty()],
+    ['/api/v1/iv/SPY', () => ivWithHistory(60)],
+  ]);
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('harvest', rt, {}));
+  assert.equal(r.skip, false, `expected run, got skip: ${r.reason}`);
+});
+
+test('harvest: SPY days_of_history exactly 20 → does not skip (strict < boundary)', async () => {
+  // Fence-post: the gate is `daysHist < 20`, so 20 must NOT skip.
+  const rt = makeRuntime([
+    ['/api/v1/harvest/state', () => harvestState(0)],
+    ['/api/v1/harvest/fomc', () => fomcStatus(false)],
+    ['/api/v1/econ/blackout', () => blackoutOff()],
+    ['/api/v1/harvest/expirations/SPY', () => harvestExpiration()],
+    [/^\/api\/v1\/options\/chain\/SPY/, () => chainNonEmpty()],
+    ['/api/v1/iv/SPY', () => ivWithHistory(20)],
+  ]);
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('harvest', rt, {}));
+  assert.equal(r.skip, false, `expected run at threshold, got skip: ${r.reason}`);
+});
+
+test('harvest: malformed days_of_history → fall through (does not skip)', async () => {
+  // Number('abc') → NaN → Number.isFinite false → gate does not fire (fail open).
+  const rt = makeRuntime([
+    ['/api/v1/harvest/state', () => harvestState(0)],
+    ['/api/v1/harvest/fomc', () => fomcStatus(false)],
+    ['/api/v1/econ/blackout', () => blackoutOff()],
+    ['/api/v1/harvest/expirations/SPY', () => harvestExpiration()],
+    [/^\/api\/v1\/options\/chain\/SPY/, () => chainNonEmpty()],
+    ['/api/v1/iv/SPY', () => ivWithHistory('abc')],
+  ]);
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('harvest', rt, {}));
+  assert.equal(r.skip, false);
+});
+
 test('harvest: open condor + IV ≤ RV → run (exits must happen)', async () => {
   const rt = makeRuntime([
     ['/api/v1/harvest/state', () => harvestState(2)],
