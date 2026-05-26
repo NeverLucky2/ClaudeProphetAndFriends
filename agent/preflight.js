@@ -115,9 +115,30 @@ export function positionCountFromResponse(data) {
   return Array.isArray(data) ? data.length : -1;
 }
 
+// True when an open broker order belongs to PennyProphet. Spark trades on an
+// Alpaca account shared with co-located agents (Prophet, Turtle, …), and
+// /api/v1/orders?status=open is NOT strategy-filtered — every agent's resting
+// orders appear in penny's feed. Counting them woke Spark's LLM for positions
+// it never placed (observed: untagged UNH/ADI protective stops from another
+// strategy kept it beating every pre-market heartbeat).
+//
+// Ownership comes from the strategy tag the MCP stamps onto every penny order
+// (OPENPROPHET_STRATEGY → broker client_order_id "penny-momentum:{uuid}",
+// surfaced as the order's Strategy field). Untagged or differently-tagged
+// orders are not penny's. We do NOT also match untagged orders by held-symbol:
+// open orders only affect the skip decision when penny has zero positions AND
+// zero candidates, and with zero positions there is no held symbol to match —
+// so a symbol fallback is dead weight here. Field casing is normalized because
+// the live Go feed returns "Strategy" while tests/mocks may use "strategy".
+export function isPennyOwnedOrder(order) {
+  if (!order) return false;
+  const strategy = String(order.Strategy ?? order.strategy ?? '').trim();
+  return strategy === 'penny-momentum';
+}
+
 // PennyProphet predicate. Skips the LLM beat when there are no candidates
 // above the composite-score threshold AND no penny-tagged positions to manage
-// AND no open broker orders pending fill.
+// AND no penny-owned open broker orders pending fill.
 //
 // Closed-phase short-circuit (mirrors prophetPreflight): during the overnight
 // 8pm-4am ET window and full weekends the broker is shut — entry candidates
@@ -181,7 +202,9 @@ async function pennyPreflight(runtime, agentConfig) {
 
   const candidateCount = candidatesResp.data.count;
   const positions = positionsResp.data;
-  const openOrders = ordersResp.data;
+  // Scope the account-wide open-orders feed to penny's own orders so co-located
+  // agents' resting orders on the shared account don't keep penny awake.
+  const openOrders = ordersResp.data.filter(isPennyOwnedOrder);
 
   if (candidateCount === 0 && positions.length === 0 && openOrders.length === 0) {
     return {

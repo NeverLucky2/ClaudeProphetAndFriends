@@ -1567,6 +1567,25 @@ let sandboxScoped = { sandbox: null, agent: null, heartbeat: {}, permissions: {}
 const authToken = new URLSearchParams(window.location.search).get('token') || '';
 let autoScroll = true;
 let nextBeatTime = null, heartbeatSeconds = 0, progressInterval = null;
+// Per-sandbox next-beat anchors driving the "Next" countdown + progress bar in
+// each sandbox card. Keyed by sandboxId → { nextBeat: epoch ms, seconds }. Fed
+// by `schedule` SSE events (the harness re-emits one on every reschedule, incl.
+// right after the agent adjusts its own cadence via set_heartbeat) and seeded
+// from /api/health so the countdown is populated on load, not just after a beat.
+const sandboxSchedules = {};
+function recordSchedule(sid, nextBeatMs, seconds) {
+  if (!sid || !Number.isFinite(nextBeatMs) || !Number.isFinite(seconds) || seconds <= 0) return;
+  sandboxSchedules[sid] = { nextBeat: nextBeatMs, seconds };
+  startProgress();
+}
+function clearSchedule(sid) {
+  if (!sid || !sandboxSchedules[sid]) return;
+  delete sandboxSchedules[sid];
+  const nextEl = document.querySelector(`[data-stat="${sid}-hb-next"]`);
+  if (nextEl) nextEl.textContent = '--';
+  const fillEl = document.querySelector(`[data-stat="${sid}-hb-fill"]`);
+  if (fillEl) fillEl.style.width = '0%';
+}
 const _sbxActiveProfile = {}; // sandboxId → last applied profile id
 const _sbxHbExpanded = new Set(); // sandboxIds with heartbeat intervals panel open
 let _tradesAgentFilter = '__all__';
@@ -1967,11 +1986,15 @@ function connectSSE() {
     const sid = d.sandboxId || getEffectiveSandboxId();
     const hbEl = document.querySelector(`[data-stat="${sid}-hb-interval"]`);
     if (hbEl) hbEl.textContent = fmtInt(d.seconds);
+    // Anchor this sandbox's countdown to the freshly scheduled next-beat time.
+    // Fires for every sandbox (incl. background ones) and reflects agent-driven
+    // heartbeat changes as soon as the current beat reschedules.
+    recordSchedule(sid, new Date(d.nextBeat).getTime(), d.seconds);
     if (selectedSandboxId && d.sandboxId !== selectedSandboxId) return;
     if (d.sandboxId && d.sandboxId !== getEffectiveSandboxId()) return;
     nextBeatTime = new Date(d.nextBeat); heartbeatSeconds = d.seconds;
     _set('hb-interval', fmtInt(d.seconds));
-    updatePhase(d.phase); startProgress();
+    updatePhase(d.phase);
   });
   es.addEventListener('trade', e => {
     if (_historicMode) return;
@@ -2077,15 +2100,27 @@ function updatePhase(phase) {
 
 function fmtInt(s) { return s>=3600? (s/3600).toFixed(1)+'h' : s>=60? Math.floor(s/60)+'m '+s%60+'s' : s+'s'; }
 
+// Single persistent 1s ticker that renders every sandbox's heartbeat countdown
+// ("Next" value + progress bar) from its recorded next-beat anchor. Idempotent:
+// recordSchedule() calls this on each schedule event but only one timer runs.
 function startProgress() {
-  if(progressInterval) clearInterval(progressInterval);
-  progressInterval = setInterval(() => {
-    if(!nextBeatTime||!heartbeatSeconds) return;
-    const rem = nextBeatTime.getTime() - Date.now();
-    const pct = Math.max(0, Math.min(100, ((heartbeatSeconds*1000 - rem)/(heartbeatSeconds*1000))*100));
-    const fillEl = document.getElementById('hb-fill'); if(fillEl) fillEl.style.width = pct + '%';
-    _set('hb-next', Math.max(0, Math.ceil(rem/1000)) + 's');
-  }, 1000);
+  if (progressInterval) return;
+  progressInterval = setInterval(tickSchedules, 1000);
+  tickSchedules();
+}
+function tickSchedules() {
+  const now = Date.now();
+  for (const sid in sandboxSchedules) {
+    const sc = sandboxSchedules[sid];
+    if (!sc) continue;
+    const total = sc.seconds * 1000;
+    const rem = sc.nextBeat - now;
+    const pct = total > 0 ? Math.max(0, Math.min(100, ((total - rem) / total) * 100)) : 0;
+    const fillEl = document.querySelector(`[data-stat="${sid}-hb-fill"]`);
+    if (fillEl) fillEl.style.width = pct + '%';
+    const nextEl = document.querySelector(`[data-stat="${sid}-hb-next"]`);
+    if (nextEl) nextEl.textContent = fmtInt(Math.max(0, Math.ceil(rem / 1000)));
+  }
 }
 
 // ── API calls ──────────────────────────────
@@ -4242,6 +4277,17 @@ async function checkHealth() {
     const r = await fetch('/api/health');
     const d = await r.json();
     window._healthState = d; // Store for renderAccounts
+    // Seed/refresh per-sandbox heartbeat countdown anchors from live state so the
+    // "Next" value + progress bar are populated on load and survive reconnects —
+    // not just after the next schedule event fires.
+    for (const s of (d.sandboxes || [])) {
+      const st = s.state;
+      if (st?.running && st.nextBeatTime && st.heartbeatSeconds) {
+        recordSchedule(s.sandboxId, new Date(st.nextBeatTime).getTime(), st.heartbeatSeconds);
+      } else {
+        clearSchedule(s.sandboxId);
+      }
+    }
     const el = document.getElementById('bot-status');
     const sid = getEffectiveSandboxId();
     const sandboxState = (d.sandboxes || []).find(s => s.sandboxId === sid);

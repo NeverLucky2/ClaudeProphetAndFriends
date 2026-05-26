@@ -13,6 +13,7 @@ import {
   regimeGateBlockSkipIfNoPositions,
   resolvePreflight,
   positionCountFromResponse,
+  isPennyOwnedOrder,
 } from './preflight.js';
 
 // ── helpers ────────────────────────────────────────────────────────
@@ -99,6 +100,36 @@ test('positionCountFromResponse: {count} object (old bug shape) → -1', () => {
 test('positionCountFromResponse: null/undefined → -1', () => {
   assert.equal(positionCountFromResponse(null), -1);
   assert.equal(positionCountFromResponse(undefined), -1);
+});
+
+// ── isPennyOwnedOrder ──────────────────────────────────────────────
+//
+// On the shared Alpaca account /api/v1/orders is not strategy-filtered, so
+// penny must recognize its own orders by the "penny-momentum" strategy tag the
+// MCP stamps onto the broker client_order_id. Field casing is normalized (live
+// Go feed = "Strategy", mocks/tests may use "strategy").
+
+test('isPennyOwnedOrder: tagged penny-momentum → owned', () => {
+  assert.equal(isPennyOwnedOrder({ Symbol: 'PENY', Strategy: 'penny-momentum' }), true);
+});
+
+test('isPennyOwnedOrder: different non-empty strategy tag → not owned', () => {
+  assert.equal(isPennyOwnedOrder({ Symbol: 'TLT', Strategy: 'trend' }), false);
+  assert.equal(isPennyOwnedOrder({ Symbol: 'SPY', Strategy: 'v2-options' }), false);
+});
+
+test('isPennyOwnedOrder: untagged foreign order (the UNH/ADI leak) → not owned', () => {
+  assert.equal(isPennyOwnedOrder({ Symbol: 'UNH', Strategy: '' }), false);
+  assert.equal(isPennyOwnedOrder({ Symbol: 'ADI' }), false); // Strategy field absent
+});
+
+test('isPennyOwnedOrder: lowercase strategy field tolerated', () => {
+  assert.equal(isPennyOwnedOrder({ symbol: 'PENY', strategy: 'penny-momentum' }), true);
+});
+
+test('isPennyOwnedOrder: null/whitespace → not owned', () => {
+  assert.equal(isPennyOwnedOrder(null), false);
+  assert.equal(isPennyOwnedOrder({ Strategy: '   ' }), false);
 });
 
 // ── isEconomicBlackout ─────────────────────────────────────────────
@@ -297,15 +328,68 @@ test('penny: regime RED + open position → run (exits must happen even at RED t
   assert.equal(r.skip, false);
 });
 
-test('penny: blackout + pending open order → run (in-flight order needs evaluation)', async () => {
+test('penny: blackout + pending penny-tagged order → run (in-flight penny order needs evaluation)', async () => {
+  // A penny order in flight must keep penny awake even during a blackout — but
+  // the order has to be penny's own. Tagged via the broker client_order_id
+  // (Strategy "penny-momentum"), as the MCP tags every penny order.
   const rt = makeRuntime([
     ['/api/v1/penny/candidates?min_score=60', () => candidates(0)],
     ['/api/v1/positions?strategy=penny-momentum', () => pennyPositions([])],
-    ['/api/v1/orders?status=open', () => pennyOrders([{ symbol: 'XYZ', status: 'new' }])],
+    ['/api/v1/orders?status=open', () => pennyOrders([{ Symbol: 'XYZ', Strategy: 'penny-momentum', Status: 'new' }])],
     ['/api/v1/econ/blackout', () => blackoutOn('CPI release')],
   ]);
   const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('penny-momentum', rt, {}));
   assert.equal(r.skip, false);
+  assert.match(r.reason, /open order/);
+});
+
+// ── pennyPreflight shared-account order leak ───────────────────────
+//
+// Spark trades on an Alpaca account shared with co-located agents (Prophet,
+// Turtle, …). /api/v1/orders?status=open is NOT strategy-filtered, so those
+// agents' resting orders show up in penny's feed. Observed bug: two untagged
+// protective stops (UNH sell-stop, ADI sell-stop) placed by another strategy
+// woke Spark's LLM every pre-market beat for "2 open order(s) pending fill",
+// even with zero penny positions/candidates. Penny must count only its own
+// orders: tagged "penny-momentum", or untagged on a symbol penny actually holds.
+
+test('penny: open phase + foreign untagged orders, no penny positions/candidates → skip (UNH/ADI leak fixed)', async () => {
+  const rt = makeRuntime([
+    ['/api/v1/penny/candidates?min_score=60', () => candidates(0)],
+    ['/api/v1/positions?strategy=penny-momentum', () => pennyPositions([])],
+    ['/api/v1/orders?status=open', () => pennyOrders([
+      { Symbol: 'UNH', Side: 'sell', Type: 'stop', Strategy: '', Status: 'new' },
+      { Symbol: 'ADI', Side: 'sell', Type: 'stop', Strategy: '', Status: 'new' },
+    ])],
+  ]);
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('penny-momentum', rt, {}));
+  assert.equal(r.skip, true);
+  assert.match(r.reason, /no open orders|no candidates/);
+});
+
+test('penny: open phase + order tagged for another strategy → skip (not penny\'s order)', async () => {
+  const rt = makeRuntime([
+    ['/api/v1/penny/candidates?min_score=60', () => candidates(0)],
+    ['/api/v1/positions?strategy=penny-momentum', () => pennyPositions([])],
+    ['/api/v1/orders?status=open', () => pennyOrders([{ Symbol: 'TLT', Strategy: 'trend', Status: 'new' }])],
+  ]);
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('penny-momentum', rt, {}));
+  assert.equal(r.skip, true);
+});
+
+test('penny: open phase + one penny order mixed with foreign orders → run, counts only penny\'s', async () => {
+  const rt = makeRuntime([
+    ['/api/v1/penny/candidates?min_score=60', () => candidates(0)],
+    ['/api/v1/positions?strategy=penny-momentum', () => pennyPositions([])],
+    ['/api/v1/orders?status=open', () => pennyOrders([
+      { Symbol: 'UNH', Strategy: '', Status: 'new' },
+      { Symbol: 'PENY', Strategy: 'penny-momentum', Status: 'new' },
+      { Symbol: 'TLT', Strategy: 'trend', Status: 'new' },
+    ])],
+  ]);
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('penny-momentum', rt, {}));
+  assert.equal(r.skip, false);
+  assert.match(r.reason, /1 open order/);
 });
 
 test('penny: blackout endpoint error + candidates + nothing in flight → run (fail open)', async () => {
