@@ -26,6 +26,7 @@ NVDA
 META
 TSLA
 AVGO
+TSM
 AMD
 ORCL
 NFLX
@@ -45,10 +46,17 @@ LLY
 UNH
 JNJ
 ABBV
+MRK
 
 # Energy
 XOM
 CVX
+COP
+OXY
+
+# Industrials
+CAT
+GE
 
 # Other mega-caps
 WMT

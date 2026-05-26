@@ -214,6 +214,47 @@ def test_fetch_soft_fails_on_news_error():
     assert out == []
 
 
+# ── in_floor tagging ──────────────────────────────────────────────────────
+
+
+def test_fetch_tags_in_floor():
+    now = datetime.now(timezone.utc) - timedelta(hours=1)
+    fmp = FakeFMP(
+        news_response=[
+            {
+                "symbol": "LLY",
+                "title": "Eli Lilly agrees to acquire a biotech",
+                "publishedDate": _iso(now),
+            },
+            {
+                "symbol": "ZZZ",
+                "title": "ZZZ agrees to acquire a rival",
+                "publishedDate": _iso(now),
+            },
+        ]
+    )
+    out = fetch_catalyst_news(fmp, ["LLY", "ZZZ"], lookback_hours=24, limit=5, floor={"LLY"})
+    by_ticker = {ev["ticker"]: ev for ev in out}
+    assert by_ticker["LLY"]["in_floor"] is True
+    assert by_ticker["ZZZ"]["in_floor"] is False
+
+
+def test_fetch_in_floor_defaults_false_without_floor():
+    now = datetime.now(timezone.utc) - timedelta(hours=1)
+    fmp = FakeFMP(
+        news_response=[
+            {
+                "symbol": "LLY",
+                "title": "Eli Lilly agrees to acquire a biotech",
+                "publishedDate": _iso(now),
+            },
+        ]
+    )
+    out = fetch_catalyst_news(fmp, ["LLY"], lookback_hours=24, limit=5)
+    assert out
+    assert out[0]["in_floor"] is False
+
+
 def test_fetch_soft_fails_on_empty_response():
     assert fetch_catalyst_news(FakeFMP(news_response=None), ["NVDA"]) == []
     assert fetch_catalyst_news(FakeFMP(news_response=[]), ["NVDA"]) == []

@@ -46,6 +46,7 @@ policy still applies on tool error).
 - The floor is curated for deep options liquidity (mega-caps + liquid ETFs).
 - When `ENABLE_PROPHET_UNIVERSE_GATE` is on, the guard **rejects** an options open whose underlying is not in the floor (opens only — never blocks a close).
 - The daily-brief catalyst feeds (analyst actions, ticker catalysts) scan a *wider* surveillance universe that includes transient high-volume names. Those names are for **awareness only** — they are not tradable and the guard will reject orders on them. Do not propose trades on a catalyst name that is not in the floor.
+- **Do not guess floor membership.** Every catalyst event carries an `in_floor` flag: `true` = tradable, `false` = awareness-only. To check any other underlying, call `get_tradable_universe(symbol)`. A catalyst on a floor name (e.g. an LLY/UNH price-target raise) is actionable — do not dismiss it as off-floor.
 
 **Rule:** Maximum 10 positions simultaneously
 - Simplifies: Portfolio management and monitoring
