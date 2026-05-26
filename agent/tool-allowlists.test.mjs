@@ -122,7 +122,8 @@ test('Prophet (v2-options) is broad but excludes other strategies signals + mana
   for (const tool of ['get_market_news', 'get_options_chain', 'place_options_order', 'get_intraday_signals', 'run_vcp_screener', 'read_latest_report', 'set_heartbeat', 'apply_heartbeat_profile']) {
     assert.ok(prophet.has(tool), `Prophet should expose discretionary tool "${tool}"`);
   }
-  // Size sanity: 91 catalog - 15 exclusive - 8 manager = 68.
+  // Size sanity: catalog - 15 exclusive - 8 manager. Computed off ALL_TOOLS.length
+  // so it tracks catalog growth (e.g. get_tradable_universe, a generic Prophet tool).
   assert.equal(STRATEGY_TOOL_ALLOWLISTS['v2-options'].length, ALL_TOOLS.length - 15 - MANAGER_TOOLS.length);
 });
 

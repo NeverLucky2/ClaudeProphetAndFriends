@@ -80,6 +80,7 @@ export const ALL_TOOLS = [
   'get_quote',
   'get_regime_gate_status',
   'get_segment_pnl',
+  'get_tradable_universe',
   'get_trade_stats',
   'get_treasury_data',
   'get_trend_signal',

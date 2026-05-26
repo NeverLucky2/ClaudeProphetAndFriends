@@ -124,12 +124,18 @@ def fetch_catalyst_news(
     lookback_hours: int = 24,
     limit: int = 3,
     raw_news_limit: int = 100,
+    floor: Optional[set[str]] = None,
 ) -> list[dict]:
     """Pull ticker news, classify, dedup by (ticker, event_type), rank, cap.
 
     FMP's news/stock endpoint accepts comma-separated symbols, so a single call
     covers the full universe. We over-pull (default 100) to be sure the M&A /
     earnings hits aren't truncated under the page limit.
+
+    `floor` is the tradable-floor ticker set (upper-cased). Each emitted event
+    is tagged with `in_floor` so the brief shows whether a catalyst name is
+    tradable on Prophet's options floor or only surveillance. Omitted/empty
+    floor → every event is tagged in_floor=False.
     """
     cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
 
@@ -164,9 +170,11 @@ def fetch_catalyst_news(
         reverse=True,
     )
     out = ranked[:limit]
+    floor_set = floor or set()
     for ev in out:
         ev.pop("_dt", None)
         ev.pop("_weight", None)
+        ev["in_floor"] = ev["ticker"] in floor_set
     return out
 
 
@@ -199,6 +207,9 @@ def main() -> int:
         client=client,
     )
     tickers = universe["tickers"]
+    # The floor is the static portion of the universe (build_universe emits it
+    # first); the rest is the dynamic surveillance top-up. Used to tag in_floor.
+    floor = set(tickers[: universe["static_count"]])
     print(
         f"INFO: universe size={len(tickers)} (static={universe['static_count']}, "
         f"dynamic={universe['dynamic_count']})",
@@ -211,6 +222,7 @@ def main() -> int:
         lookback_hours=args.lookback_hours,
         limit=args.limit,
         raw_news_limit=args.raw_news_limit,
+        floor=floor,
     )
     json.dump(events, sys.stdout, indent=2)
     sys.stdout.write("\n")

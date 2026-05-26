@@ -1502,6 +1502,16 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: 'get_tradable_universe',
+        description: "Get Prophet's tradable floor — the curated set of liquid optionable underlyings (mega-caps + ETFs) eligible for options OPENS (config/prophet_tradable_universe.txt). The catalyst feeds (run_analyst_actions, run_catalyst_news) surface a WIDER surveillance set and tag each event with in_floor; this tool is the authoritative membership check. Optionally pass `symbol` to test one underlying → {symbol, in_floor, count}. With no args → {count, tickers}.",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            symbol: { type: 'string', description: 'Optional single underlying to check for floor membership (case-insensitive).' },
+          },
+        },
+      },
+      {
         name: 'get_penny_universe',
         description: 'Get the current monitored penny stock universe: all symbols passing the $2–$10 price, $50M–$500M market cap, $300K+ ADV, exchange-listed filter.',
         inputSchema: {
@@ -3134,6 +3144,21 @@ Worst Trade: ${stats.worst_result_pct.toFixed(1)}% ($${stats.worst_result_dollar
           cost_per_contract: args.cost_per_contract,
         });
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'get_tradable_universe': {
+        // Reads the same floor file the Go guard, screeners, and catalyst
+        // skills use — single source of truth for options-open eligibility.
+        const floor = await loadProphetUniverse(PROPHET_UNIVERSE_PATH);
+        const sym = typeof args?.symbol === 'string' ? args.symbol.trim().toUpperCase() : '';
+        if (sym) {
+          return {
+            content: [{ type: 'text', text: JSON.stringify({ symbol: sym, in_floor: floor.includes(sym), count: floor.length }, null, 2) }],
+          };
+        }
+        return {
+          content: [{ type: 'text', text: JSON.stringify({ count: floor.length, tickers: floor }, null, 2) }],
+        };
       }
 
       case 'get_penny_universe': {

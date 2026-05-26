@@ -180,8 +180,16 @@ def fetch_analyst_actions(
     tickers: list[str],
     lookback_hours: int = 24,
     limit: int = 15,
+    floor: Optional[set[str]] = None,
 ) -> list[dict]:
-    """Pull grades + PT news for each ticker, filter, rank, cap."""
+    """Pull grades + PT news for each ticker, filter, rank, cap.
+
+    `floor` is the set of tradable-floor tickers (the curated static universe,
+    upper-cased). Each emitted event is tagged with `in_floor` so the daily
+    brief makes tradability explicit — the agent never has to guess whether a
+    catalyst name is on Prophet's options floor or only in the wider
+    surveillance set. Omitted/empty floor → every event is tagged in_floor=False.
+    """
     cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
     events: list[dict] = []
     for ticker in tickers:
@@ -205,10 +213,12 @@ def fetch_analyst_actions(
 
     events.sort(key=_score_event, reverse=True)
     out = events[:limit]
-    # Strip internal scoring fields before emitting.
+    floor_set = floor or set()
+    # Strip internal scoring fields and tag tradability before emitting.
     for ev in out:
         ev.pop("_dt", None)
         ev.pop("_tier", None)
+        ev["in_floor"] = ev["ticker"] in floor_set
     return out
 
 
@@ -240,6 +250,9 @@ def main() -> int:
         client=client,
     )
     tickers = universe["tickers"]
+    # The floor is the static portion of the universe (build_universe emits it
+    # first); the rest is the dynamic surveillance top-up. Used to tag in_floor.
+    floor = set(tickers[: universe["static_count"]])
     print(
         f"INFO: universe size={len(tickers)} (static={universe['static_count']}, "
         f"dynamic={universe['dynamic_count']})",
@@ -251,6 +264,7 @@ def main() -> int:
         tickers,
         lookback_hours=args.lookback_hours,
         limit=args.limit,
+        floor=floor,
     )
     json.dump(events, sys.stdout, indent=2)
     sys.stdout.write("\n")

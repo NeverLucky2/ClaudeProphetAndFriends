@@ -296,5 +296,70 @@ def test_fetch_strips_internal_fields():
     assert "_tier" not in events[0]
 
 
+# ── in_floor tagging ──────────────────────────────────────────────────────
+# Catalyst feeds scan a wider surveillance set than Prophet's tradable floor.
+# Tagging each event with in_floor lets the agent tell a tradable catalyst (e.g.
+# an LLY price-target raise) from an awareness-only one — the reported bug was
+# Prophet dismissing a floor name as off-floor because it had to guess.
+
+
+def test_fetch_tags_in_floor_true_for_floor_name():
+    now = datetime.now(timezone.utc) - timedelta(hours=1)
+    fmp = FakeFMP(
+        pt_by_ticker={
+            "LLY": [
+                {
+                    "publishedDate": _iso(now),
+                    "analystCompany": "Leerink Partners",
+                    "priceTarget": 1119,
+                    "priceWhenPosted": 1065,
+                }
+            ]
+        }
+    )
+    events = fetch_analyst_actions(fmp, ["LLY"], lookback_hours=24, floor={"LLY", "UNH"})
+    assert events
+    assert events[0]["ticker"] == "LLY"
+    assert events[0]["in_floor"] is True
+
+
+def test_fetch_tags_in_floor_false_for_surveillance_name():
+    now = datetime.now(timezone.utc) - timedelta(hours=1)
+    fmp = FakeFMP(
+        pt_by_ticker={
+            "ZZZ": [
+                {
+                    "publishedDate": _iso(now),
+                    "analystCompany": "Goldman Sachs",
+                    "priceTarget": 50,
+                    "priceWhenPosted": 40,
+                }
+            ]
+        }
+    )
+    events = fetch_analyst_actions(fmp, ["ZZZ"], lookback_hours=24, floor={"LLY", "UNH"})
+    assert events
+    assert events[0]["in_floor"] is False
+
+
+def test_fetch_in_floor_defaults_false_without_floor():
+    now = datetime.now(timezone.utc) - timedelta(hours=1)
+    fmp = FakeFMP(
+        pt_by_ticker={
+            "LLY": [
+                {
+                    "publishedDate": _iso(now),
+                    "analystCompany": "Citi",
+                    "priceTarget": 1119,
+                    "priceWhenPosted": 1065,
+                }
+            ]
+        }
+    )
+    events = fetch_analyst_actions(fmp, ["LLY"], lookback_hours=24)
+    assert events
+    assert events[0]["in_floor"] is False
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
