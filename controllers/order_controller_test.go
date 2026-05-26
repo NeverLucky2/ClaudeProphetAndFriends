@@ -29,6 +29,8 @@ type recordingTradingService struct {
 	optionsQuote        *interfaces.OptionsQuote
 	optionsQuoteErr     error
 	optionsQuoteCalls   int
+	listOrdersResult    []*interfaces.Order
+	listOrdersErr       error
 }
 
 func (r *recordingTradingService) PlaceOrder(_ context.Context, order *interfaces.Order) (*interfaces.OrderResult, error) {
@@ -44,7 +46,7 @@ func (r *recordingTradingService) GetOrder(_ context.Context, _ string) (*interf
 	return nil, nil
 }
 func (r *recordingTradingService) ListOrders(_ context.Context, _ string) ([]*interfaces.Order, error) {
-	return nil, nil
+	return r.listOrdersResult, r.listOrdersErr
 }
 func (r *recordingTradingService) GetPositions(_ context.Context) ([]*interfaces.Position, error) {
 	return nil, nil
@@ -473,6 +475,78 @@ func TestGetOptionsChain_OtherErrorReturns500(t *testing.T) {
 
 	if w.Code != http.StatusInternalServerError {
 		t.Errorf("status: got %d, want 500", w.Code)
+	}
+}
+
+// TestHandleFillsSummary verifies the endpoint passes the strategy + since
+// filters through to SummarizeFills and returns the JSON summary.
+func TestHandleFillsSummary(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	since := time.Date(2026, 5, 26, 4, 0, 0, 0, time.UTC)
+	filledAt := since.Add(6 * time.Hour)
+	avg := 184.20
+	trading := &recordingTradingService{
+		listOrdersResult: []*interfaces.Order{
+			{Symbol: "AAPL", Side: "buy", Status: "filled", ClientOrderID: "mean-rev-rsi2:u1",
+				Strategy: "mean-rev-rsi2", FilledQty: 12, FilledAvgPrice: &avg, FilledAt: &filledAt},
+			{Symbol: "TSLA", Side: "buy", Status: "filled", ClientOrderID: "turtle-trend:u2",
+				Strategy: "turtle-trend", FilledQty: 3, FilledAvgPrice: &avg, FilledAt: &filledAt},
+		},
+	}
+	oc := NewOrderController(trading, nil, noopStorage{})
+
+	router := gin.New()
+	router.GET("/api/v1/fills/summary", oc.HandleFillsSummary)
+
+	url := "/api/v1/fills/summary?strategy=mean-rev-rsi2&since=" + since.Format(time.RFC3339)
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: want 200, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `"count":1`) {
+		t.Errorf("want count 1 (only the mean-rev fill), got body=%s", body)
+	}
+	if !strings.Contains(body, `"symbol":"AAPL"`) || strings.Contains(body, "TSLA") {
+		t.Errorf("want AAPL only, not TSLA; body=%s", body)
+	}
+}
+
+func TestHandleFillsSummary_ListOrdersError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	trading := &recordingTradingService{listOrdersErr: errors.New("alpaca down")}
+	oc := NewOrderController(trading, nil, noopStorage{})
+
+	router := gin.New()
+	router.GET("/api/v1/fills/summary", oc.HandleFillsSummary)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/fills/summary?strategy=x", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status: want 500 on ListOrders error, got %d", w.Code)
+	}
+}
+
+// TestStartOfEtTradingDay pins midnight-ET semantics without hardcoding offsets.
+func TestStartOfEtTradingDay(t *testing.T) {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatalf("tzdata unavailable: %v", err)
+	}
+	now := time.Date(2026, 5, 26, 18, 30, 0, 0, time.UTC) // 14:30 ET (EDT)
+	got := startOfEtTradingDay(now)
+	et := got.In(loc)
+	if et.Hour() != 0 || et.Minute() != 0 || et.Second() != 0 {
+		t.Errorf("not midnight ET: %s", et)
+	}
+	if et.Year() != 2026 || et.Month() != time.May || et.Day() != 26 {
+		t.Errorf("wrong ET date: %s, want 2026-05-26", et)
 	}
 }
 

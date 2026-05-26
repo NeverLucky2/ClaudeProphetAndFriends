@@ -11,6 +11,7 @@ import { resolvePreflight } from './preflight.js';
 import { isMarketHoliday } from './market-calendar.js';
 import { renderIntradayBlock, shouldInjectIntraday } from './intraday-prompt.js';
 import { fetchBeatContext, renderBeatContextBlock } from './beat-context.js';
+import { fetchFillsSummary, renderFillsSummaryLine, startOfEtTradingDayIso } from './fills-summary.js';
 import { resolveAllowedTools } from './tool-allowlists.js';
 import { resolveStrategyRules, computeStrategyVersion, buildVersionMarker, writeVersionMarker } from '../scripts/strategy-version.mjs';
 
@@ -344,6 +345,12 @@ export class AgentHarness {
       level: 'success',
     });
 
+    // LLM-free fills recap — surfaces broker-side fills (resting limit entries,
+    // bracket exits) that landed since the ET open. Soft-fails; never blocks start.
+    if (process.env.FILLS_SUMMARY_ENABLED !== 'false') {
+      void this._emitFillsSummary();
+    }
+
     // Hybrid startup for scheduledBeats.exclusive agents: only fire the immediate
     // beat if we're inside the agent's accepted window (windowMinutes around any
     // scheduled time). Outside the window, the agent's own rules would reject the
@@ -360,6 +367,24 @@ export class AgentHarness {
       await this._beat();
     }
     this._scheduleNext();
+  }
+
+  // LLM-free fills recap: fetch the day's broker-side fills for this agent's
+  // strategy and emit a one-line agent_log (same pane as "Agent started").
+  // Best-effort: any failure is swallowed so it never blocks startup.
+  async _emitFillsSummary() {
+    try {
+      const strategy = this._agentConfig?.strategyId;
+      if (!strategy) return;
+      const runtime = this.getRuntime ? this.getRuntime(this.sandboxId) : null;
+      const goAxios = runtime?.goAxios;
+      if (!goAxios) return;
+      const summary = await fetchFillsSummary(goAxios, strategy, startOfEtTradingDayIso());
+      const line = renderFillsSummaryLine(summary, this._agentConfig?.name);
+      if (line) this.state.emit('agent_log', { message: line, level: 'success' });
+    } catch {
+      // soft-fail: the recap is best-effort, never block start
+    }
   }
 
   async reloadConfig(options = {}) {

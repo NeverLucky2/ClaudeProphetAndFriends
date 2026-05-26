@@ -643,6 +643,7 @@ func setupRouter(
 		api.POST("/orders/sell", orderController.HandleSell)
 		api.DELETE("/orders/:id", orderController.HandleCancelOrder)
 		api.GET("/orders", orderController.HandleGetOrders)
+		api.GET("/fills/summary", orderController.HandleFillsSummary)
 
 		// Position and account endpoints
 		api.GET("/positions", orderController.HandleGetPositions)

@@ -385,6 +385,43 @@ func (oc *OrderController) HandleGetAccount(c *gin.Context) {
 	c.JSON(200, account)
 }
 
+// HandleFillsSummary returns a recap of filled orders for the current ET trading
+// day (or since the optional `since` RFC3339 param), attributed by strategy tag.
+// Powers the non-LLM fills recap shown in the agent terminal on start and on
+// dashboard open. GET /api/v1/fills/summary?strategy=<id>&since=<RFC3339>
+func (oc *OrderController) HandleFillsSummary(c *gin.Context) {
+	strategy := c.Query("strategy")
+
+	since := startOfEtTradingDay(time.Now())
+	if raw := c.Query("since"); raw != "" {
+		if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
+			since = parsed
+		}
+	}
+
+	orders, err := oc.tradingService.ListOrders(context.Background(), "closed")
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, services.SummarizeFills(orders, strategy, since))
+}
+
+// startOfEtTradingDay returns 00:00 America/New_York for the ET calendar date of
+// `now`. Default `since` anchor when no param is supplied. Node always passes an
+// explicit `since`, so this is a safety net; on tzdata failure it falls back to
+// UTC-day midnight to stay total.
+func startOfEtTradingDay(now time.Time) time.Time {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		y, m, d := now.UTC().Date()
+		return time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+	}
+	et := now.In(loc)
+	y, m, d := et.Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, loc)
+}
+
 // HandleGetOrders handles HTTP get orders requests
 func (oc *OrderController) HandleGetOrders(c *gin.Context) {
 	status := c.Query("status")

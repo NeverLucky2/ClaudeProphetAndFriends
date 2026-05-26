@@ -31,6 +31,7 @@ import {
   createSandboxForAccount,
 } from './config-store.js';
 import { appendTrade, readTrades } from './trades-store.js';
+import { fetchFillsSummary, renderFillsSummaryLine, startOfEtTradingDayIso } from './fills-summary.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(__dirname, '..');
@@ -291,6 +292,32 @@ function bindOperationalHooks(targetHarness) {
   scheduleDailySummaryForHarness(targetHarness);
 }
 
+// Write a per-agent fills recap to a single freshly-connected SSE client. Not a
+// broadcast — opening a second dashboard must not re-spam everyone. Mirrors the
+// harness start-path recap so a mid-day dashboard open surfaces the same
+// broker-side fills. Soft-fail per sandbox.
+async function emitConnectFillsSummaries(res) {
+  for (const runtime of orchestrator.runtimes.values()) {
+    try {
+      const harness = runtime?.harness;
+      if (!harness?.state?.running) continue;
+      const sandboxId = harness.sandboxId;
+      const resolved = getResolvedAgentForSandbox(sandboxId);
+      const strategy = resolved?.strategyId;
+      const goAxios = runtime.goAxios;
+      if (!strategy || !goAxios) continue;
+      const summary = await fetchFillsSummary(goAxios, strategy, startOfEtTradingDayIso());
+      const line = renderFillsSummaryLine(summary, resolved?.name);
+      if (line && sseClients.has(res)) {
+        const data = { message: line, level: 'success', sandboxId, timestamp: new Date().toISOString() };
+        res.write(`event: agent_log\ndata: ${JSON.stringify(data)}\n\n`);
+      }
+    } catch {
+      // soft-fail: best-effort recap per sandbox
+    }
+  }
+}
+
 // ── SSE Endpoint ───────────────────────────────────────────────────
 app.get('/api/events', (req, res) => {
   res.writeHead(200, {
@@ -306,6 +333,11 @@ app.get('/api/events', (req, res) => {
   res.write(`event: config\ndata: ${JSON.stringify(safeConfig())}\n\n`);
   sseClients.add(res);
   req.on('close', () => sseClients.delete(res));
+
+  // Trigger B: surface each running agent's day fills to this client only.
+  if (process.env.FILLS_SUMMARY_ENABLED !== 'false') {
+    void emitConnectFillsSummaries(res);
+  }
 });
 
 // ── Agent Control ──────────────────────────────────────────────────

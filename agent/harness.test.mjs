@@ -106,3 +106,56 @@ test('agent-level heartbeatOverrides config wins over PHASE_DEFAULTS when no run
   h._agentConfig = { heartbeatOverrides: { closed: 14400 } };
   assert.equal(h._getHeartbeatSeconds(), 14400);
 });
+
+// Trigger A: harness.start() surfaces broker-side fills that landed since the ET
+// open. We test the unit (_emitFillsSummary) directly — it does the fetch +
+// render + emit — rather than the full start() path, which needs heavy mocking.
+function makeFillsHarness(goAxios, agentConfig = { strategyId: 'mean-rev-rsi2', name: 'Coil' }) {
+  const h = new AgentHarness({
+    sandboxId: 'sbx_test',
+    getRuntime: () => ({ goAxios }),
+  });
+  h._agentConfig = agentConfig;
+  return h;
+}
+
+test('_emitFillsSummary emits an agent_log line when there are fills', async () => {
+  const goAxios = {
+    get: async () => ({
+      data: {
+        strategy: 'mean-rev-rsi2', count: 1,
+        fills: [{ symbol: 'AAPL', side: 'buy', qty: 12, avg_price: 184.2, filled_at: '2026-05-26T14:14:00Z' }],
+      },
+    }),
+  };
+  const h = makeFillsHarness(goAxios);
+  const logs = [];
+  h.state.on('agent_log', (d) => logs.push(d));
+
+  await h._emitFillsSummary();
+
+  assert.equal(logs.length, 1);
+  assert.match(logs[0].message, /^Coil — 1 fill today/);
+  assert.match(logs[0].message, /AAPL/);
+});
+
+test('_emitFillsSummary stays silent on zero fills', async () => {
+  const goAxios = { get: async () => ({ data: { strategy: 'mean-rev-rsi2', count: 0, fills: [] } }) };
+  const h = makeFillsHarness(goAxios);
+  const logs = [];
+  h.state.on('agent_log', (d) => logs.push(d));
+
+  await h._emitFillsSummary();
+
+  assert.equal(logs.length, 0);
+});
+
+test('_emitFillsSummary soft-fails (no throw, no emit) when the fetch errors', async () => {
+  const goAxios = { get: async () => { throw new Error('go down'); } };
+  const h = makeFillsHarness(goAxios);
+  const logs = [];
+  h.state.on('agent_log', (d) => logs.push(d));
+
+  await h._emitFillsSummary(); // must not reject
+  assert.equal(logs.length, 0);
+});
