@@ -50,7 +50,14 @@ looks.
 - **No `close_managed_position` reconciliation in v1.** Close-type log rows store
   a `position_id` in the `symbol` field, not a tradable symbol, so they cannot be
   matched to broker orders by symbol. v1 reconciles order *placements* with a
-  real symbol (buys/sells/options). Documented limitation.
+  real symbol (buys/sells/options). **This is an asymmetry with teeth:** the
+  feature catches phantom *opens* but is blind to phantom *closes* — a logged
+  close that didn't execute leaves a live position the operator believes is flat,
+  which is arguably more dangerous than a phantom open. It is scoped out because
+  matching closes needs a different mechanism (position-state reconciliation, not
+  order matching) — making it the **top future extension**, not a permanent gap.
+  The report/banner states the scope explicitly (see §3) so the limitation is
+  visible at the point of reading.
 - **No auto-correction.** The job never edits the trade log or cancels/places
   orders. It reports; the operator reviews. (Mirrors the shared-account spec's
   "log + operator decides, never auto-pause" stance.)
@@ -70,8 +77,8 @@ job that does the I/O, a report writer, a read API, and the Trades-tab banner.
 ```
 readTrades(PROJECT_ROOT,{from,to,sandboxId})  ─┐   [agent/trades-store.js, existing]
                                                ├─▶ reconcileTrades(logged, broker)  [pure, new]
-goAxios GET /api/v1/orders?status=all  ────────┘            │ { mismatches, counts }
-   (equity + options, status + strategy tag)                │
+goAxios GET /orders?status=all&after=<ETdayStart> ─┘        │ { mismatches, counts }
+   (equity + options, status + strategy tag; day-scoped)    │
                                                 writeReconciliationReport(...)  [fs, new]
                                                   data/reconciliation/<sandboxId>/<ymd>.json + .md
                                                             │
@@ -96,15 +103,27 @@ New module `agent/trade-reconciliation.js`, exported for unit testing. No I/O.
   same sandbox's strategy (caller pre-filters by strategy tag and ET day).
 
 **Algorithm:** group both sides by `(symbol, side)`. Side normalization: logged
-`buy`/`sell` map to broker `buy`/`sell`. Within each group, an order is
-"accepted by the broker" when its status ∈ {`filled`, `partially_filled`,
-`accepted`, `new`, `pending_new`, `done_for_day`}; "rejected" when status ∈
-{`rejected`, `canceled`, `cancelled`, `expired`}. Then per group:
-- logged-`success` count > broker-accepted count, and broker has rejected orders
-  → **status divergence** (the success rows whose order didn't take).
-- logged-`success` count > 0 and broker has **no** matching order at all →
-  **phantom success**.
-- logged-`failed` count > 0 and broker-accepted count > 0 → **false failure**.
+`buy`/`sell` map to broker `buy`/`sell`. Each broker order is bucketed by status
+into exactly one of three states — **only terminal states drive a mismatch
+verdict**, so a still-in-flight order can never produce a confident-but-wrong
+flag:
+
+- **took** (terminal-success): `filled`, `partially_filled`, or `done_for_day`
+  with `filledQty > 0`.
+- **terminal-reject**: `rejected`, `canceled`, `cancelled`, `expired`.
+- **unresolved** (non-terminal): `new`, `accepted`, `pending_new`,
+  `pending_cancel`, `pending_replace`, `done_for_day` with `filledQty = 0`, or any
+  other status. These are **excluded from classification** and only counted in an
+  informational `unresolved` tally — never flagged. A logged `failed` sitting
+  against an unresolved order is deferred (it may still resolve to a reject,
+  which would vindicate the log), not called a false failure.
+
+Then per group, counting only `took` and `terminal-reject` orders:
+- logged-`success` count > 0 and the group has **no** `took`/`terminal-reject`
+  order at all → **phantom success**.
+- logged-`success` count > `took` count, and the group has `terminal-reject`
+  orders → **status divergence** (the success rows whose order didn't take).
+- logged-`failed` count > 0 and `took` count > 0 → **false failure**.
 - otherwise → matched/OK.
 
 Reporting is **group-level** when counts are ambiguous (e.g. "QQQ buy: 3 logged
@@ -113,7 +132,15 @@ group is unambiguous (1 logged ↔ 1 order). Each mismatch carries `class`,
 `symbol`, `side`, the contributing logged rows, and the contributing broker
 orders, so the report shows the evidence rather than a bare verdict.
 
-**Output:** `{ mismatches: [ {class, symbol, side, loggedTrades:[…], brokerOrders:[…], note} ], counts: { phantomSuccess, falseFailure, statusDivergence, matched, total } }`.
+`(symbol, side)` grouping is intentional and v1-sufficient: when an agent
+legitimately trades the same `(symbol, side)` twice in a day (a morning buy and an
+afternoon add), the count arithmetic still flags the correct *number* of
+mismatches and the evidence list still surfaces the offending broker orders — it
+only loses which-of-the-two precision, it does not mask a mismatch. If grouping
+noise shows up in practice, adding a coarse time-bucket to the key is the
+refinement; out of scope for v1.
+
+**Output:** `{ mismatches: [ {class, symbol, side, loggedTrades:[…], brokerOrders:[…], note} ], counts: { phantomSuccess, falseFailure, statusDivergence, unresolved, matched, total } }`.
 
 ### 2. Scheduler job — `trade_reconciliation`
 
@@ -124,10 +151,28 @@ after close (≈4:45 PM ET, after fills settle). For each sandbox with a
 1. Resolve the strategy tag (`resolvedAgent.strategyId`).
 2. `readTrades` for the ET day filtered to that `sandboxId`; keep order
    placements with a real symbol.
-3. Fetch broker orders via `goAxios` `GET /api/v1/orders?status=all`; keep those
-   whose parsed `Strategy` equals the sandbox's tag and whose `SubmittedAt` is on
-   the ET day.
+3. Fetch broker orders via `goAxios` `GET /api/v1/orders?status=all&after=<ET-day-start-ISO>`
+   (see §Day windowing and the `after` note in Implementation notes). Keep those
+   whose parsed `Strategy` equals the sandbox's tag and whose `SubmittedAt`
+   converts to the ET day. **Coverage guard:** if the fetch returns ≥ the server
+   limit (500) *and* the oldest returned `SubmittedAt` is after the ET-day start,
+   the window did not cover the whole day — declare incomplete coverage, write no
+   report for that sandbox/day, and log. (With the `after` scope this is a
+   belt-and-suspenders that effectively never trips, but it keeps the job honest
+   rather than emitting phantom-success false positives from a truncated list.)
 4. `reconcileTrades(...)`; `writeReconciliationReport(...)`.
+
+### Day windowing (date math)
+
+Both sides bucket to an ET **calendar** day using the same
+`America/New_York` `Intl.DateTimeFormat` conversion `trades-store._etDate`
+already uses for the logged side — **never** a UTC date slice. This matters for
+after-hours orders: a 20:00 ET order is `00:xx` UTC the next calendar day, so a
+UTC slice would misattribute it and turn a real order into a phantom success.
+Real orders never occur near ET midnight (the session spans ~04:00–20:00 ET), so
+beyond the after-hours/UTC seam there is no midnight edge case to enumerate. The
+`after` fetch bound is the ET-day-start instant computed the same way
+(`fills-summary.js` already has `startOfEtTradingDayIso` for exactly this).
 
 Untagged agents (empty `strategyId`) are skipped with a logged note — their
 orders carry no tag, so attribution would be ambiguous when more than one
@@ -141,6 +186,13 @@ In the reconciliation module (fs injected for tests). Writes
 `data/reconciliation/<sandboxId>/<ymd>.json` (machine-readable: date, sandboxId,
 agentName, strategy, generatedAt, counts, mismatches) and a `<ymd>.md` human
 summary. `utf-8` encoding (reports may carry symbols).
+
+The `.md` (and the banner's expanded view) must carry an explicit **scope line**
+so a clean result is not misread as "my positions match the broker": *"Covers
+order placements (opens/adds). Does NOT verify closes/exits or live position
+state — a logged-success close that didn't execute will not be caught here."*
+This is the asymmetry of the v1 non-goal below, stated where the operator reads
+the result.
 
 ### 4. Read API — `GET /api/reconciliation?date=&sandboxId=`
 
@@ -170,6 +222,12 @@ real fill — the group-level report shows the operator the evidence.
 
 - Soft-fail throughout (job, fetch, parse, write). Any failure logs and leaves
   no report for that sandbox/day → banner silent, not false.
+- **Incomplete broker coverage** (the §2 coverage guard) is treated as a
+  soft-fail: no report rather than a phantom-success-laden one. Silence is
+  correct here — a partial fetch cannot be reconciled honestly.
+- **Non-terminal orders never drive a verdict.** They are counted as `unresolved`
+  and left for the next day's run to resolve once the broker reaches a terminal
+  state. This is the core defense of the "never a wrong banner" north star.
 - Attribution: only sandboxes with a resolvable non-empty `strategyId` are
   reconciled; others are skipped with a logged note.
 - Idempotent per ET day; a retry overwrites the day's report.
@@ -179,7 +237,18 @@ real fill — the group-level report shows the operator the evidence.
 - **Unit — `reconcileTrades`** (pure, `node:test`): phantom success; false
   failure; status divergence; clean/all-matched; the ambiguous 3-logged-vs-2-broker
   group; empty inputs (no throw, zero counts); side/symbol grouping correctness;
-  partial_filled and accepted treated as "accepted."
+  `filled`/`partially_filled`/`done_for_day`(filled>0) treated as "took";
+  `rejected`/`canceled`/`expired` treated as terminal-reject.
+- **Unit — non-terminal handling:** a `pending_new`/`new`/`accepted` order is
+  counted as `unresolved` and never produces a phantom/false/divergence flag —
+  specifically, a logged `failed` against a `pending_new` order yields zero
+  mismatches (deferred). Pins the Point-2 decision.
+- **Unit — day windowing:** an order with `SubmittedAt` at 20:00 ET (which is the
+  next UTC calendar day) attributes to the correct ET day and matches its logged
+  trade — the test that would fail under a naive UTC slice.
+- **Unit — coverage guard:** a fetch at the 500 limit whose oldest `SubmittedAt`
+  is after ET-day-start yields "incomplete coverage / no report," not a
+  phantom-success report.
 - **Unit — `writeReconciliationReport`** with injected `fs`: correct path, JSON
   shape, and that a clean day still writes a zero-count report (so the API can
   distinguish "clean" from "not yet run").
@@ -191,12 +260,22 @@ real fill — the group-level report shows the operator the evidence.
 
 ## Implementation notes (resolved, not open)
 
-- **Broker data source:** reuse `GET /api/v1/orders?status=all`
-  (`HandleGetOrders` → `ListOrders(ctx,"all")`, `Limit 500`). Returns equity +
-  options orders (OCC symbol in `symbol`) with `status`, `filledQty`,
-  `submittedAt`, and `strategy` parsed from `client_order_id`. No Go change
-  anticipated; the 500-order recent window comfortably covers one sandbox-day. If
-  it ever proves insufficient, a thin Go `after=` param is the fallback.
+- **Broker data source:** `GET /api/v1/orders?status=all` (`HandleGetOrders` →
+  `ListOrders`, `Limit 500`) returns equity + options orders (OCC symbol in
+  `symbol`) with `status`, `filledQty`, `submittedAt`, and `strategy` parsed from
+  `client_order_id`. **One small Go addition:** support an `after` query param
+  scoping the Alpaca `GetOrdersRequest.After` to the ET-day start, so the fetch
+  returns only the day's orders deterministically rather than the 500
+  most-recent-ever (which can silently truncate before covering the day on a busy
+  multi-sandbox account, turning a starved sandbox's logged successes into
+  phantom-success false positives). The plan pins the exact plumbing (new
+  `after`-aware method vs. signature change, given `ListOrders` is shared with the
+  options stop monitor and fills summary). The coverage guard (§2) remains as a
+  safety net.
+- **Day attribution:** broker `SubmittedAt` → ET calendar day via the same
+  `America/New_York` `Intl` conversion as `trades-store._etDate`; `after` bound via
+  `fills-summary.startOfEtTradingDayIso`. Never UTC date slicing (after-hours
+  orders cross the UTC midnight boundary).
 - **Strategy attribution:** `agentConfig.strategyId` (the value the harness puts
   in `OPENPROPHET_STRATEGY`, encoded as `"{strategy}:{uuid}"` in
   `client_order_id`). Reconcile within tag.
@@ -210,4 +289,6 @@ real fill — the group-level report shows the operator the evidence.
 - Modify: `agent/analysis-scheduler.js` (register `trade_reconciliation` job +
   schedule gate), `agent/server.js` (read route), `agent/public/index.html`
   (banner).
-- No changes to `agent/trades-store.js` or the Go backend (anticipated).
+- One small Go change: an `after`-scoped orders fetch on the bot's orders
+  endpoint (see Implementation notes) — plumbing pinned in the plan.
+- No changes to `agent/trades-store.js`.
