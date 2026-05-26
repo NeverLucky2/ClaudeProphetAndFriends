@@ -91,7 +91,7 @@ With `days_of_history` currently at ~2, Harvest's LLM beats stay skipped until ~
 - Skips when `days_of_history < 20` and no open condors (mock `/api/v1/iv/SPY` → `{ days_of_history: 2, ... }`); assert `{ skip: true }` with the history reason.
 - Runs (does not skip on this gate) when `days_of_history ≥ 20`, falling through to the existing IV-RV / `skip:false` paths.
 - Fails open when `/api/v1/iv/SPY` errors (existing soft-fail behavior preserved).
-- Fails open when `days_of_history` is **present but malformed/missing** (e.g. `null`, `"abc"`): `Number(...)` → `NaN`, `Number.isFinite` is false, so the gate does not skip and the beat runs. This is a distinct code path from the fetch-error soft-fail above and gets its own case.
+- Fails open when `days_of_history` is **present but non-numeric** (e.g. `"abc"`) or **missing**: `Number(...)` → `NaN`, `Number.isFinite` is false, so the gate does not skip and the beat runs. (Coercion note: `Number(null)` is `0`, which *would* skip — but the Go endpoint serializes `days_of_history` as a plain `int` (`services/harvest_ivr_service.go`), so it is always an integer in practice; `0` correctly represents zero history and tripping the warm-up skip is the intended behavior. The non-numeric-string case is a defensive guard for an input the endpoint cannot actually emit.) Distinct code path from the fetch-error soft-fail above; gets its own case.
 - Existing open-condor / FOMC / chain-probe cases continue to pass unchanged.
 
 ### Known limitation — warm-up relief only
