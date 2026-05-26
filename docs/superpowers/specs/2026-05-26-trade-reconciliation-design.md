@@ -77,8 +77,8 @@ job that does the I/O, a report writer, a read API, and the Trades-tab banner.
 ```
 readTrades(PROJECT_ROOT,{from,to,sandboxId})  ─┐   [agent/trades-store.js, existing]
                                                ├─▶ reconcileTrades(logged, broker)  [pure, new]
-goAxios GET /orders?status=all&after=<ETdayStart> ─┘        │ { mismatches, counts }
-   (equity + options, status + strategy tag; day-scoped)    │
+goAxios GET /orders?status=all  ───────────────────┘        │ { mismatches, counts }
+   (equity + options, status + strategy tag)                │  Node filters to ET day + coverage guard
                                                 writeReconciliationReport(...)  [fs, new]
                                                   data/reconciliation/<sandboxId>/<ymd>.json + .md
                                                             │
@@ -151,15 +151,16 @@ after close (≈4:45 PM ET, after fills settle). For each sandbox with a
 1. Resolve the strategy tag (`resolvedAgent.strategyId`).
 2. `readTrades` for the ET day filtered to that `sandboxId`; keep order
    placements with a real symbol.
-3. Fetch broker orders via `goAxios` `GET /api/v1/orders?status=all&after=<ET-day-start-ISO>`
-   (see §Day windowing and the `after` note in Implementation notes). Keep those
+3. Fetch broker orders via `goAxios` `GET /api/v1/orders?status=all`. Keep those
    whose parsed `Strategy` equals the sandbox's tag and whose `SubmittedAt`
-   converts to the ET day. **Coverage guard:** if the fetch returns ≥ the server
-   limit (500) *and* the oldest returned `SubmittedAt` is after the ET-day start,
-   the window did not cover the whole day — declare incomplete coverage, write no
-   report for that sandbox/day, and log. (With the `after` scope this is a
-   belt-and-suspenders that effectively never trips, but it keeps the job honest
-   rather than emitting phantom-success false positives from a truncated list.)
+   converts to the ET day (see §Day windowing). **Coverage guard:** if the fetch
+   returns ≥ the server limit (500) *and* the oldest returned `SubmittedAt` is
+   after the ET-day start, the 500-most-recent window did not reach back to cover
+   the whole day — declare incomplete coverage, write no report for that
+   sandbox/day, and log. This trades a wrong phantom-success report for an honest
+   silence. (At current volumes 500 spans several days, so this never trips; if
+   daily order volume ever approaches 500, the future enhancement is a
+   deterministic `after`-scoped fetch — see Implementation notes.)
 4. `reconcileTrades(...)`; `writeReconciliationReport(...)`.
 
 ### Day windowing (date math)
@@ -171,8 +172,8 @@ after-hours orders: a 20:00 ET order is `00:xx` UTC the next calendar day, so a
 UTC slice would misattribute it and turn a real order into a phantom success.
 Real orders never occur near ET midnight (the session spans ~04:00–20:00 ET), so
 beyond the after-hours/UTC seam there is no midnight edge case to enumerate. The
-`after` fetch bound is the ET-day-start instant computed the same way
-(`fills-summary.js` already has `startOfEtTradingDayIso` for exactly this).
+ET-day-start instant used for the coverage guard is computed the same way
+(`fills-summary.js` already exports `startOfEtTradingDayIso` for exactly this).
 
 Untagged agents (empty `strategyId`) are skipped with a logged note — their
 orders carry no tag, so attribution would be ambiguous when more than one
@@ -260,22 +261,21 @@ real fill — the group-level report shows the operator the evidence.
 
 ## Implementation notes (resolved, not open)
 
-- **Broker data source:** `GET /api/v1/orders?status=all` (`HandleGetOrders` →
-  `ListOrders`, `Limit 500`) returns equity + options orders (OCC symbol in
-  `symbol`) with `status`, `filledQty`, `submittedAt`, and `strategy` parsed from
-  `client_order_id`. **One small Go addition:** support an `after` query param
-  scoping the Alpaca `GetOrdersRequest.After` to the ET-day start, so the fetch
-  returns only the day's orders deterministically rather than the 500
-  most-recent-ever (which can silently truncate before covering the day on a busy
-  multi-sandbox account, turning a starved sandbox's logged successes into
-  phantom-success false positives). The plan pins the exact plumbing (new
-  `after`-aware method vs. signature change, given `ListOrders` is shared with the
-  options stop monitor and fills summary). The coverage guard (§2) remains as a
-  safety net.
+- **Broker data source:** reuse `GET /api/v1/orders?status=all` as-is
+  (`HandleGetOrders` → `ListOrders`, `Limit 500`). Returns equity + options orders
+  (OCC symbol in `symbol`) with `status`, `filledQty`, `submittedAt`, and
+  `strategy` parsed from `client_order_id`. **No Go/backend change in v1** — the
+  Node job filters the returned orders to the ET day and relies on the coverage
+  guard (§2) for the rare truncation case. *Deferred future enhancement:* an
+  `after` query param scoping `GetOrdersRequest.After` to the ET-day start would
+  give deterministic day coverage (so the job stays functional rather than going
+  silent if daily volume ever approaches 500). Deferred because `ListOrders` is a
+  shared interface (options stop monitor, fills summary, two routes, three test
+  mocks) and the churn is not justified at current volumes.
 - **Day attribution:** broker `SubmittedAt` → ET calendar day via the same
-  `America/New_York` `Intl` conversion as `trades-store._etDate`; `after` bound via
-  `fills-summary.startOfEtTradingDayIso`. Never UTC date slicing (after-hours
-  orders cross the UTC midnight boundary).
+  `America/New_York` `Intl` conversion as `trades-store._etDate`; the guard's
+  day-start instant via `fills-summary.startOfEtTradingDayIso`. Never UTC date
+  slicing (after-hours orders cross the UTC midnight boundary).
 - **Strategy attribution:** `agentConfig.strategyId` (the value the harness puts
   in `OPENPROPHET_STRATEGY`, encoded as `"{strategy}:{uuid}"` in
   `client_order_id`). Reconcile within tag.
@@ -289,6 +289,6 @@ real fill — the group-level report shows the operator the evidence.
 - Modify: `agent/analysis-scheduler.js` (register `trade_reconciliation` job +
   schedule gate), `agent/server.js` (read route), `agent/public/index.html`
   (banner).
-- One small Go change: an `after`-scoped orders fetch on the bot's orders
-  endpoint (see Implementation notes) — plumbing pinned in the plan.
+- No Go/backend change in v1 (reuses the existing `/api/v1/orders` endpoint); the
+  deterministic `after`-scoped fetch is a deferred enhancement.
 - No changes to `agent/trades-store.js`.
