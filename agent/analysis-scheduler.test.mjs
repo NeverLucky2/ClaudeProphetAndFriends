@@ -14,6 +14,7 @@ import {
   buildFetchBreadthArgv,
   breadthResultToRegimeInput,
   resolveOpencodeModel,
+  isTradingDay,
   buildBreadthSkillAppendix,
   buildMarketTopSkillAppendix,
   buildBubbleSkillAppendix,
@@ -171,6 +172,15 @@ test('breadthResultToRegimeInput throws on missing/non-numeric uptrend_ratio', (
   assert.throws(() => breadthResultToRegimeInput({}), /uptrend_ratio/);
   assert.throws(() => breadthResultToRegimeInput({ uptrend_ratio: 'NaN' }), /uptrend_ratio/);
   assert.throws(() => breadthResultToRegimeInput(null), /uptrend_ratio/);
+});
+
+// ── Commit 2: holiday-gate the regime-input chain ──────────────────
+
+test('isTradingDay is true only on a non-holiday weekday', () => {
+  assert.equal(isTradingDay({ isWeekday: true, isHoliday: false }), true);
+  assert.equal(isTradingDay({ isWeekday: true, isHoliday: true }), false);   // market holiday
+  assert.equal(isTradingDay({ isWeekday: false, isHoliday: false }), false); // weekend
+  assert.equal(isTradingDay({ isWeekday: false, isHoliday: true }), false);
 });
 
 test('buildBreadthSkillAppendix directs LLM to write breadth_<date>.json with current_value_percent', () => {

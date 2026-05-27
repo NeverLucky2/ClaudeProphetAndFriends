@@ -35,6 +35,7 @@ import {
   injectFreshnessFields,
   briefAsOfETDate,
 } from './daily-brief-freshness.js';
+import { isMarketHoliday } from './market-calendar.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(__dirname, '..');
@@ -155,6 +156,20 @@ export function breadthResultToRegimeInput(parsed) {
 export function resolveOpencodeModel(model) {
   if (!model) return null;
   return model.includes('/') ? model : `anthropic/${model}`;
+}
+
+/**
+ * True on a normal trading weekday — a weekday that is NOT a full-close US
+ * market holiday. _checkSchedule and runStartupChecks gate the pre-market
+ * regime-input chain (the four upstream skills + regime_gate_compute) on this so
+ * they don't burn spend on market holidays, when the market is shut and nothing
+ * consults the gate that day. The caller supplies the ET-correct isWeekday flag
+ * (weekend detection); isHoliday comes from isMarketHoliday (ET calendar date).
+ * Pure — exported for tests. Mirrors the holiday-aware gating already applied to
+ * agent heartbeats (harness phase logic + preflight isClosedPhase).
+ */
+export function isTradingDay({ isWeekday, isHoliday }) {
+  return Boolean(isWeekday) && !isHoliday;
 }
 
 /**
@@ -447,6 +462,7 @@ export class AnalysisScheduler extends EventEmitter {
     const isoDate = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
     const { hour, dayOfWeek } = this._getETInfo();
     const isWeekday = dayOfWeek >= 1 && dayOfWeek <= 5;
+    const tradingDay = isTradingDay({ isWeekday, isHoliday: isMarketHoliday(new Date()) });
     let adaptNeeded = false;
 
     // 1. Daily briefing — read the stable daily_brief.json and check its
@@ -484,7 +500,7 @@ export class AnalysisScheduler extends EventEmitter {
     // ET) so the four input JSONs are present when step 1.5 (regime_gate_compute)
     // fires next. Sequential so the LLM-driven ones don't fight over the
     // _activeJob mutex.
-    if (isWeekday && hour < 16) {
+    if (tradingDay && hour < 16) {
       if (this._lastMacroRegimeDate !== isoDate) {
         if (await this._isLocked(this._getLockKey('macro_regime_skill', isoDate))) {
           this._log('macro_regime_skill already running in another process — skipping startup trigger.', 'info');
@@ -523,7 +539,7 @@ export class AnalysisScheduler extends EventEmitter {
     // was offline at the 5:50 AM ET scheduled trigger. Heals up to market close
     // (4 PM ET) so the gate is fresh even on mid-day restarts; agents read it
     // on every heartbeat.
-    if (isWeekday && hour < 16 && this._lastRegimeGateDate !== isoDate) {
+    if (tradingDay && hour < 16 && this._lastRegimeGateDate !== isoDate) {
       if (await this._isLocked(this._getLockKey('regime_gate_compute', isoDate))) {
         this._log('Regime gate compute already running in another process — skipping startup trigger.', 'info');
       } else {
@@ -1082,6 +1098,9 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
     const isWeekday = dayOfWeek >= 1 && dayOfWeek <= 5;
     const isMonday = dayOfWeek === 1;
     const isSunday = dayOfWeek === 0;
+    // Holiday-aware gate for the pre-market regime-input chain (5:00 skills +
+    // 5:50 compute) only — other jobs keep their existing isWeekday gating.
+    const tradingDay = isTradingDay({ isWeekday, isHoliday: isMarketHoliday(new Date()) });
     const dayOfMonth = Number(isoDate.split('-')[2]);
     const monthOfYear = Number(isoDate.split('-')[1]);
     const isQuarterStartMonth = monthOfYear === 1 || monthOfYear === 4 || monthOfYear === 7 || monthOfYear === 10;
@@ -1095,7 +1114,7 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
     // each gets a 15-min timeout. Worst-case the chain finishes by ~5:46 —
     // still inside the 5:50 deadline. If something stalls, regime_gate_compute
     // fail-softs (and the 36h input-freshness window covers yesterday's file).
-    if (isWeekday && hour === 5 && minute === 0) {
+    if (tradingDay && hour === 5 && minute === 0) {
       if (this._lastMacroRegimeDate !== isoDate) await this.triggerJob('macro_regime_skill').catch(() => {});
       if (this._lastBreadthDate !== isoDate)     await this.triggerJob('breadth_skill').catch(() => {});
       if (this._lastMarketTopDate !== isoDate)   await this.triggerJob('market_top_skill').catch(() => {});
@@ -1106,7 +1125,7 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
     // briefing can reference a fresh regime_gate.json. The script fails
     // soft on missing upstream inputs (writes neutral 50), so this is safe
     // even when the four upstream skills haven't run yet.
-    if (isWeekday && hour === 5 && minute === 50 && this._lastRegimeGateDate !== isoDate) {
+    if (tradingDay && hour === 5 && minute === 50 && this._lastRegimeGateDate !== isoDate) {
       await this.triggerJob('regime_gate_compute').catch(() => {});
     }
 
