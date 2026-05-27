@@ -1045,6 +1045,16 @@ func (pm *PositionManager) CloseManagedPosition(ctx context.Context, positionID 
 // Helper functions
 
 func (pm *PositionManager) validateRequest(req *PlaceManagedPositionRequest) error {
+	// Managed positions are equity-only. Sizing assumes 1 unit = 1 share (no
+	// ×100 options multiplier), entries go through the stock order path, and the
+	// stock quote endpoint returns HTTP 400 "invalid symbol" for OCC symbols.
+	// Reject options up front with a clear pointer instead of oversizing ~100x
+	// or failing deep in the price fetch (observed: Prophet QQQ260717C00728000,
+	// 2026-05-27). Prophet's options entries go through place_options_order.
+	if IsOptionSymbol(req.Symbol) {
+		return fmt.Errorf("managed positions are equity-only; %q is an option — use place_options_order for options entries", req.Symbol)
+	}
+
 	if req.Side != "buy" && req.Side != "sell" {
 		return fmt.Errorf("side must be 'buy' or 'sell'")
 	}
