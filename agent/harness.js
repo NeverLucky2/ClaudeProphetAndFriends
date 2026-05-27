@@ -322,6 +322,10 @@ export class AgentHarness {
     this._emergencyQueued = null;
     this._emergencyReason = null;
     this._lastBeatPhase = null; // tracked across beats for sessionMode='daily' boundary detection
+    // Wall-clock of the last beat that EVALUATED position exits (heartbeat or
+    // emergency — NOT message beats). Feeds the bounded-staleness skip cap.
+    // 0 = "long ago" so the first beat after start/daily-reset always runs.
+    this._lastExitEvalBeatAt = 0;
   }
 
   _resolveSandbox() {
@@ -382,6 +386,7 @@ export class AgentHarness {
     this.state.beatCount = 0;
     this.state.recentTrades = [];
     this._sessionId = null;
+    this._lastExitEvalBeatAt = 0;
 
     const account = this._resolveAccount();
     const model = this.state.activeModel;
@@ -904,6 +909,7 @@ ${userBlock}`;
       });
       this._sessionId = null;
       this._sessionEpoch += 1;
+      this._lastExitEvalBeatAt = 0;
     }
     this._lastBeatPhase = phase;
 
@@ -927,13 +933,15 @@ ${userBlock}`;
     if (!isEmergency) {
       const strategyId = this._agentConfig?.strategyId;
       const runtime = this.getRuntime ? this.getRuntime(this.sandboxId) : null;
-      const preflight = await resolvePreflight(strategyId, runtime, this._agentConfig);
+      const preflight = await resolvePreflight(strategyId, runtime, this._agentConfig, {
+        sinceLastExitEvalMs: this._lastExitEvalBeatAt ? (Date.now() - this._lastExitEvalBeatAt) : Infinity,
+      });
       if (preflight.skip) {
         this.state.emit('agent_log', {
           message: `Beat #${beatNum} skipped (preflight): ${preflight.reason}`,
           level: 'info',
         });
-        this.state.emit('beat_skip', { beat: beatNum, phase, reason: preflight.reason });
+        this.state.emit('beat_skip', { beat: beatNum, phase, reason: preflight.reason, gate: preflight.gate ?? null });
         this.state.stats.skippedBeats = (this.state.stats.skippedBeats || 0) + 1;
         this.state.emit('beat_end', { beat: beatNum, phase, skipped: true });
         this._beating = false;
@@ -953,6 +961,11 @@ ${userBlock}`;
         level: 'debug',
       });
     }
+
+    // A heartbeat (or emergency) beat is now committed to run the LLM — it WILL
+    // evaluate position exits. Stamp the staleness clock. Message beats use a
+    // separate path (_adHocBeat) and intentionally do not stamp this.
+    this._lastExitEvalBeatAt = Date.now();
 
     // Guardrails are baked into the system prompt by reloadConfig() — sent
     // once per session instead of every beat. When permissions change,
