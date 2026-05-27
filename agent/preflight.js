@@ -344,7 +344,7 @@ async function prophetPreflight(runtime, agentConfig, opts = {}) {
   }
   const econBlackout = econSettled.status !== 'fulfilled'
     || econSettled.value?.blackout === true
-    || Boolean(econSettled.value?.error);
+    || econSettled.value?.error != null;
 
   const decision = decideHoldingSkip({
     positions,

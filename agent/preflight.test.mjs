@@ -1152,3 +1152,40 @@ test('prophetPreflight flat (no positions) → existing flat path (skip false, r
   assert.equal(r.skip, false); // no regime block / no blackout → runs
   delete process.env.PROPHET_HOLDING_SKIP_ENABLED;
 });
+
+test('prophetPreflight holding: enabled + interior + quiet but stale (700s) → run, gate=staleness', async () => {
+  process.env.PROPHET_HOLDING_SKIP_ENABLED = 'true';
+  const rt = makeProphetRuntime({ positions: HELD, signals: quietSignals });
+  const r = await withFrozenTime(ET_OPEN, () =>
+    resolvePreflight('v2-options', rt, PROPHET_CFG, { sinceLastExitEvalMs: 700_000 })
+  );
+  assert.equal(r.skip, false);
+  assert.equal(r.gate, 'staleness');
+  delete process.env.PROPHET_HOLDING_SKIP_ENABLED;
+});
+
+test('prophetPreflight holding: enabled + interior + quiet but no sinceLastExitEvalMs (production-until-harness) → run, gate=staleness', async () => {
+  // Bare opts (no sinceLastExitEvalMs) → defaults to Infinity in prophetPreflight
+  // → staleness gate fires because !(Infinity < maxStalenessMs).
+  process.env.PROPHET_HOLDING_SKIP_ENABLED = 'true';
+  const rt = makeProphetRuntime({ positions: HELD, signals: quietSignals });
+  const r = await withFrozenTime(ET_OPEN, () =>
+    resolvePreflight('v2-options', rt, PROPHET_CFG, {})
+  );
+  assert.equal(r.skip, false);
+  assert.equal(r.gate, 'staleness');
+  delete process.env.PROPHET_HOLDING_SKIP_ENABLED;
+});
+
+test('prophetPreflight holding: enabled + interior + fresh but underlying active → run, gate=not_quiet', async () => {
+  // TSLA signal has rvol=3.0 (> 2.0 threshold) → not quiet → run.
+  process.env.PROPHET_HOLDING_SKIP_ENABLED = 'true';
+  const activeSignals = [{ symbol: 'TSLA', dist_from_vwap_pct: 0.2, rvol: 3.0, range_over_atr: 0.7, day_change_pct: 0.5 }];
+  const rt = makeProphetRuntime({ positions: HELD, signals: activeSignals });
+  const r = await withFrozenTime(ET_OPEN, () =>
+    resolvePreflight('v2-options', rt, PROPHET_CFG, { sinceLastExitEvalMs: 60_000 })
+  );
+  assert.equal(r.skip, false);
+  assert.equal(r.gate, 'not_quiet');
+  delete process.env.PROPHET_HOLDING_SKIP_ENABLED;
+});

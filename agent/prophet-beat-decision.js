@@ -78,9 +78,10 @@ export function decideHoldingSkip({
   }
   // `!(a < b)` rather than `a >= b` so a NaN staleness lands on run, not skip.
   if (!(sinceLastExitEvalMs < maxStalenessMs)) {
+    const staleMin = Number.isFinite(sinceLastExitEvalMs) ? Math.round(sinceLastExitEvalMs / 60000) : '∞';
     return {
       skip: false, gate: 'staleness',
-      reason: `staleness ${Math.round((sinceLastExitEvalMs || 0) / 60000)}m ≥ cap ${Math.round(maxStalenessMs / 60000)}m`,
+      reason: `staleness ${staleMin}m ≥ cap ${Math.round(maxStalenessMs / 60000)}m`,
     };
   }
   for (const p of positions) {
