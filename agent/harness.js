@@ -12,6 +12,7 @@ import { isMarketHoliday } from './market-calendar.js';
 import { renderIntradayBlock, shouldInjectIntraday } from './intraday-prompt.js';
 import { fetchBeatContext, renderBeatContextBlock } from './beat-context.js';
 import { fetchFillsSummary, renderFillsSummaryLine, startOfEtTradingDayIso } from './fills-summary.js';
+import { extractTokenDelta, formatBeatCostLine } from './beat-cost.js';
 import { resolveAllowedTools } from './tool-allowlists.js';
 import { resolveStrategyRules, computeStrategyVersion, buildVersionMarker, writeVersionMarker } from '../scripts/strategy-version.mjs';
 
@@ -1173,7 +1174,7 @@ ${userBlock}`;
       let sessionId = null;
       let buffer = '';
       let totalCost = 0;
-      let totalTokens = 0;
+      const tok = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
       let ocError = null;
 
       const makeCtx = () => ({
@@ -1181,7 +1182,10 @@ ${userBlock}`;
         addText: (t) => { fullText += t; },
         setSession: (id) => { sessionId = id; },
         addCost: (c) => { totalCost += c; },
-        addTokens: (t) => { totalTokens += t; },
+        addTokenDelta: (d) => {
+          tok.input += d.input; tok.output += d.output;
+          tok.cacheRead += d.cacheRead; tok.cacheWrite += d.cacheWrite;
+        },
         setError: (e) => { ocError = e; },
       });
 
@@ -1224,9 +1228,13 @@ ${userBlock}`;
           } catch {}
         }
 
-        if (totalCost > 0) {
+        const tokenTotal = tok.input + tok.output + tok.cacheRead + tok.cacheWrite;
+        if (totalCost > 0 || tokenTotal > 0) {
           this.state.emit('agent_log', {
-            message: `Beat cost: $${totalCost.toFixed(4)} | Tokens: ${totalTokens}`,
+            message: formatBeatCostLine({
+              cost: totalCost, input: tok.input, output: tok.output,
+              cacheRead: tok.cacheRead, cacheWrite: tok.cacheWrite,
+            }),
             level: 'info',
           });
         }
@@ -1352,7 +1360,7 @@ ${userBlock}`;
       case 'step_finish': {
         const part = event.part || {};
         if (part.cost) ctx.addCost(part.cost);
-        if (part.tokens?.total) ctx.addTokens(part.tokens.total);
+        ctx.addTokenDelta(extractTokenDelta(part.tokens));
         break;
       }
 
