@@ -152,6 +152,41 @@ const TREND_SIGNALS = ['get_trend_signal'];
 const MEANREV_SIGNALS = ['get_mean_reversion_candidates', 'get_mean_reversion_signal'];
 const DRIFT_SIGNALS = ['get_earnings_drift_candidates', 'get_earnings_drift_signal'];
 
+// Tools cut from Prophet's discretionary kit to shrink the per-beat cached prompt
+// prefix. opencode hardcodes a 5-minute cache TTL (no config knob in 1.14.x/1.15.x),
+// so every beat spaced past 5 min — pre_market (15m), after_hours (2h), or any
+// self-overridden long interval — cold-rewrites the whole prefix at 1.25x instead
+// of reading it at 0.1x. Fewer tool schemas = a cheaper cold rewrite on every such
+// beat. Cut targets are pure redundancy/foreign-fit, NOT capability Prophet relies on:
+//   - duplicate news/intel feeds: Prophet's heartbeat is told to use
+//     get_marketwatch_bulletins + get_quick_market_intelligence, and reads the
+//     pre-baked daily_brief via read_latest_report; get_market_news is kept as the
+//     one general fallback. The other 11 feeds overlap these.
+//   - equity-swing screeners: Prophet trades options on liquid mega-caps, not VCP/
+//     PEAD equity bases, so these never inform its setups.
+// These remain in ALL_TOOLS/the live catalog (mcp-server.js still registers them);
+// they're simply exposed to no agent's ListTools. Modeled as an exclusion set, not an
+// enumerated allowlist, so new generic server tools still auto-flow to Prophet.
+const PROPHET_TRIM = [
+  // duplicate news / intelligence feeds
+  'aggregate_and_summarize_news',
+  'get_cleaned_news',
+  'get_marketwatch_all',
+  'get_marketwatch_marketpulse',
+  'get_marketwatch_realtime',
+  'get_marketwatch_topstories',
+  'get_news',
+  'get_news_by_topic',
+  'get_news_summary',
+  'list_news_summaries',
+  'search_news',
+  // equity-swing screeners — foreign to an options-on-mega-caps strategy
+  'run_vcp_screener',
+  'run_pead_screener',
+  'find_similar_setups',
+  'store_trade_setup',
+];
+
 // Manager/orchestration tools — agents reconfigure neither themselves nor peers.
 export const MANAGER_TOOLS = [
   'create_agent',
@@ -169,9 +204,9 @@ function uniq(list) {
 }
 
 // Prophet (v2-options) is the broad discretionary agent: everything EXCEPT the
-// five mechanical strategies' exclusive signal/condor endpoints and the manager
-// tools. Computed (not enumerated) so any new generic server tool added to
-// ALL_TOOLS flows to Prophet automatically.
+// five mechanical strategies' exclusive signal/condor endpoints, the manager
+// tools, and the PROPHET_TRIM cost redundancies. Computed (not enumerated) so any
+// new generic server tool added to ALL_TOOLS still flows to Prophet automatically.
 const NON_PROPHET = new Set([
   ...PENNY_SIGNALS,
   ...HARVEST_TOOLS,
@@ -179,6 +214,7 @@ const NON_PROPHET = new Set([
   ...MEANREV_SIGNALS,
   ...DRIFT_SIGNALS,
   ...MANAGER_TOOLS,
+  ...PROPHET_TRIM,
 ]);
 
 export const STRATEGY_TOOL_ALLOWLISTS = {
@@ -226,5 +262,6 @@ export const _internals = {
   TREND_SIGNALS,
   MEANREV_SIGNALS,
   DRIFT_SIGNALS,
+  PROPHET_TRIM,
   ALL_SET,
 };

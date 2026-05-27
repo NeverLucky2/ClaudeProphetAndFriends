@@ -118,13 +118,20 @@ test('Prophet (v2-options) is broad but excludes other strategies signals + mana
   for (const mgr of MANAGER_TOOLS) {
     assert.ok(!prophet.has(mgr), `Prophet must not expose manager tool "${mgr}"`);
   }
-  // Keeps the discretionary kit (news, options, scalping, reports, heartbeat control).
-  for (const tool of ['get_market_news', 'get_options_chain', 'place_options_order', 'get_intraday_signals', 'run_vcp_screener', 'read_latest_report', 'set_heartbeat', 'apply_heartbeat_profile']) {
+  // Keeps the discretionary kit (its mandated news path, options, scalping,
+  // reports, heartbeat control). get_market_news is the one general news fallback
+  // kept after the PROPHET_TRIM cut.
+  for (const tool of ['get_market_news', 'get_quick_market_intelligence', 'get_marketwatch_bulletins', 'get_options_chain', 'place_options_order', 'get_intraday_signals', 'read_latest_report', 'set_heartbeat', 'apply_heartbeat_profile']) {
     assert.ok(prophet.has(tool), `Prophet should expose discretionary tool "${tool}"`);
   }
-  // Size sanity: catalog - 15 exclusive - 8 manager. Computed off ALL_TOOLS.length
-  // so it tracks catalog growth (e.g. get_tradable_universe, a generic Prophet tool).
-  assert.equal(STRATEGY_TOOL_ALLOWLISTS['v2-options'].length, ALL_TOOLS.length - 15 - MANAGER_TOOLS.length);
+  // Excludes the PROPHET_TRIM cost redundancies (duplicate news feeds + foreign
+  // equity-swing screeners) — these are now exposed to no agent.
+  for (const tool of _internals.PROPHET_TRIM) {
+    assert.ok(!prophet.has(tool), `Prophet must not expose trimmed tool "${tool}"`);
+  }
+  // Size sanity: catalog - 15 exclusive - 8 manager - PROPHET_TRIM. Computed off
+  // ALL_TOOLS.length so it tracks catalog growth (e.g. a new generic Prophet tool).
+  assert.equal(STRATEGY_TOOL_ALLOWLISTS['v2-options'].length, ALL_TOOLS.length - 15 - MANAGER_TOOLS.length - _internals.PROPHET_TRIM.length);
 });
 
 test('resolveAllowedTools: non-empty sandbox override wins', () => {
