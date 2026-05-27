@@ -32,6 +32,7 @@ import {
 } from './config-store.js';
 import { appendTrade, readTrades } from './trades-store.js';
 import { fetchFillsSummary, renderFillsSummaryLine, startOfEtTradingDayIso } from './fills-summary.js';
+import { SSE_KEEPALIVE_MS, sendSseKeepalive } from './sse-keepalive.js';
 import { runReconciliationForSandbox, readReconciliationSummary } from './trade-reconciliation.js';
 import nodeFs from 'node:fs/promises';
 
@@ -126,6 +127,15 @@ function broadcast(event, data) {
     client.write(msg);
   }
 }
+
+// Keep idle SSE connections warm. A quiet agent (the steady state after the
+// regime / beat cost reductions) sends no events, so the browser/OS/proxy drops
+// the idle stream; the dashboard then reconnects and re-fires the connect-time
+// fills recap — the cause of duplicate "N fills today" lines. A periodic comment
+// frame prevents the idle-out. See sse-keepalive.js. unref() so the timer never
+// keeps the process alive during shutdown.
+const _sseKeepaliveTimer = setInterval(() => sendSseKeepalive(sseClients), SSE_KEEPALIVE_MS);
+_sseKeepaliveTimer.unref?.();
 
 const EVENTS = [
   'status', 'agent_log', 'agent_text', 'beat_start', 'beat_end',
