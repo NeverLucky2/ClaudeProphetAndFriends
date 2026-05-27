@@ -1053,3 +1053,102 @@ test('harvest: expirations network error (no response object) → run (fail open
   assert.equal(r.skip, false);
   assert.match(r.reason, /harvest chain probe error/);
 });
+
+// ── prophetPreflight holding-skip integration (Task 6) ────────────
+//
+// Tests run under open-phase time (ET_OPEN = Thu 14:30 ET) to ensure the
+// closed-phase branch of prophetPreflight is not taken. Time is frozen via
+// withFrozenTime so these tests are deterministic regardless of wall clock.
+//
+// The runtime helper dispatches goAxios.get by URL prefix. sinceLastExitEvalMs
+// is passed as opts (4th arg) to resolvePreflight — not read from runtime.
+
+function makeProphetRuntime({ positions, signals, blackout = { is_blackout: false } }) {
+  return {
+    goAxios: {
+      get: async (url) => {
+        if (url.startsWith('/api/v1/positions')) return { data: positions };
+        if (url.startsWith('/api/v1/intraday/signals')) {
+          if (signals instanceof Error) throw signals;
+          return { data: { signals } };
+        }
+        if (url.startsWith('/api/v1/econ/blackout')) return { data: blackout };
+        if (url.startsWith('/api/v1/regime-gate/status')) return { data: { block_new_entries: false } };
+        throw new Error(`unexpected url: ${url}`);
+      },
+    },
+  };
+}
+
+const PROPHET_CFG = { strategyId: 'v2-options' };
+const HELD = [{ Symbol: 'TSLA260529C00442500', UnrealizedPLPC: 5 }];
+const quietSignals = [{ symbol: 'TSLA', dist_from_vwap_pct: 0.2, rvol: 1.0, range_over_atr: 0.7, day_change_pct: 0.5 }];
+
+test('prophetPreflight holding: enabled + interior + quiet + fresh → skip', async () => {
+  process.env.PROPHET_HOLDING_SKIP_ENABLED = 'true';
+  const rt = makeProphetRuntime({ positions: HELD, signals: quietSignals });
+  const r = await withFrozenTime(ET_OPEN, () =>
+    resolvePreflight('v2-options', rt, PROPHET_CFG, { sinceLastExitEvalMs: 60_000 })
+  );
+  assert.equal(r.skip, true);
+  assert.equal(r.gate, null);
+  delete process.env.PROPHET_HOLDING_SKIP_ENABLED;
+});
+
+test('prophetPreflight holding: flag OFF → always runs (today behavior)', async () => {
+  delete process.env.PROPHET_HOLDING_SKIP_ENABLED;
+  const rt = makeProphetRuntime({ positions: HELD, signals: quietSignals });
+  const r = await withFrozenTime(ET_OPEN, () =>
+    resolvePreflight('v2-options', rt, PROPHET_CFG, { sinceLastExitEvalMs: 60_000 })
+  );
+  assert.equal(r.skip, false);
+});
+
+test('prophetPreflight holding: enabled but position near boundary → run', async () => {
+  process.env.PROPHET_HOLDING_SKIP_ENABLED = 'true';
+  const rt = makeProphetRuntime({
+    positions: [{ Symbol: 'TSLA260529C00442500', UnrealizedPLPC: -12 }],
+    signals: quietSignals,
+  });
+  const r = await withFrozenTime(ET_OPEN, () =>
+    resolvePreflight('v2-options', rt, PROPHET_CFG, { sinceLastExitEvalMs: 60_000 })
+  );
+  assert.equal(r.skip, false);
+  assert.equal(r.gate, 'near_stop');
+  delete process.env.PROPHET_HOLDING_SKIP_ENABLED;
+});
+
+test('prophetPreflight holding: enabled but econ blackout → run', async () => {
+  process.env.PROPHET_HOLDING_SKIP_ENABLED = 'true';
+  const rt = makeProphetRuntime({
+    positions: HELD,
+    signals: quietSignals,
+    blackout: { is_blackout: true, reason: 'CPI' },
+  });
+  const r = await withFrozenTime(ET_OPEN, () =>
+    resolvePreflight('v2-options', rt, PROPHET_CFG, { sinceLastExitEvalMs: 60_000 })
+  );
+  assert.equal(r.skip, false);
+  assert.equal(r.gate, 'econ_blackout');
+  delete process.env.PROPHET_HOLDING_SKIP_ENABLED;
+});
+
+test('prophetPreflight holding: enabled, intraday fetch throws → run (fail toward run)', async () => {
+  process.env.PROPHET_HOLDING_SKIP_ENABLED = 'true';
+  const rt = makeProphetRuntime({ positions: HELD, signals: new Error('timeout') });
+  const r = await withFrozenTime(ET_OPEN, () =>
+    resolvePreflight('v2-options', rt, PROPHET_CFG, { sinceLastExitEvalMs: 60_000 })
+  );
+  assert.equal(r.skip, false);
+  delete process.env.PROPHET_HOLDING_SKIP_ENABLED;
+});
+
+test('prophetPreflight flat (no positions) → existing flat path (skip false, regime ok)', async () => {
+  process.env.PROPHET_HOLDING_SKIP_ENABLED = 'true';
+  const rt = makeProphetRuntime({ positions: [], signals: [] });
+  const r = await withFrozenTime(ET_OPEN, () =>
+    resolvePreflight('v2-options', rt, PROPHET_CFG, { sinceLastExitEvalMs: 60_000 })
+  );
+  assert.equal(r.skip, false); // no regime block / no blackout → runs
+  delete process.env.PROPHET_HOLDING_SKIP_ENABLED;
+});
