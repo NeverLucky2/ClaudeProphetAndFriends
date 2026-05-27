@@ -35,22 +35,30 @@ import {
   injectFreshnessFields,
   briefAsOfETDate,
 } from './daily-brief-freshness.js';
+import { isMarketHoliday } from './market-calendar.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(__dirname, '..');
 const OPENCODE_BIN = process.platform === 'win32' ? 'cmd.exe' : 'opencode';
 const OPENCODE_WIN_PREFIX = process.platform === 'win32' ? ['/c', 'opencode.cmd'] : [];
 const PYTHON_BIN = process.platform === 'win32' ? 'python' : 'python3';
+// Cheap model override for the LLM-driven regime-input skills (market_top,
+// bubble): coarse data collection + 0-100 scoring, not deep reasoning, so the
+// scheduler's default model (Sonnet/Opus) is overkill there. Id matches the
+// agent/config-store.js model list. Breadth no longer uses an LLM at all.
+const HAIKU_MODEL = 'anthropic/claude-haiku-4-5';
 const STATE_FILE = path.join(PROJECT_ROOT, 'data', 'scheduler-state.json');
 const SANDBOXES_DIR = path.join(PROJECT_ROOT, 'data', 'sandboxes');
 const REPORTS_DIR = path.join(PROJECT_ROOT, 'data', 'reports');
 const REGIME_COMPUTE_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'compute_daily_regime_score.py');
 const REGIME_GATE_OUTPUT = path.join(REPORTS_DIR, 'regime_gate.json');
-// Upstream regime-gate skill scripts. macro_regime is a direct python spawn;
-// breadth/market_top/bubble are invoked through opencode + their SKILL.md
-// because they require an LLM in the loop (data collection, schema reshape,
-// or manual scoring inputs). See docs/superpowers/specs/2026-05-15-regime-skills-scheduler-design.md.
+// Upstream regime-gate skill scripts. macro_regime and breadth are direct python
+// spawns (both fully autonomous — FMP / public-CSV, stdlib only); market_top and
+// bubble go through opencode + their SKILL.md because they need an LLM in the
+// loop for data collection (WebSearch put/call, VIX-term, margin-debt; the 12
+// bubble indicators). See docs/superpowers/specs/2026-05-15-regime-skills-scheduler-design.md.
 const MACRO_REGIME_SCRIPT = path.join(PROJECT_ROOT, '.claude', 'skills', 'macro-regime-detector', 'scripts', 'macro_regime_detector.py');
+const FETCH_BREADTH_SCRIPT = path.join(PROJECT_ROOT, '.claude', 'skills', 'breadth-chart-analyst', 'scripts', 'fetch_breadth_csv.py');
 
 // Filename-prefix → CLI flag mapping for compute_daily_regime_score.py inputs.
 // The script accepts each flag as optional and fail-softs missing inputs to a
@@ -111,6 +119,57 @@ export function buildMacroRegimeArgv(scriptPath, outputDir, apiKey) {
   const argv = [scriptPath, '--output-dir', outputDir];
   if (apiKey) argv.push('--api-key', apiKey);
   return argv;
+}
+
+/**
+ * Build the spawn argv for the pure-python breadth fetch. fetch_breadth_csv.py
+ * is fully autonomous (stdlib-only, public CSV sources) and prints its analysis
+ * as JSON with --json. Pure function — exported for tests.
+ */
+export function buildFetchBreadthArgv(scriptPath) {
+  return [scriptPath, '--json'];
+}
+
+/**
+ * Map fetch_breadth_csv.py --json output to the regime-gate breadth input
+ * schema. compute_daily_regime_score.py extracts the top-level integer
+ * `current_value_percent` (its EXTRACTION_PATHS["breadth"]); we derive it from
+ * the script's `uptrend_ratio` (a 0-100 float) rounded to the nearest int and
+ * preserve the rest of the analysis for forensics. Throws on a missing or
+ * non-numeric uptrend_ratio so the caller leaves _lastBreadthDate unadvanced and
+ * the startup catch-up retries — the pure-python equivalent of the old LLM
+ * path's throwOnFailure=true. Pure function — exported for tests.
+ */
+export function breadthResultToRegimeInput(parsed) {
+  const ratio = Number(parsed?.uptrend_ratio);
+  if (!Number.isFinite(ratio)) {
+    throw new Error('fetch_breadth_csv.py output missing numeric uptrend_ratio');
+  }
+  return { ...parsed, current_value_percent: Math.round(ratio) };
+}
+
+/**
+ * Resolve the opencode --model value. opencode expects a provider-qualified id
+ * ("anthropic/claude-..."); a bare id gets the anthropic/ prefix. Returns null
+ * for a null/empty input so callers can fall back. Pure — exported for tests.
+ */
+export function resolveOpencodeModel(model) {
+  if (!model) return null;
+  return model.includes('/') ? model : `anthropic/${model}`;
+}
+
+/**
+ * True on a normal trading weekday — a weekday that is NOT a full-close US
+ * market holiday. _checkSchedule and runStartupChecks gate the pre-market
+ * regime-input chain (the four upstream skills + regime_gate_compute) on this so
+ * they don't burn spend on market holidays, when the market is shut and nothing
+ * consults the gate that day. The caller supplies the ET-correct isWeekday flag
+ * (weekend detection); isHoliday comes from isMarketHoliday (ET calendar date).
+ * Pure — exported for tests. Mirrors the holiday-aware gating already applied to
+ * agent heartbeats (harness phase logic + preflight isClosedPhase).
+ */
+export function isTradingDay({ isWeekday, isHoliday }) {
+  return Boolean(isWeekday) && !isHoliday;
 }
 
 /**
@@ -200,6 +259,7 @@ export class AnalysisScheduler extends EventEmitter {
     // at a real Go bot port instead of the unbound TRADING_BOT_URL fallback.
     // Returns "http://localhost:<port>" of any goReady sandbox, or null.
     this._getHealthySandboxUrl = options.getHealthySandboxUrl || (() => null);
+    this._runTradeReconciliationFn = options.runTradeReconciliation || null;
     this._timer = null;
     this._running = false;
     this._activeJob = null;
@@ -225,6 +285,7 @@ export class AnalysisScheduler extends EventEmitter {
     this._lastMacroRegimeDate = null;   // YYYY-MM-DD (daily macro-regime-detector run)
     this._lastMarketTopDate = null;     // YYYY-MM-DD (daily market-top-detector run)
     this._lastBubbleDate = null;        // YYYY-MM-DD (daily us-market-bubble-detector run)
+    this._lastTradeReconcileDate = null; // YYYY-MM-DD (daily after-close reconciliation)
   }
 
   async start() {
@@ -277,6 +338,7 @@ export class AnalysisScheduler extends EventEmitter {
       'harvest_parameter_review', 'trend_parameter_review',
       'regime_gate_compute',
       'macro_regime_skill', 'breadth_skill', 'market_top_skill', 'bubble_skill',
+      'trade_reconciliation',
     ];
     if (!validJobs.includes(jobName)) {
       return { error: `Unknown job: ${jobName}. Valid: ${validJobs.join(', ')}` };
@@ -369,6 +431,9 @@ export class AnalysisScheduler extends EventEmitter {
         await this._runBubbleSkill(isoDate);
         this._lastBubbleDate = isoDate;
         await this._saveState();
+      } else if (jobName === 'trade_reconciliation') {
+        this._lastTradeReconcileDate = isoDate;
+        await this._runTradeReconciliation(isoDate);
       } else if (jobName === 'trend_parameter_review') {
         this._lastTrendParamReviewQuarter = this._getQuarter(isoDate);
         await this._runSkill('trend-parameter-review', isoDate, null, 15 * 60 * 1000, this._automatedRunAppendix({
@@ -397,6 +462,7 @@ export class AnalysisScheduler extends EventEmitter {
     const isoDate = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
     const { hour, dayOfWeek } = this._getETInfo();
     const isWeekday = dayOfWeek >= 1 && dayOfWeek <= 5;
+    const tradingDay = isTradingDay({ isWeekday, isHoliday: isMarketHoliday(new Date()) });
     let adaptNeeded = false;
 
     // 1. Daily briefing — read the stable daily_brief.json and check its
@@ -434,7 +500,7 @@ export class AnalysisScheduler extends EventEmitter {
     // ET) so the four input JSONs are present when step 1.5 (regime_gate_compute)
     // fires next. Sequential so the LLM-driven ones don't fight over the
     // _activeJob mutex.
-    if (isWeekday && hour < 16) {
+    if (tradingDay && hour < 16) {
       if (this._lastMacroRegimeDate !== isoDate) {
         if (await this._isLocked(this._getLockKey('macro_regime_skill', isoDate))) {
           this._log('macro_regime_skill already running in another process — skipping startup trigger.', 'info');
@@ -473,7 +539,7 @@ export class AnalysisScheduler extends EventEmitter {
     // was offline at the 5:50 AM ET scheduled trigger. Heals up to market close
     // (4 PM ET) so the gate is fresh even on mid-day restarts; agents read it
     // on every heartbeat.
-    if (isWeekday && hour < 16 && this._lastRegimeGateDate !== isoDate) {
+    if (tradingDay && hour < 16 && this._lastRegimeGateDate !== isoDate) {
       if (await this._isLocked(this._getLockKey('regime_gate_compute', isoDate))) {
         this._log('Regime gate compute already running in another process — skipping startup trigger.', 'info');
       } else {
@@ -1032,6 +1098,9 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
     const isWeekday = dayOfWeek >= 1 && dayOfWeek <= 5;
     const isMonday = dayOfWeek === 1;
     const isSunday = dayOfWeek === 0;
+    // Holiday-aware gate for the pre-market regime-input chain (5:00 skills +
+    // 5:50 compute) only — other jobs keep their existing isWeekday gating.
+    const tradingDay = isTradingDay({ isWeekday, isHoliday: isMarketHoliday(new Date()) });
     const dayOfMonth = Number(isoDate.split('-')[2]);
     const monthOfYear = Number(isoDate.split('-')[1]);
     const isQuarterStartMonth = monthOfYear === 1 || monthOfYear === 4 || monthOfYear === 7 || monthOfYear === 10;
@@ -1045,7 +1114,7 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
     // each gets a 15-min timeout. Worst-case the chain finishes by ~5:46 —
     // still inside the 5:50 deadline. If something stalls, regime_gate_compute
     // fail-softs (and the 36h input-freshness window covers yesterday's file).
-    if (isWeekday && hour === 5 && minute === 0) {
+    if (tradingDay && hour === 5 && minute === 0) {
       if (this._lastMacroRegimeDate !== isoDate) await this.triggerJob('macro_regime_skill').catch(() => {});
       if (this._lastBreadthDate !== isoDate)     await this.triggerJob('breadth_skill').catch(() => {});
       if (this._lastMarketTopDate !== isoDate)   await this.triggerJob('market_top_skill').catch(() => {});
@@ -1056,7 +1125,7 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
     // briefing can reference a fresh regime_gate.json. The script fails
     // soft on missing upstream inputs (writes neutral 50), so this is safe
     // even when the four upstream skills haven't run yet.
-    if (isWeekday && hour === 5 && minute === 50 && this._lastRegimeGateDate !== isoDate) {
+    if (tradingDay && hour === 5 && minute === 50 && this._lastRegimeGateDate !== isoDate) {
       await this.triggerJob('regime_gate_compute').catch(() => {});
     }
 
@@ -1091,6 +1160,11 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
       this._lastLossCheckDate = isoDate;
       await this._saveState();
       await this._checkAndRunLossJobs(isoDate);
+    }
+
+    // Daily trade-log ↔ broker reconciliation — 4:45 PM ET, after fills settle.
+    if (isWeekday && hour === 16 && minute === 45 && this._lastTradeReconcileDate !== isoDate) {
+      await this.triggerJob('trade_reconciliation').catch(() => {});
     }
 
     if (isSunday && hour === 18 && minute === 0 && this._lastWeeklyScreenDate !== isoDate) {
@@ -1136,23 +1210,75 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
     this.emit('scheduler_job_end', { job: 'macro_regime_skill', date, output: REPORTS_DIR });
   }
 
-  // breadth_skill: LLM-driven via _runSkill so the LLM can run the CSV fetcher
-  // and reshape the output to the schema compute_daily_regime_score.py expects.
-  // throwOnFailure=true: opencode crash → state stays unadvanced → catch-up retries.
+  // trade_reconciliation: delegates to the injected cross-sandbox runner (it
+  // needs per-sandbox goAxios + trade-log access the scheduler does not hold).
+  // Soft-fail: the runner reports per-sandbox; a failure leaves no report and
+  // the banner stays silent.
+  async _runTradeReconciliation(isoDate) {
+    this._log(`Starting trade_reconciliation for ${isoDate}...`, 'info');
+    this.emit('scheduler_job_start', { job: 'trade_reconciliation', date: isoDate });
+    if (typeof this._runTradeReconciliationFn === 'function') {
+      await this._runTradeReconciliationFn(isoDate);
+    }
+    this._log(`trade_reconciliation complete for ${isoDate}.`, 'success');
+  }
+
+  // breadth_skill: pure-python (no LLM). fetch_breadth_csv.py is fully autonomous
+  // (stdlib-only, public CSV sources); the old LLM path only ran that script and
+  // remapped one field (uptrend_ratio → current_value_percent), so we spawn it
+  // directly and remap in JS — zero Claude tokens. Mirrors _runMacroRegimeSkill's
+  // spawn + reject-on-failure shape: a spawn error, non-zero exit, or
+  // unparseable/short output rejects, so triggerJob leaves _lastBreadthDate
+  // unadvanced and the catch-up retries (same as the old throwOnFailure=true).
+  // buildBreadthSkillAppendix is retained (exported + tested) as the reference
+  // contract for a future LLM fallback / the planned market_top+bubble hybrid.
   async _runBreadthSkill(date) {
-    await this._runSkill('breadth-chart-analyst', date, null, 15 * 60 * 1000, buildBreadthSkillAppendix(date), true);
+    this._log(`Starting breadth_skill (python) for ${date}...`, 'info');
+    this.emit('scheduler_job_start', { job: 'breadth_skill', date });
+
+    const slug = date.replace(/-/g, '');
+    const outPath = path.join(REPORTS_DIR, `breadth_${slug}.json`);
+    const argv = buildFetchBreadthArgv(FETCH_BREADTH_SCRIPT);
+
+    const stdout = await new Promise((resolve, reject) => {
+      const child = spawn(PYTHON_BIN, argv, { stdio: ['ignore', 'pipe', 'pipe'] });
+      let out = '';
+      let stderr = '';
+      child.stdout.on('data', (chunk) => { out += chunk.toString(); });
+      child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+      child.on('error', (err) => {
+        this._log(`breadth_skill spawn failed: ${err.message}`, 'error');
+        reject(err);
+      });
+      child.on('close', (code) => {
+        if (code === 0) {
+          resolve(out);
+        } else {
+          const msg = `breadth_skill exited ${code}; stderr: ${stderr.trim()}`;
+          this._log(msg, 'error');
+          reject(new Error(msg));
+        }
+      });
+    });
+
+    const regimeInput = breadthResultToRegimeInput(JSON.parse(stdout));
+    await fs.mkdir(REPORTS_DIR, { recursive: true });
+    await fs.writeFile(outPath, JSON.stringify(regimeInput, null, 2), 'utf-8');
+
+    this._log(`breadth_skill complete → ${outPath}`, 'success');
+    this.emit('scheduler_job_end', { job: 'breadth_skill', date, output: outPath });
   }
 
   // market_top_skill: LLM-driven so the LLM can WebSearch put/call, VIX-term,
   // and margin-debt-yoy inputs that market_top_detector.py requires.
   async _runMarketTopSkill(date) {
-    await this._runSkill('market-top-detector', date, null, 15 * 60 * 1000, buildMarketTopSkillAppendix(date), true);
+    await this._runSkill('market-top-detector', date, null, 15 * 60 * 1000, buildMarketTopSkillAppendix(date), true, HAIKU_MODEL);
   }
 
   // bubble_skill: LLM-driven so the LLM can collect the 12 indicator values
   // and pass them as --scores '<json>' to bubble_scorer.py.
   async _runBubbleSkill(date) {
-    await this._runSkill('us-market-bubble-detector', date, null, 15 * 60 * 1000, buildBubbleSkillAppendix(date), true);
+    await this._runSkill('us-market-bubble-detector', date, null, 15 * 60 * 1000, buildBubbleSkillAppendix(date), true, HAIKU_MODEL);
   }
 
   // Regime gate compute job. Spawns scripts/compute_daily_regime_score.py to
@@ -1331,7 +1457,7 @@ Limit vcp_candidates and pead_candidates to top 5 each by score. Write only the 
   // catch-up retry on the next heartbeat. Default false preserves the
   // existing fire-and-forget behavior for adapt_strategy, postmortems, etc.,
   // where partial success is acceptable.
-  async _runSkill(skillName, date, target, timeoutMs, appendix = null, throwOnFailure = false) {
+  async _runSkill(skillName, date, target, timeoutMs, appendix = null, throwOnFailure = false, modelOverride = null) {
     this._log(`Starting ${skillName} for ${date}${target ? ` (target: ${target})` : ''}...`, 'info');
     this.emit('scheduler_job_start', { job: skillName.replace(/-/g, '_'), date });
 
@@ -1348,7 +1474,7 @@ Limit vcp_candidates and pead_candidates to top 5 each by score. Write only the 
       prompt += '\n\n---\n' + appendix;
     }
 
-    const { code, error } = await this._runOneshotOpencode(prompt, skillName, timeoutMs);
+    const { code, error } = await this._runOneshotOpencode(prompt, skillName, timeoutMs, modelOverride);
     this._log(`${skillName} complete.`, 'success');
     this.emit('scheduler_job_end', { job: skillName.replace(/-/g, '_'), date, output: null });
     if (throwOnFailure && (error || code !== 0)) {
@@ -1387,9 +1513,9 @@ Limit vcp_candidates and pead_candidates to top 5 each by score. Write only the 
     }
   }
 
-  async _runOneshotOpencode(prompt, jobName, timeoutMs) {
+  async _runOneshotOpencode(prompt, jobName, timeoutMs, modelOverride = null) {
     return new Promise(async (resolve) => {
-      const ocModel = this.model?.includes('/') ? this.model : `anthropic/${this.model}`;
+      const ocModel = resolveOpencodeModel(modelOverride || this.model);
       const args = ['run', '--format', 'json', '--model', ocModel];
 
       let tempFile = null;
