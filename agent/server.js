@@ -31,7 +31,7 @@ import {
   createSandboxForAccount,
 } from './config-store.js';
 import { appendTrade, readTrades } from './trades-store.js';
-import { fetchFillsSummary, renderFillsSummaryLine, startOfEtTradingDayIso } from './fills-summary.js';
+import { fetchFillsSummary, renderFillsSummaryLine, startOfEtTradingDayIso, claimConnectRecap } from './fills-summary.js';
 import { SSE_KEEPALIVE_MS, sendSseKeepalive } from './sse-keepalive.js';
 import { runReconciliationForSandbox, readReconciliationSummary } from './trade-reconciliation.js';
 import nodeFs from 'node:fs/promises';
@@ -79,6 +79,11 @@ const orchestrator = new AgentOrchestrator({
   tradingBotBasePort: Number(TRADING_BOT_PORT),
 });
 const sseClients = new Set();
+// Dashboard viewing sessions (client `sid`) that have already received the
+// connect-time fills recap. A single tab reconnects to /api/events on every
+// visibility toggle / idle drop / sleep-wake; keying the recap on the
+// per-page-load sid collapses those reconnects to one recap. See claimConnectRecap.
+const servedRecapSessions = new Set();
 const boundOperationalHarnesses = new WeakSet();
 const dailySummaryTimers = new Map();
 
@@ -130,10 +135,13 @@ function broadcast(event, data) {
 
 // Keep idle SSE connections warm. A quiet agent (the steady state after the
 // regime / beat cost reductions) sends no events, so the browser/OS/proxy drops
-// the idle stream; the dashboard then reconnects and re-fires the connect-time
-// fills recap — the cause of duplicate "N fills today" lines. A periodic comment
-// frame prevents the idle-out. See sse-keepalive.js. unref() so the timer never
-// keeps the process alive during shutdown.
+// the idle stream and the dashboard reconnects. Fewer reconnects means less
+// state/config re-send churn. (Reconnects no longer re-fire the fills recap —
+// the duplicate "N fills today" lines — that is now guarded by per-session
+// dedup at the /api/events handler; see claimConnectRecap. The keepalive can't
+// stop visibility-driven reconnects, which were the dominant cause.) See
+// sse-keepalive.js. unref() so the timer never keeps the process alive during
+// shutdown.
 const _sseKeepaliveTimer = setInterval(() => sendSseKeepalive(sseClients), SSE_KEEPALIVE_MS);
 _sseKeepaliveTimer.unref?.();
 
@@ -373,8 +381,14 @@ app.get('/api/events', (req, res) => {
   sseClients.add(res);
   req.on('close', () => sseClients.delete(res));
 
-  // Trigger B: surface each running agent's day fills to this client only.
-  if (process.env.FILLS_SUMMARY_ENABLED !== 'false') {
+  // Trigger B: surface each running agent's day fills to this client only, and
+  // only on the first connect of a given dashboard viewing session. The client
+  // tears down + rebuilds this stream on every tab hide/show (visibilitychange),
+  // so without per-session dedup the recap re-fires repeatedly — the duplicate
+  // "N fills today" lines. claimConnectRecap returns false for a sid we've
+  // already served (a reconnect); a missing sid falls back to always-emit.
+  if (process.env.FILLS_SUMMARY_ENABLED !== 'false'
+      && claimConnectRecap(servedRecapSessions, req.query?.sid)) {
     void emitConnectFillsSummaries(res);
   }
 });

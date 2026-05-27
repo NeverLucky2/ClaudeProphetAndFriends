@@ -1895,12 +1895,19 @@ function formatSandboxPrefix(data) {
 let _eventSource = null;
 let _sseReconnectTimer = null;
 let _sseReconnectAttempts = 0;
+// Stable per-page-load id. connectSSE reconnects (tab hide/show, idle drops,
+// sleep/wake) all reuse it, so the server emits the connect-time fills recap
+// once per viewing session instead of once per reconnect. A fresh page load /
+// reload gets a new id and a fresh recap. See claimConnectRecap in server.js.
+const _sseSessionId = (window.crypto && crypto.randomUUID)
+  ? crypto.randomUUID()
+  : (Date.now() + '-' + Math.random().toString(36).slice(2));
 function connectSSE() {
   if (_eventSource) { try { _eventSource.close(); } catch {} }
   if (_sseReconnectTimer) { clearTimeout(_sseReconnectTimer); _sseReconnectTimer = null; }
   seedTodayTrades();
   _wireHistoricControls();
-  const es = new EventSource(withAuthUrl('/api/events'));
+  const es = new EventSource(withAuthUrl('/api/events?sid=' + encodeURIComponent(_sseSessionId)));
   _eventSource = es;
   es.onopen = () => { 
     _sseReconnectAttempts = 0;
