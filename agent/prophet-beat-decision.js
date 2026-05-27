@@ -32,3 +32,19 @@ export function classifyBand(pnlPct, { nearStopPct, nearTargetPct }) {
   if (pnlPct >= nearTargetPct) return 'near_target';
   return 'interior';
 }
+
+// True only when every required intraday metric is present, finite, and under
+// its threshold. A null/partial/NaN signal → false (not quiet → run). Mirrors
+// the field names emitted by /api/v1/intraday/signals (see agent/intraday-prompt.js).
+export function isUnderlyingQuiet(signal, thresholds) {
+  if (!signal) return false;
+  const vwap = Number(signal.dist_from_vwap_pct);
+  const rvol = Number(signal.rvol);
+  const rng = Number(signal.range_over_atr);
+  const day = Number(signal.day_change_pct);
+  if (![vwap, rvol, rng, day].every(Number.isFinite)) return false;
+  return Math.abs(vwap) < thresholds.vwap
+    && rvol < thresholds.rvol
+    && rng < thresholds.rngAtr
+    && Math.abs(day) < thresholds.dayPct;
+}

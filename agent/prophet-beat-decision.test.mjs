@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { occUnderlying } from './prophet-beat-decision.js';
 import { classifyBand, normalizePnlPct } from './prophet-beat-decision.js';
+import { isUnderlyingQuiet } from './prophet-beat-decision.js';
 
 test('occUnderlying extracts the underlying from an OCC option symbol', () => {
   assert.equal(occUnderlying('TSLA260529C00442500'), 'TSLA');
@@ -38,4 +39,26 @@ test('classifyBand: non-finite P&L is treated as actionable (fail toward running
 test('normalizePnlPct returns percent units unchanged (see Task 6 verification)', () => {
   assert.equal(normalizePnlPct(12), 12);
   assert.equal(normalizePnlPct(-15), -15);
+});
+
+const T = { vwap: 1.5, rvol: 2.0, rngAtr: 1.5, dayPct: 4.0 };
+const quietSig = { dist_from_vwap_pct: 0.3, rvol: 1.1, range_over_atr: 0.8, day_change_pct: 1.2 };
+
+test('isUnderlyingQuiet: all metrics under threshold → quiet', () => {
+  assert.equal(isUnderlyingQuiet(quietSig, T), true);
+  assert.equal(isUnderlyingQuiet({ ...quietSig, dist_from_vwap_pct: -0.9 }, T), true); // abs()
+});
+
+test('isUnderlyingQuiet: any single breach → not quiet', () => {
+  assert.equal(isUnderlyingQuiet({ ...quietSig, dist_from_vwap_pct: 2.0 }, T), false);
+  assert.equal(isUnderlyingQuiet({ ...quietSig, rvol: 2.5 }, T), false);
+  assert.equal(isUnderlyingQuiet({ ...quietSig, range_over_atr: 1.9 }, T), false);
+  assert.equal(isUnderlyingQuiet({ ...quietSig, day_change_pct: -5.0 }, T), false); // abs()
+});
+
+test('isUnderlyingQuiet: missing/partial/NaN signal → not quiet (fail toward running)', () => {
+  assert.equal(isUnderlyingQuiet(null, T), false);
+  assert.equal(isUnderlyingQuiet(undefined, T), false);
+  assert.equal(isUnderlyingQuiet({ ...quietSig, rvol: undefined }, T), false);
+  assert.equal(isUnderlyingQuiet({ ...quietSig, day_change_pct: 'x' }, T), false);
 });
