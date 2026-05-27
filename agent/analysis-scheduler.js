@@ -41,16 +41,23 @@ const PROJECT_ROOT = path.join(__dirname, '..');
 const OPENCODE_BIN = process.platform === 'win32' ? 'cmd.exe' : 'opencode';
 const OPENCODE_WIN_PREFIX = process.platform === 'win32' ? ['/c', 'opencode.cmd'] : [];
 const PYTHON_BIN = process.platform === 'win32' ? 'python' : 'python3';
+// Cheap model override for the LLM-driven regime-input skills (market_top,
+// bubble): coarse data collection + 0-100 scoring, not deep reasoning, so the
+// scheduler's default model (Sonnet/Opus) is overkill there. Id matches the
+// agent/config-store.js model list. Breadth no longer uses an LLM at all.
+const HAIKU_MODEL = 'anthropic/claude-haiku-4-5';
 const STATE_FILE = path.join(PROJECT_ROOT, 'data', 'scheduler-state.json');
 const SANDBOXES_DIR = path.join(PROJECT_ROOT, 'data', 'sandboxes');
 const REPORTS_DIR = path.join(PROJECT_ROOT, 'data', 'reports');
 const REGIME_COMPUTE_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'compute_daily_regime_score.py');
 const REGIME_GATE_OUTPUT = path.join(REPORTS_DIR, 'regime_gate.json');
-// Upstream regime-gate skill scripts. macro_regime is a direct python spawn;
-// breadth/market_top/bubble are invoked through opencode + their SKILL.md
-// because they require an LLM in the loop (data collection, schema reshape,
-// or manual scoring inputs). See docs/superpowers/specs/2026-05-15-regime-skills-scheduler-design.md.
+// Upstream regime-gate skill scripts. macro_regime and breadth are direct python
+// spawns (both fully autonomous — FMP / public-CSV, stdlib only); market_top and
+// bubble go through opencode + their SKILL.md because they need an LLM in the
+// loop for data collection (WebSearch put/call, VIX-term, margin-debt; the 12
+// bubble indicators). See docs/superpowers/specs/2026-05-15-regime-skills-scheduler-design.md.
 const MACRO_REGIME_SCRIPT = path.join(PROJECT_ROOT, '.claude', 'skills', 'macro-regime-detector', 'scripts', 'macro_regime_detector.py');
+const FETCH_BREADTH_SCRIPT = path.join(PROJECT_ROOT, '.claude', 'skills', 'breadth-chart-analyst', 'scripts', 'fetch_breadth_csv.py');
 
 // Filename-prefix → CLI flag mapping for compute_daily_regime_score.py inputs.
 // The script accepts each flag as optional and fail-softs missing inputs to a
@@ -111,6 +118,43 @@ export function buildMacroRegimeArgv(scriptPath, outputDir, apiKey) {
   const argv = [scriptPath, '--output-dir', outputDir];
   if (apiKey) argv.push('--api-key', apiKey);
   return argv;
+}
+
+/**
+ * Build the spawn argv for the pure-python breadth fetch. fetch_breadth_csv.py
+ * is fully autonomous (stdlib-only, public CSV sources) and prints its analysis
+ * as JSON with --json. Pure function — exported for tests.
+ */
+export function buildFetchBreadthArgv(scriptPath) {
+  return [scriptPath, '--json'];
+}
+
+/**
+ * Map fetch_breadth_csv.py --json output to the regime-gate breadth input
+ * schema. compute_daily_regime_score.py extracts the top-level integer
+ * `current_value_percent` (its EXTRACTION_PATHS["breadth"]); we derive it from
+ * the script's `uptrend_ratio` (a 0-100 float) rounded to the nearest int and
+ * preserve the rest of the analysis for forensics. Throws on a missing or
+ * non-numeric uptrend_ratio so the caller leaves _lastBreadthDate unadvanced and
+ * the startup catch-up retries — the pure-python equivalent of the old LLM
+ * path's throwOnFailure=true. Pure function — exported for tests.
+ */
+export function breadthResultToRegimeInput(parsed) {
+  const ratio = Number(parsed?.uptrend_ratio);
+  if (!Number.isFinite(ratio)) {
+    throw new Error('fetch_breadth_csv.py output missing numeric uptrend_ratio');
+  }
+  return { ...parsed, current_value_percent: Math.round(ratio) };
+}
+
+/**
+ * Resolve the opencode --model value. opencode expects a provider-qualified id
+ * ("anthropic/claude-..."); a bare id gets the anthropic/ prefix. Returns null
+ * for a null/empty input so callers can fall back. Pure — exported for tests.
+ */
+export function resolveOpencodeModel(model) {
+  if (!model) return null;
+  return model.includes('/') ? model : `anthropic/${model}`;
 }
 
 /**
@@ -1160,23 +1204,62 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
     this._log(`trade_reconciliation complete for ${isoDate}.`, 'success');
   }
 
-  // breadth_skill: LLM-driven via _runSkill so the LLM can run the CSV fetcher
-  // and reshape the output to the schema compute_daily_regime_score.py expects.
-  // throwOnFailure=true: opencode crash → state stays unadvanced → catch-up retries.
+  // breadth_skill: pure-python (no LLM). fetch_breadth_csv.py is fully autonomous
+  // (stdlib-only, public CSV sources); the old LLM path only ran that script and
+  // remapped one field (uptrend_ratio → current_value_percent), so we spawn it
+  // directly and remap in JS — zero Claude tokens. Mirrors _runMacroRegimeSkill's
+  // spawn + reject-on-failure shape: a spawn error, non-zero exit, or
+  // unparseable/short output rejects, so triggerJob leaves _lastBreadthDate
+  // unadvanced and the catch-up retries (same as the old throwOnFailure=true).
+  // buildBreadthSkillAppendix is retained (exported + tested) as the reference
+  // contract for a future LLM fallback / the planned market_top+bubble hybrid.
   async _runBreadthSkill(date) {
-    await this._runSkill('breadth-chart-analyst', date, null, 15 * 60 * 1000, buildBreadthSkillAppendix(date), true);
+    this._log(`Starting breadth_skill (python) for ${date}...`, 'info');
+    this.emit('scheduler_job_start', { job: 'breadth_skill', date });
+
+    const slug = date.replace(/-/g, '');
+    const outPath = path.join(REPORTS_DIR, `breadth_${slug}.json`);
+    const argv = buildFetchBreadthArgv(FETCH_BREADTH_SCRIPT);
+
+    const stdout = await new Promise((resolve, reject) => {
+      const child = spawn(PYTHON_BIN, argv, { stdio: ['ignore', 'pipe', 'pipe'] });
+      let out = '';
+      let stderr = '';
+      child.stdout.on('data', (chunk) => { out += chunk.toString(); });
+      child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+      child.on('error', (err) => {
+        this._log(`breadth_skill spawn failed: ${err.message}`, 'error');
+        reject(err);
+      });
+      child.on('close', (code) => {
+        if (code === 0) {
+          resolve(out);
+        } else {
+          const msg = `breadth_skill exited ${code}; stderr: ${stderr.trim()}`;
+          this._log(msg, 'error');
+          reject(new Error(msg));
+        }
+      });
+    });
+
+    const regimeInput = breadthResultToRegimeInput(JSON.parse(stdout));
+    await fs.mkdir(REPORTS_DIR, { recursive: true });
+    await fs.writeFile(outPath, JSON.stringify(regimeInput, null, 2), 'utf-8');
+
+    this._log(`breadth_skill complete → ${outPath}`, 'success');
+    this.emit('scheduler_job_end', { job: 'breadth_skill', date, output: outPath });
   }
 
   // market_top_skill: LLM-driven so the LLM can WebSearch put/call, VIX-term,
   // and margin-debt-yoy inputs that market_top_detector.py requires.
   async _runMarketTopSkill(date) {
-    await this._runSkill('market-top-detector', date, null, 15 * 60 * 1000, buildMarketTopSkillAppendix(date), true);
+    await this._runSkill('market-top-detector', date, null, 15 * 60 * 1000, buildMarketTopSkillAppendix(date), true, HAIKU_MODEL);
   }
 
   // bubble_skill: LLM-driven so the LLM can collect the 12 indicator values
   // and pass them as --scores '<json>' to bubble_scorer.py.
   async _runBubbleSkill(date) {
-    await this._runSkill('us-market-bubble-detector', date, null, 15 * 60 * 1000, buildBubbleSkillAppendix(date), true);
+    await this._runSkill('us-market-bubble-detector', date, null, 15 * 60 * 1000, buildBubbleSkillAppendix(date), true, HAIKU_MODEL);
   }
 
   // Regime gate compute job. Spawns scripts/compute_daily_regime_score.py to
@@ -1355,7 +1438,7 @@ Limit vcp_candidates and pead_candidates to top 5 each by score. Write only the 
   // catch-up retry on the next heartbeat. Default false preserves the
   // existing fire-and-forget behavior for adapt_strategy, postmortems, etc.,
   // where partial success is acceptable.
-  async _runSkill(skillName, date, target, timeoutMs, appendix = null, throwOnFailure = false) {
+  async _runSkill(skillName, date, target, timeoutMs, appendix = null, throwOnFailure = false, modelOverride = null) {
     this._log(`Starting ${skillName} for ${date}${target ? ` (target: ${target})` : ''}...`, 'info');
     this.emit('scheduler_job_start', { job: skillName.replace(/-/g, '_'), date });
 
@@ -1372,7 +1455,7 @@ Limit vcp_candidates and pead_candidates to top 5 each by score. Write only the 
       prompt += '\n\n---\n' + appendix;
     }
 
-    const { code, error } = await this._runOneshotOpencode(prompt, skillName, timeoutMs);
+    const { code, error } = await this._runOneshotOpencode(prompt, skillName, timeoutMs, modelOverride);
     this._log(`${skillName} complete.`, 'success');
     this.emit('scheduler_job_end', { job: skillName.replace(/-/g, '_'), date, output: null });
     if (throwOnFailure && (error || code !== 0)) {
@@ -1411,9 +1494,9 @@ Limit vcp_candidates and pead_candidates to top 5 each by score. Write only the 
     }
   }
 
-  async _runOneshotOpencode(prompt, jobName, timeoutMs) {
+  async _runOneshotOpencode(prompt, jobName, timeoutMs, modelOverride = null) {
     return new Promise(async (resolve) => {
-      const ocModel = this.model?.includes('/') ? this.model : `anthropic/${this.model}`;
+      const ocModel = resolveOpencodeModel(modelOverride || this.model);
       const args = ['run', '--format', 'json', '--model', ocModel];
 
       let tempFile = null;

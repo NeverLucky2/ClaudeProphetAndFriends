@@ -11,6 +11,9 @@ import { fileURLToPath } from 'url';
 import {
   buildRegimeComputeArgv,
   buildMacroRegimeArgv,
+  buildFetchBreadthArgv,
+  breadthResultToRegimeInput,
+  resolveOpencodeModel,
   buildBreadthSkillAppendix,
   buildMarketTopSkillAppendix,
   buildBubbleSkillAppendix,
@@ -127,6 +130,47 @@ test('buildMacroRegimeArgv omits --api-key when key is null/undefined', () => {
   const argv = buildMacroRegimeArgv('/script.py', 'data/reports', null);
   assert.ok(!argv.includes('--api-key'), `argv should not contain --api-key, got ${argv}`);
   assert.ok(argv.includes('--output-dir'), 'argv must still contain --output-dir');
+});
+
+// ── Commit 1: breadth → python spawn, market_top/bubble → Haiku ─────
+
+test('resolveOpencodeModel prefixes bare ids and passes through qualified ids', () => {
+  assert.equal(resolveOpencodeModel('anthropic/claude-haiku-4-5'), 'anthropic/claude-haiku-4-5');
+  assert.equal(resolveOpencodeModel('claude-haiku-4-5'), 'anthropic/claude-haiku-4-5');
+  assert.equal(resolveOpencodeModel(null), null);
+  assert.equal(resolveOpencodeModel(''), null);
+});
+
+test('buildFetchBreadthArgv passes the script path and --json', () => {
+  assert.deepEqual(
+    buildFetchBreadthArgv('/abs/fetch_breadth_csv.py'),
+    ['/abs/fetch_breadth_csv.py', '--json'],
+  );
+});
+
+test('breadthResultToRegimeInput derives integer current_value_percent from uptrend_ratio', () => {
+  // compute_daily_regime_score.py extracts the top-level integer
+  // current_value_percent (its EXTRACTION_PATHS["breadth"]).
+  const parsed = { uptrend_ratio: 63.4, breadth_200ma: 55.12, uptrend_class: 'neutral_bullish' };
+  const out = breadthResultToRegimeInput(parsed);
+  assert.equal(out.current_value_percent, 63);
+  assert.equal(Number.isInteger(out.current_value_percent), true);
+  // Forensic fields preserved alongside the derived value.
+  assert.equal(out.breadth_200ma, 55.12);
+  assert.equal(out.uptrend_class, 'neutral_bullish');
+});
+
+test('breadthResultToRegimeInput rounds to the nearest integer', () => {
+  assert.equal(breadthResultToRegimeInput({ uptrend_ratio: 36.5 }).current_value_percent, 37);
+  assert.equal(breadthResultToRegimeInput({ uptrend_ratio: 36.49 }).current_value_percent, 36);
+});
+
+test('breadthResultToRegimeInput throws on missing/non-numeric uptrend_ratio', () => {
+  // Throwing leaves _lastBreadthDate unadvanced so the catch-up retries — the
+  // pure-python equivalent of the old LLM path's throwOnFailure=true.
+  assert.throws(() => breadthResultToRegimeInput({}), /uptrend_ratio/);
+  assert.throws(() => breadthResultToRegimeInput({ uptrend_ratio: 'NaN' }), /uptrend_ratio/);
+  assert.throws(() => breadthResultToRegimeInput(null), /uptrend_ratio/);
 });
 
 test('buildBreadthSkillAppendix directs LLM to write breadth_<date>.json with current_value_percent', () => {
