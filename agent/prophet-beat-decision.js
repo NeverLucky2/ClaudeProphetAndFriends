@@ -96,3 +96,24 @@ export function decideHoldingSkip({
     reason: `${positions.length} position(s) interior (${bands}), ${names} quiet, last exit-eval ${Math.round(sinceLastExitEvalMs / 60000)}m ago < ${Math.round(maxStalenessMs / 60000)}m cap`,
   };
 }
+
+// Read the skip config from env (defaults below). Enable flag is exact-"true"
+// only (matches FILLS_SUMMARY_ENABLED / BEAT_CONTEXT_ENABLED convention).
+export function loadSkipConfig(env = process.env) {
+  const num = (v, d) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : d;
+  };
+  return {
+    enabled: env.PROPHET_HOLDING_SKIP_ENABLED === 'true',
+    maxStalenessMs: num(env.PROPHET_SKIP_MAX_STALENESS_MIN, 6) * 60 * 1000,
+    thresholds: {
+      nearStopPct: num(env.PROPHET_SKIP_NEAR_STOP_PCT, -10),
+      nearTargetPct: num(env.PROPHET_SKIP_NEAR_TARGET_PCT, 30),
+      vwap: num(env.PROPHET_SKIP_QUIET_VWAP_PCT, 1.5),
+      rvol: num(env.PROPHET_SKIP_QUIET_RVOL, 2.0),
+      rngAtr: num(env.PROPHET_SKIP_QUIET_RNG_ATR, 1.5),
+      dayPct: num(env.PROPHET_SKIP_QUIET_DAY_PCT, 4.0),
+    },
+  };
+}

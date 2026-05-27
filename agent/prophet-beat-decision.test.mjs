@@ -5,6 +5,7 @@ import { occUnderlying } from './prophet-beat-decision.js';
 import { classifyBand, normalizePnlPct } from './prophet-beat-decision.js';
 import { isUnderlyingQuiet } from './prophet-beat-decision.js';
 import { decideHoldingSkip } from './prophet-beat-decision.js';
+import { loadSkipConfig } from './prophet-beat-decision.js';
 
 test('occUnderlying extracts the underlying from an OCC option symbol', () => {
   assert.equal(occUnderlying('TSLA260529C00442500'), 'TSLA');
@@ -127,4 +128,34 @@ test('decideHoldingSkip: missing signal for a held name → run (not quiet)', ()
   const d = decideHoldingSkip({ ...base, signalsByUnderlying: {} });
   assert.equal(d.skip, false);
   assert.equal(d.gate, 'not_quiet');
+});
+
+test('loadSkipConfig: defaults when env unset', () => {
+  const c = loadSkipConfig({});
+  assert.equal(c.enabled, false);                 // default OFF
+  assert.equal(c.maxStalenessMs, 6 * 60 * 1000);
+  assert.deepEqual(c.thresholds, { nearStopPct: -10, nearTargetPct: 30, vwap: 1.5, rvol: 2.0, rngAtr: 1.5, dayPct: 4.0 });
+});
+
+test('loadSkipConfig: env overrides parse', () => {
+  const c = loadSkipConfig({
+    PROPHET_HOLDING_SKIP_ENABLED: 'true',
+    PROPHET_SKIP_MAX_STALENESS_MIN: '4',
+    PROPHET_SKIP_NEAR_STOP_PCT: '-8',
+    PROPHET_SKIP_QUIET_RVOL: '2.5',
+  });
+  assert.equal(c.enabled, true);
+  assert.equal(c.maxStalenessMs, 4 * 60 * 1000);
+  assert.equal(c.thresholds.nearStopPct, -8);
+  assert.equal(c.thresholds.rvol, 2.5);
+});
+
+test('loadSkipConfig: non-numeric env falls back to default', () => {
+  const c = loadSkipConfig({ PROPHET_SKIP_MAX_STALENESS_MIN: 'abc' });
+  assert.equal(c.maxStalenessMs, 6 * 60 * 1000);
+});
+
+test('loadSkipConfig: only exact "true" enables', () => {
+  assert.equal(loadSkipConfig({ PROPHET_HOLDING_SKIP_ENABLED: 'TRUE' }).enabled, false);
+  assert.equal(loadSkipConfig({ PROPHET_HOLDING_SKIP_ENABLED: '1' }).enabled, false);
 });
