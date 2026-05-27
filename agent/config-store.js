@@ -172,7 +172,7 @@ const DEFAULT_AGENT_OVERRIDES = {
   strategyId: undefined,
   customStrategyRules: null,
   heartbeatOverrides: {},
-  sessionMode: 'continuous', // 'continuous' | 'fresh' | 'daily' — 'fresh' resets each beat; 'daily' resets at the first pre_market beat each day to bound continuous-session context growth
+  sessionMode: 'daily', // 'continuous' | 'fresh' | 'daily' — 'fresh' resets each beat; 'daily' resets at the first pre_market beat each day to bound continuous-session context growth (default: opencode hardcodes a 5-min cache TTL, so an unbounded continuous session makes every long-cadence beat cold-rewrite the whole accumulated prefix)
 };
 
 function defaultAgents() {
