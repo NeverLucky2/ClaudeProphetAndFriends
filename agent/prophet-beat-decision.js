@@ -11,3 +11,24 @@ export function occUnderlying(symbol) {
   const m = symbol.match(/^([A-Z]+)\d{6}[CP]\d{8}$/);
   return m ? m[1] : symbol;
 }
+
+// Normalize a raw position P&L value to PERCENT units (e.g. 12 for +12%).
+// Mirrors renderBeatContextBlock's existing interpretation of unrealized_pnl_pct
+// (it renders `toFixed(1) + '%'`). ASSUMES the upstream value is already in
+// percent. Task 6 includes a blocking step to verify this against a live
+// position; if Alpaca's value arrives as a fraction (0.12), change the body to
+// `return raw * 100;` — this is the single point of truth for the unit.
+export function normalizePnlPct(raw) {
+  return raw;
+}
+
+// Classify a position's P&L (percent units) relative to its band edges.
+// Boundaries are inclusive on the actionable side: <= nearStopPct → near_stop,
+// >= nearTargetPct → near_target, strictly between → interior. Non-finite → the
+// actionable `near_stop` so the beat runs.
+export function classifyBand(pnlPct, { nearStopPct, nearTargetPct }) {
+  if (!Number.isFinite(pnlPct)) return 'near_stop';
+  if (pnlPct <= nearStopPct) return 'near_stop';
+  if (pnlPct >= nearTargetPct) return 'near_target';
+  return 'interior';
+}
