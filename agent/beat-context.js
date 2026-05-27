@@ -1,3 +1,5 @@
+import { classifyBand, normalizePnlPct, loadSkipConfig } from './prophet-beat-decision.js';
+
 // Renders the beat-context block injected into every heartbeat prompt.
 // Output is read-only context, NOT a checklist — agents are told to call
 // the underlying MCP tools only when they need fresher data than the snapshot.
@@ -21,9 +23,11 @@ export function renderBeatContextBlock(ctx) {
     : 'Positions:';
   if (Array.isArray(ctx.positions) && ctx.positions.length > 0) {
     lines.push(positionsHeader);
+    const { thresholds } = loadSkipConfig();
     for (const p of ctx.positions) {
       const sign = p.unrealized_pnl_pct >= 0 ? '+' : '';
-      lines.push(`  - ${p.symbol}: ${p.qty} sh, P&L ${sign}${(p.unrealized_pnl_pct ?? 0).toFixed(1)}% ($${(p.unrealized_pnl ?? 0).toFixed(2)})`);
+      const band = classifyBand(normalizePnlPct(Number(p.unrealized_pnl_pct)), thresholds);
+      lines.push(`  - ${p.symbol}: ${p.qty} sh, P&L ${sign}${(p.unrealized_pnl_pct ?? 0).toFixed(1)}% ($${(p.unrealized_pnl ?? 0).toFixed(2)}) [${band}]`);
     }
   } else if (Array.isArray(ctx.positions)) {
     lines.push(strategyTag ? `Positions (your ${strategyTag} positions): none` : 'Positions: none');

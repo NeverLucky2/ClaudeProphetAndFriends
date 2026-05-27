@@ -56,3 +56,18 @@ test('returns empty string when payload is null', () => {
 test('returns empty string when payload has no usable fields', () => {
   assert.equal(renderBeatContextBlock({}), '');
 });
+
+test('renderBeatContextBlock: annotates each position with its P&L band', () => {
+  const ctx = {
+    segment_pnl: { strategy: 'v2-options', unrealized_pnl_percent: 1, deployed_percent: 5 },
+    positions: [
+      { symbol: 'TSLA260529C00442500', qty: 6, unrealized_pnl_pct: 12.0, unrealized_pnl: 720 },
+      { symbol: 'NVDA260619C00130000', qty: 4, unrealized_pnl_pct: -11.0, unrealized_pnl: -300 },
+      { symbol: 'AAPL260529C00190000', qty: 2, unrealized_pnl_pct: 3.0, unrealized_pnl: 50 },
+    ],
+  };
+  const block = renderBeatContextBlock(ctx);
+  assert.match(block, /TSLA260529C00442500: 6 sh, P&L \+12\.0% \(\$720\.00\) \[interior\]/);
+  assert.match(block, /NVDA260619C00130000: 4 sh, P&L -11\.0% \(\$-300\.00\) \[near_stop\]/);
+  assert.match(block, /AAPL260529C00190000: 2 sh, P&L \+3\.0% \(\$50\.00\) \[interior\]/);
+});
