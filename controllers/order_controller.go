@@ -399,6 +399,12 @@ func (oc *OrderController) HandleFillsSummary(c *gin.Context) {
 		}
 	}
 
+	// ListOrders("closed") returns at most 500 most-recent closed orders across
+	// all strategies (and bracket child legs inflate the count). On a busy
+	// multi-sandbox day this window could in principle not reach back to an early
+	// quiet-strategy fill, under-reporting the recap — benign here (never a false
+	// banner). The reconciliation job shares this same 500-order assumption; a
+	// server-side since= filter would fix both at once if it ever bites.
 	orders, err := oc.tradingService.ListOrders(context.Background(), "closed")
 	if err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})

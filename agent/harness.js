@@ -173,6 +173,52 @@ export function checkCliAuth() {
   }
 }
 
+// classifyOrderResult inspects a resolved opencode tool `part` and reports
+// whether an order-placement/close tool call errored or was rejected. It is
+// defensive: any malformed shape returns { failed: false } so a detection miss
+// can never block recording a trade. Multi-signal because opencode may surface
+// an MCP `isError` result either as an error status, an error field, or as the
+// "Error: …" text the MCP server emits (mcp-server.js:3184-3193).
+export function classifyOrderResult(part) {
+  try {
+    const state = part?.state;
+    if (!state) return { failed: false, reason: '' };
+
+    const clean = (s) => String(s).trim().slice(0, 200);
+
+    // Signal 1: explicit error status.
+    if (state.status === 'error') {
+      const reason = state.error || state.output || 'tool reported error status';
+      return { failed: true, reason: clean(typeof reason === 'string' ? reason : JSON.stringify(reason)) };
+    }
+
+    // Signal 2: an error field on the state.
+    if (state.error) {
+      return { failed: true, reason: clean(typeof state.error === 'string' ? state.error : JSON.stringify(state.error)) };
+    }
+
+    const output = state.output;
+
+    // Signal 3: output object carrying isError (raw MCP result shape).
+    if (output && typeof output === 'object') {
+      if (output.isError === true) {
+        const text = output.content?.[0]?.text || JSON.stringify(output);
+        return { failed: true, reason: clean(text) };
+      }
+      return { failed: false, reason: '' };
+    }
+
+    // Signal 4: output text beginning with "Error:" (MCP server's error shape).
+    if (typeof output === 'string' && /^\s*Error:/i.test(output)) {
+      return { failed: true, reason: clean(output) };
+    }
+
+    return { failed: false, reason: '' };
+  } catch {
+    return { failed: false, reason: '' };
+  }
+}
+
 // ── Agent State ────────────────────────────────────────────────────
 export class AgentState extends EventEmitter {
   constructor() {
@@ -1259,6 +1305,7 @@ ${userBlock}`;
         const isClose    = fullToolName.includes('close_managed');
         if (isNewOrder || isClose) {
           this.state.stats.trades++;
+          const { failed, reason } = classifyOrderResult(part);
           if (isClose) {
             const posId = toolInput.position_id || toolInput.id || '';
             this.state.addTrade({
@@ -1268,6 +1315,8 @@ ${userBlock}`;
               side: 'close',
               quantity: null,
               price: null,
+              status: failed ? 'failed' : 'success',
+              ...(failed ? { errorReason: reason } : {}),
             });
           } else {
             const qty = toolInput.quantity || toolInput.qty;
@@ -1279,6 +1328,8 @@ ${userBlock}`;
               side: toolInput.side || (fullToolName.includes('buy') ? 'buy' : 'sell'),
               quantity: qty || (dollars ? `$${dollars}` : null),
               price: toolInput.limit_price,
+              status: failed ? 'failed' : 'success',
+              ...(failed ? { errorReason: reason } : {}),
             });
           }
         }

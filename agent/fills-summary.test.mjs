@@ -74,4 +74,17 @@ test('startOfEtTradingDayIso is midnight ET for the date (EDT and EST)', () => {
   };
   check('2026-05-26T18:30:00Z', '2026-05-26'); // EDT (UTC-4): 14:30 ET
   check('2026-01-15T18:30:00Z', '2026-01-15'); // EST (UTC-5): 13:30 ET
+  // DST-transition days: `now` is after the 2 AM switch, so its offset differs
+  // from midnight's. The boundary must still land on midnight ET, not 23:00 the
+  // prior day (spring fwd) or 01:00 (fall back).
+  check('2026-03-08T14:00:00Z', '2026-03-08'); // spring forward (2 AM EST→3 AM EDT)
+  check('2026-11-01T15:00:00Z', '2026-11-01'); // fall back (2 AM EDT→1 AM EST)
+});
+
+test('startOfEtTradingDayIso pins the exact UTC instant across the DST seam', () => {
+  // Midnight ET in UTC shifts by an hour across the transition: regression lock.
+  assert.equal(startOfEtTradingDayIso(new Date('2026-03-08T14:00:00Z')), '2026-03-08T05:00:00.000Z'); // EST anchor
+  assert.equal(startOfEtTradingDayIso(new Date('2026-11-01T15:00:00Z')), '2026-11-01T04:00:00.000Z'); // EDT anchor
+  assert.equal(startOfEtTradingDayIso(new Date('2026-05-26T18:30:00Z')), '2026-05-26T04:00:00.000Z'); // EDT mid-season
+  assert.equal(startOfEtTradingDayIso(new Date('2026-01-15T18:30:00Z')), '2026-01-15T05:00:00.000Z'); // EST mid-season
 });
