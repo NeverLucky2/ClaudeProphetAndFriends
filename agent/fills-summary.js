@@ -39,29 +39,39 @@ export function renderFillsSummaryLine(summary, agentName) {
 
 // startOfEtTradingDayIso returns the ISO instant for 00:00 America/New_York on
 // the ET calendar date of `now`. Computed via Intl so the harness and SSE paths
-// share one anchor regardless of the server's own timezone. Pure for testing.
+// (and the reconciliation runner, which imports this) share one anchor
+// regardless of the server's own timezone. Pure for testing.
 export function startOfEtTradingDayIso(now = new Date()) {
   const tz = 'America/New_York';
   const [y, mo, d] = new Intl.DateTimeFormat('en-CA', {
     timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
   }).format(now).split('-').map(Number);
 
-  const wp = new Intl.DateTimeFormat('en-US', {
-    timeZone: tz, hour12: false,
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', second: '2-digit',
-  }).formatToParts(now).reduce((a, p) => ((a[p.type] = p.value), a), {});
+  // ET's UTC offset (ms) at a given instant: render that instant as ET
+  // wall-clock, read it back as if it were UTC, and subtract the real instant.
+  // Handles EDT/EST automatically.
+  const etOffsetMsAt = (instantMs) => {
+    const wp = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz, hour12: false,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    }).formatToParts(new Date(instantMs)).reduce((a, p) => ((a[p.type] = p.value), a), {});
+    const wallAsUtc = Date.UTC(
+      Number(wp.year), Number(wp.month) - 1, Number(wp.day),
+      Number(wp.hour) % 24, Number(wp.minute), Number(wp.second),
+    );
+    return wallAsUtc - instantMs;
+  };
 
-  // ET wall-clock for `now`, read as if it were UTC, minus the real instant =
-  // ET's UTC offset (handles EDT/EST automatically).
-  const wallAsUtc = Date.UTC(
-    Number(wp.year), Number(wp.month) - 1, Number(wp.day),
-    Number(wp.hour) % 24, Number(wp.minute), Number(wp.second),
-  );
-  const nowMs = Math.floor(now.getTime() / 1000) * 1000;
-  const offsetMs = wallAsUtc - nowMs;
+  // Measure the offset *at midnight*, not at `now`: on a DST-transition day the
+  // two differ by an hour, which would otherwise shift the boundary off
+  // midnight (e.g. to 23:00 the prior day, or 01:00). Probe the offset at
+  // midnight-read-as-UTC, then re-probe at the corrected instant so a probe
+  // that landed on the wrong side of the transition still settles.
   const etMidnightAsUtc = Date.UTC(y, mo - 1, d, 0, 0, 0);
-  return new Date(etMidnightAsUtc - offsetMs).toISOString();
+  let result = etMidnightAsUtc - etOffsetMsAt(etMidnightAsUtc);
+  result = etMidnightAsUtc - etOffsetMsAt(result);
+  return new Date(result).toISOString();
 }
 
 function formatQty(qty) {
