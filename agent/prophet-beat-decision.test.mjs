@@ -159,3 +159,26 @@ test('loadSkipConfig: only exact "true" enables', () => {
   assert.equal(loadSkipConfig({ PROPHET_HOLDING_SKIP_ENABLED: 'TRUE' }).enabled, false);
   assert.equal(loadSkipConfig({ PROPHET_HOLDING_SKIP_ENABLED: '1' }).enabled, false);
 });
+
+// Fix 4 tests
+
+test('isUnderlyingQuiet: null field → not quiet (fail toward running)', () => {
+  assert.equal(isUnderlyingQuiet({ ...quietSig, rvol: null }, T), false);
+  assert.equal(isUnderlyingQuiet({ ...quietSig, dist_from_vwap_pct: null }, T), false);
+});
+
+test('isUnderlyingQuiet: exact-at-threshold → not quiet (strict <)', () => {
+  // rvol threshold is 2.0; a value of exactly 2.0 should NOT be quiet (strict <)
+  assert.equal(isUnderlyingQuiet({ ...quietSig, rvol: 2.0 }, T), false);
+});
+
+test('decideHoldingSkip: truthy non-boolean econBlackout → run', () => {
+  const d = decideHoldingSkip({ ...base, econBlackout: { is_blackout: true } });
+  assert.equal(d.skip, false);
+  assert.equal(d.gate, 'econ_blackout');
+});
+
+test('loadSkipConfig: empty-string env falls back to default', () => {
+  const c = loadSkipConfig({ PROPHET_SKIP_MAX_STALENESS_MIN: '' });
+  assert.equal(c.maxStalenessMs, 6 * 60 * 1000);
+});

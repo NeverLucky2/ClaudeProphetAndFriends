@@ -38,6 +38,12 @@ export function classifyBand(pnlPct, { nearStopPct, nearTargetPct }) {
 // the field names emitted by /api/v1/intraday/signals (see agent/intraday-prompt.js).
 export function isUnderlyingQuiet(signal, thresholds) {
   if (!signal) return false;
+  // Reject null/undefined fields BEFORE coercion: Number(null)===0 is finite and
+  // would wrongly pass the threshold check for a missing-data signal.
+  if (signal.dist_from_vwap_pct == null) return false;
+  if (signal.rvol == null) return false;
+  if (signal.range_over_atr == null) return false;
+  if (signal.day_change_pct == null) return false;
   const vwap = Number(signal.dist_from_vwap_pct);
   const rvol = Number(signal.rvol);
   const rng = Number(signal.range_over_atr);
@@ -65,7 +71,9 @@ export function decideHoldingSkip({
   if (!Array.isArray(positions) || positions.length === 0) {
     return { skip: false, gate: null, reason: 'no positions (flat path owns this)' };
   }
-  if (econBlackout === true) {
+  // Treat any truthy value as blackout so future callers passing a non-boolean
+  // (e.g. an object) still fail toward running the beat.
+  if (econBlackout) {
     return { skip: false, gate: 'econ_blackout', reason: 'econ blackout — exits may need action' };
   }
   // `!(a < b)` rather than `a >= b` so a NaN staleness lands on run, not skip.
@@ -101,6 +109,7 @@ export function decideHoldingSkip({
 // only (matches FILLS_SUMMARY_ENABLED / BEAT_CONTEXT_ENABLED convention).
 export function loadSkipConfig(env = process.env) {
   const num = (v, d) => {
+    if (v == null || v === '') return d;
     const n = Number(v);
     return Number.isFinite(n) ? n : d;
   };
