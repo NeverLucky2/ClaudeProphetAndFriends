@@ -57,7 +57,7 @@ test('v4→v5: 4 duplicate accounts dedup to 1 survivor, sandbox pointers rewrit
   await cfgStore.loadConfig();
   const cfg = cfgStore.getConfig();
 
-  assert.equal(cfg.schemaVersion, 6);
+  assert.equal(cfg.schemaVersion, 7);
   assert.equal(cfg.accounts.length, 1, 'deduped to one account');
   const survivorId = cfg.accounts[0].id;
   assert.equal(cfg.accounts[0].name, 'Paper (from .env)', 'env-seeded account is survivor by name match');
@@ -107,8 +107,8 @@ test('v4→v5: idempotent — re-running on v5 config is a no-op', async () => {
   await cfgStore.loadConfig();
   const afterSecond = await fs.readFile(configPath, 'utf-8');
 
-  assert.equal(JSON.parse(afterFirst).schemaVersion, 6);
-  assert.equal(JSON.parse(afterSecond).schemaVersion, 6);
+  assert.equal(JSON.parse(afterFirst).schemaVersion, 7);
+  assert.equal(JSON.parse(afterSecond).schemaVersion, 7);
 
   // No second backup file written on the no-op migration
   const backups = await fs.readdir(backupDir);
@@ -247,16 +247,19 @@ const v5AgentsFixture = {
   models: [],
 };
 
-test('v5→v6: mechanical agents get respondsToEmergencyWakes=false, reactive agents untouched, version bumped', async () => {
+test('v5→v7: mechanical agents get respondsToEmergencyWakes=false, reactive agents untouched, version bumped', async () => {
   await fs.writeFile(configPath, JSON.stringify(v5AgentsFixture));
   await cfgStore.loadConfig();
   const cfg = cfgStore.getConfig();
   const byId = Object.fromEntries(cfg.agents.map(a => [a.id, a]));
 
-  assert.equal(cfg.schemaVersion, 6, 'schemaVersion bumped to 6');
+  assert.equal(cfg.schemaVersion, 7, 'schemaVersion bumped to 7');
   assert.equal(byId['harvest'].respondsToEmergencyWakes, false);
   assert.equal(byId['mean-rev'].respondsToEmergencyWakes, false);
   assert.equal(byId['trend-prophet'].respondsToEmergencyWakes, false);
+  // Drift is absent from the v5 fixture → merged from defaults, which now carry
+  // the flag inline; either way it must end up exempt.
+  assert.equal(byId['drift'].respondsToEmergencyWakes, false);
   // News-reactive agents are left untouched (flag absent => default reactive).
   assert.notEqual(byId['default'].respondsToEmergencyWakes, false);
   assert.notEqual(byId['penny-prophet'].respondsToEmergencyWakes, false);
@@ -276,4 +279,49 @@ test('v5→v6: a user-set respondsToEmergencyWakes value is not clobbered', asyn
   const byId = Object.fromEntries(cfgStore.getConfig().agents.map(a => [a.id, a]));
   assert.equal(byId['harvest'].respondsToEmergencyWakes, true, 'user value preserved');
   assert.equal(byId['mean-rev'].respondsToEmergencyWakes, false, 'unset mechanical agent still defaulted');
+});
+
+// v6 → v7: Drift (earnings-drift) was added after the v5→v6 exempt backfill and
+// was omitted from its set, so a config already at v6 keeps Drift responding to
+// emergency wakes — burning a full LLM beat to conclude "outside my 17:00 window."
+// The v6→v7 pass backfills the flag for already-persisted v6 configs.
+test('v6→v7: Drift, omitted from the v6 exempt set, is backfilled to respondsToEmergencyWakes=false', async () => {
+  const v6WithDrift = {
+    ...v5AgentsFixture,
+    schemaVersion: 6,
+    agents: [
+      { id: 'default', name: 'Prophet', strategyId: 'v2-options' },
+      { id: 'harvest', name: 'Harvest', strategyId: 'harvest', respondsToEmergencyWakes: false },
+      { id: 'mean-rev', name: 'Coil', strategyId: 'mean-rev-rsi2', respondsToEmergencyWakes: false },
+      { id: 'trend-prophet', name: 'Turtle', strategyId: 'trend', respondsToEmergencyWakes: false },
+      { id: 'drift', name: 'Drift', strategyId: 'earnings-drift' }, // the v6 omission
+      { id: 'penny-prophet', name: 'Spark', strategyId: 'penny-momentum' },
+    ],
+  };
+  await fs.writeFile(configPath, JSON.stringify(v6WithDrift));
+  await cfgStore.loadConfig();
+  const cfg = cfgStore.getConfig();
+  const byId = Object.fromEntries(cfg.agents.map(a => [a.id, a]));
+
+  assert.equal(cfg.schemaVersion, 7, 'schemaVersion bumped to 7');
+  assert.equal(byId['drift'].respondsToEmergencyWakes, false, 'Drift backfilled exempt');
+  // Already-exempt agents stay exempt; news-reactive agents stay reactive.
+  assert.equal(byId['harvest'].respondsToEmergencyWakes, false);
+  assert.notEqual(byId['default'].respondsToEmergencyWakes, false);
+  assert.notEqual(byId['penny-prophet'].respondsToEmergencyWakes, false);
+});
+
+test('v6→v7: a user-set Drift respondsToEmergencyWakes=true is not clobbered', async () => {
+  const fixture = {
+    ...v5AgentsFixture,
+    schemaVersion: 6,
+    agents: [
+      // User deliberately opted Drift back into emergency wakes.
+      { id: 'drift', name: 'Drift', strategyId: 'earnings-drift', respondsToEmergencyWakes: true },
+    ],
+  };
+  await fs.writeFile(configPath, JSON.stringify(fixture));
+  await cfgStore.loadConfig();
+  const byId = Object.fromEntries(cfgStore.getConfig().agents.map(a => [a.id, a]));
+  assert.equal(byId['drift'].respondsToEmergencyWakes, true, 'user value preserved');
 });

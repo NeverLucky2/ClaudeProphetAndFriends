@@ -321,6 +321,10 @@ Use get_earnings_drift_candidates (no args) to read the pre-filtered, composite-
 
 For existing positions, use get_earnings_drift_signal({ symbol, earnings_date, timing }) to check exit conditions (MA50 break, PEAD stage updates). The 60-trading-day time stop is computed from the position's entry_date in your activity log.`,
       strategyId: 'earnings-drift',
+      // Mechanical once-daily PEAD executor — no provision to act on intraday
+      // news (its rules reject any beat outside the 16:55–17:15 ET window).
+      // Exempt from emergency-alert wakes; same class as Coil/Trend/Harvest.
+      respondsToEmergencyWakes: false,
       model: 'anthropic/claude-sonnet-4-6',
       heartbeatOverrides: {
         pre_market: 86400,
@@ -757,7 +761,23 @@ async function migrateLegacyConfig(config, rawSchemaVersion = 0) {
     }
   }
 
-  config.schemaVersion = 6;  // was 5
+  // v6 → v7: Drift (earnings-drift) was added to the default roster after the
+  // v5→v6 backfill and was omitted from its EMERGENCY_EXEMPT set, so configs
+  // already at v6 left Drift responding to emergency-alert wakes — burning a
+  // full LLM beat to conclude "outside my 17:00 ET window, ignored." Drift is
+  // the same mechanical, news-insensitive class as the others; backfill the
+  // flag for any still-undefined member of the (now complete) exempt set,
+  // leaving any user-set value alone.
+  if (rawSchemaVersion < 7) {
+    const EMERGENCY_EXEMPT = new Set(['trend-prophet', 'mean-rev', 'harvest', 'drift']);
+    for (const agent of config.agents || []) {
+      if (EMERGENCY_EXEMPT.has(agent.id) && agent.respondsToEmergencyWakes === undefined) {
+        agent.respondsToEmergencyWakes = false;
+      }
+    }
+  }
+
+  config.schemaVersion = 7;  // was 6
   if (!config.sandboxes) config.sandboxes = {};
 
   // Only auto-create sbx_<accountId> sandboxes during the v4→v5 migration pass.
