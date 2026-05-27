@@ -980,6 +980,17 @@
     .trades-filter-row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; font-size: 12px; color: var(--ink-muted); }
     .trades-filter-row select { font-size: 12px; }
     .trades-filter-count { font-size: 11px; color: var(--ink-faint); margin-left: auto; }
+    .trades-recon-banner {
+      display: none; align-items: center; gap: 10px; margin-bottom: 12px; padding: 8px 12px;
+      border: 1px solid var(--error); border-left: 3px solid var(--error); border-radius: 4px;
+      background: var(--surface-2, transparent); font-size: 13px; color: var(--ink);
+    }
+    .trades-recon-banner.is-shown { display: flex; }
+    .trades-recon-banner .recon-detail { cursor: pointer; text-decoration: underline; color: var(--accent); }
+    .trades-recon-banner .recon-dismiss { margin-left: auto; cursor: pointer; color: var(--ink-faint); border: none; background: none; font-size: 14px; }
+    .trades-recon-items { display: none; font-size: 12px; color: var(--ink-muted); margin-bottom: 12px; font-family: 'IBM Plex Mono', monospace; }
+    .trades-recon-items.is-shown { display: block; }
+    .trades-recon-items .recon-scope { color: var(--ink-faint); margin-top: 6px; }
 
     .trade-card:hover { background: var(--paper-dark); }
     .trade-card .trade-chevron { display: inline-block; margin-left: 8px; transition: transform 0.18s; color: var(--ink-faint); font-size: 12px; }
@@ -1178,6 +1189,12 @@
             <span id="trades-truncation-notice" class="trades-filter-count"></span>
           </span>
         </div>
+        <div class="trades-recon-banner" id="trades-recon-banner">
+          <span id="trades-recon-summary"></span>
+          <span class="recon-detail" id="trades-recon-toggle">details</span>
+          <button class="recon-dismiss" id="trades-recon-dismiss" title="Dismiss">&times;</button>
+        </div>
+        <div class="trades-recon-items" id="trades-recon-items"></div>
         <div id="trades-feed"><div class="no-data">No trades yet. Start the agent to see live activity.</div></div>
       </div>
     </div>
@@ -2592,6 +2609,37 @@ async function seedTodayTrades() {
     renderTradesBulk(data.trades);
   } catch (err) {
     console.warn('seedTodayTrades failed:', err);
+  }
+  loadReconciliationBanner();
+}
+
+async function loadReconciliationBanner() {
+  const banner = document.getElementById('trades-recon-banner');
+  if (!banner) return;
+  try {
+    const date = _todayEt();
+    const res = await fetch('/api/reconciliation?date=' + encodeURIComponent(date));
+    if (!res.ok) return;
+    const data = await res.json();
+    if (!data || !data.mismatchCount) return; // silent when clean
+    const noun = data.mismatchCount === 1 ? 'mismatch' : 'mismatches';
+    document.getElementById('trades-recon-summary').textContent =
+      `⚠ ${data.mismatchCount} possible broker ${noun} on ${data.date}`;
+    const itemsEl = document.getElementById('trades-recon-items');
+    itemsEl.innerHTML =
+      (data.items || []).map(m =>
+        '<div>' + esc((m.agentName || m.sandboxId || '') + ': ') + esc(m.class) + ' ' +
+        esc(m.symbol || '') + ' ' + esc(m.side || '') + ' — ' + esc(m.note || '') + '</div>'
+      ).join('') +
+      '<div class="recon-scope">Covers order placements (opens/adds). Does NOT verify closes/exits or live position state.</div>';
+    banner.classList.add('is-shown');
+    document.getElementById('trades-recon-toggle').onclick = () => itemsEl.classList.toggle('is-shown');
+    document.getElementById('trades-recon-dismiss').onclick = () => {
+      banner.classList.remove('is-shown');
+      itemsEl.classList.remove('is-shown');
+    };
+  } catch (err) {
+    console.warn('loadReconciliationBanner failed:', err);
   }
 }
 

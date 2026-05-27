@@ -32,6 +32,8 @@ import {
 } from './config-store.js';
 import { appendTrade, readTrades } from './trades-store.js';
 import { fetchFillsSummary, renderFillsSummaryLine, startOfEtTradingDayIso } from './fills-summary.js';
+import { runReconciliationForSandbox, readReconciliationSummary } from './trade-reconciliation.js';
+import nodeFs from 'node:fs/promises';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(__dirname, '..');
@@ -136,6 +138,32 @@ for (const evt of EVENTS) {
   });
 }
 
+// Cross-sandbox reconciliation runner injected into the scheduler. Iterates
+// running sandboxes, resolves each one's strategy tag + goAxios, and reconciles
+// its trade log against the broker. Untagged agents (no strategyId) are skipped
+// — their orders carry no tag to attribute. Soft-fail per sandbox.
+async function runTradeReconciliationAllSandboxes(isoDate) {
+  if (process.env.TRADE_RECONCILIATION_ENABLED === 'false') return; // default ON; kill switch
+  const dayStartIso = startOfEtTradingDayIso();
+  for (const runtime of orchestrator.runtimes.values()) {
+    try {
+      const sandboxId = runtime?.harness?.sandboxId;
+      if (!sandboxId) continue;
+      const resolved = getResolvedAgentForSandbox(sandboxId);
+      const strategy = resolved?.strategyId;
+      const goAxios = runtime.goAxios;
+      if (!strategy || !goAxios) continue;
+      await runReconciliationForSandbox({
+        goAxios, sandboxId, strategy, agentName: resolved?.name,
+        isoDate, dayStartIso, projectRoot: PROJECT_ROOT,
+        readTradesFn: readTrades, fsImpl: nodeFs,
+      });
+    } catch {
+      // soft-fail per sandbox — one bot down must not abort the rest
+    }
+  }
+}
+
 // ── Analysis Scheduler ─────────────────────────────────────────────
 const scheduler = new AnalysisScheduler({
   model: getConfig().activeModel || 'anthropic/claude-sonnet-4-6',
@@ -144,6 +172,7 @@ const scheduler = new AnalysisScheduler({
     const runtime = orchestrator.listRuntimes().find(r => r.goReady && r.port);
     return runtime ? `http://localhost:${runtime.port}` : null;
   },
+  runTradeReconciliation: runTradeReconciliationAllSandboxes,
 });
 scheduler.on('agent_log', (data) => broadcast('agent_log', data));
 scheduler.on('scheduler_job_start', ({ job, date }) => broadcast('agent_log', {
@@ -763,6 +792,24 @@ app.get('/api/trades', async (req, res) => {
   try {
     const { trades, truncated } = await readTrades(PROJECT_ROOT, { from, to, sandboxId });
     res.json({ from, to, count: trades.length, truncated, trades });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Reconciliation summary for a date (default: today ET). Aggregates across
+// sandboxes unless ?sandboxId= is given. Returns { date, mismatchCount, items }.
+app.get('/api/reconciliation', async (req, res) => {
+  const _etFmt = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' });
+  const today = _etFmt.format(new Date());
+  const date = String(req.query.date || today);
+  const sandboxId = req.query.sandboxId ? String(req.query.sandboxId) : undefined;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return res.status(400).json({ error: 'date must be YYYY-MM-DD' });
+  }
+  try {
+    const summary = await readReconciliationSummary(PROJECT_ROOT, { date, sandboxId }, { fs: nodeFs });
+    res.json(summary);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

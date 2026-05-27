@@ -200,6 +200,7 @@ export class AnalysisScheduler extends EventEmitter {
     // at a real Go bot port instead of the unbound TRADING_BOT_URL fallback.
     // Returns "http://localhost:<port>" of any goReady sandbox, or null.
     this._getHealthySandboxUrl = options.getHealthySandboxUrl || (() => null);
+    this._runTradeReconciliationFn = options.runTradeReconciliation || null;
     this._timer = null;
     this._running = false;
     this._activeJob = null;
@@ -225,6 +226,7 @@ export class AnalysisScheduler extends EventEmitter {
     this._lastMacroRegimeDate = null;   // YYYY-MM-DD (daily macro-regime-detector run)
     this._lastMarketTopDate = null;     // YYYY-MM-DD (daily market-top-detector run)
     this._lastBubbleDate = null;        // YYYY-MM-DD (daily us-market-bubble-detector run)
+    this._lastTradeReconcileDate = null; // YYYY-MM-DD (daily after-close reconciliation)
   }
 
   async start() {
@@ -277,6 +279,7 @@ export class AnalysisScheduler extends EventEmitter {
       'harvest_parameter_review', 'trend_parameter_review',
       'regime_gate_compute',
       'macro_regime_skill', 'breadth_skill', 'market_top_skill', 'bubble_skill',
+      'trade_reconciliation',
     ];
     if (!validJobs.includes(jobName)) {
       return { error: `Unknown job: ${jobName}. Valid: ${validJobs.join(', ')}` };
@@ -369,6 +372,9 @@ export class AnalysisScheduler extends EventEmitter {
         await this._runBubbleSkill(isoDate);
         this._lastBubbleDate = isoDate;
         await this._saveState();
+      } else if (jobName === 'trade_reconciliation') {
+        this._lastTradeReconcileDate = isoDate;
+        await this._runTradeReconciliation(isoDate);
       } else if (jobName === 'trend_parameter_review') {
         this._lastTrendParamReviewQuarter = this._getQuarter(isoDate);
         await this._runSkill('trend-parameter-review', isoDate, null, 15 * 60 * 1000, this._automatedRunAppendix({
@@ -1093,6 +1099,11 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
       await this._checkAndRunLossJobs(isoDate);
     }
 
+    // Daily trade-log ↔ broker reconciliation — 4:45 PM ET, after fills settle.
+    if (isWeekday && hour === 16 && minute === 45 && this._lastTradeReconcileDate !== isoDate) {
+      await this.triggerJob('trade_reconciliation').catch(() => {});
+    }
+
     if (isSunday && hour === 18 && minute === 0 && this._lastWeeklyScreenDate !== isoDate) {
       await this.triggerJob('weekly_screeners').catch(() => {});
     }
@@ -1134,6 +1145,19 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
     });
 
     this.emit('scheduler_job_end', { job: 'macro_regime_skill', date, output: REPORTS_DIR });
+  }
+
+  // trade_reconciliation: delegates to the injected cross-sandbox runner (it
+  // needs per-sandbox goAxios + trade-log access the scheduler does not hold).
+  // Soft-fail: the runner reports per-sandbox; a failure leaves no report and
+  // the banner stays silent.
+  async _runTradeReconciliation(isoDate) {
+    this._log(`Starting trade_reconciliation for ${isoDate}...`, 'info');
+    this.emit('scheduler_job_start', { job: 'trade_reconciliation', date: isoDate });
+    if (typeof this._runTradeReconciliationFn === 'function') {
+      await this._runTradeReconciliationFn(isoDate);
+    }
+    this._log(`trade_reconciliation complete for ${isoDate}.`, 'success');
   }
 
   // breadth_skill: LLM-driven via _runSkill so the LLM can run the CSV fetcher
