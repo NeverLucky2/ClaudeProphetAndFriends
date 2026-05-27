@@ -1,3 +1,5 @@
+import { classifyBand, normalizePnlPct, loadSkipConfig } from './prophet-beat-decision.js';
+
 // Renders the beat-context block injected into every heartbeat prompt.
 // Output is read-only context, NOT a checklist — agents are told to call
 // the underlying MCP tools only when they need fresher data than the snapshot.
@@ -21,9 +23,20 @@ export function renderBeatContextBlock(ctx) {
     : 'Positions:';
   if (Array.isArray(ctx.positions) && ctx.positions.length > 0) {
     lines.push(positionsHeader);
+    // Band labels use Prophet's options-calibrated thresholds (−10/+30) and are
+    // only meaningful for v2-options positions. Append them for v2-options only;
+    // other agents get the plain position line to avoid misleading labeling.
+    const isProphet = ctx.segment_pnl?.strategy === 'v2-options';
+    const { thresholds } = isProphet ? loadSkipConfig() : { thresholds: null };
     for (const p of ctx.positions) {
       const sign = p.unrealized_pnl_pct >= 0 ? '+' : '';
-      lines.push(`  - ${p.symbol}: ${p.qty} sh, P&L ${sign}${(p.unrealized_pnl_pct ?? 0).toFixed(1)}% ($${(p.unrealized_pnl ?? 0).toFixed(2)})`);
+      const baseLine = `  - ${p.symbol}: ${p.qty} sh, P&L ${sign}${(p.unrealized_pnl_pct ?? 0).toFixed(1)}% ($${(p.unrealized_pnl ?? 0).toFixed(2)})`;
+      if (isProphet) {
+        const band = classifyBand(normalizePnlPct(Number(p.unrealized_pnl_pct)), thresholds);
+        lines.push(`${baseLine} [${band}]`);
+      } else {
+        lines.push(baseLine);
+      }
     }
   } else if (Array.isArray(ctx.positions)) {
     lines.push(strategyTag ? `Positions (your ${strategyTag} positions): none` : 'Positions: none');

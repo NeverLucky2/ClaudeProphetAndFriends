@@ -12,6 +12,9 @@
 // See docs/preflight-skip-spec.md for the full design.
 
 import { isMarketHoliday } from './market-calendar.js';
+import {
+  occUnderlying, normalizePnlPct, decideHoldingSkip, loadSkipConfig,
+} from './prophet-beat-decision.js';
 
 // isEconomicBlackout queries /api/v1/econ/blackout for the shared US-release
 // blackout window (30 min before / 15 min after CPI, NFP, FOMC, PCE, PPI,
@@ -278,7 +281,7 @@ export function isClosedPhase(now) {
 // from the prior implementation is dropped: during 'closed' phase the
 // broker is shut, partial fills can't occur, and day orders are
 // auto-canceled by Alpaca at close.
-async function prophetPreflight(runtime, agentConfig) {
+async function prophetPreflight(runtime, agentConfig, opts = {}) {
   const phase = isClosedPhase(new Date());
   const { goAxios } = runtime;
 
@@ -297,20 +300,61 @@ async function prophetPreflight(runtime, agentConfig) {
     return { skip: false, reason: `${positionCount} open position(s) to evaluate` };
   }
 
-  // Open phase — Prophet normally always runs. New: gate on econ blackout
-  // when there are no positions to manage. Adds one /api/v1/positions call
-  // per open-phase beat (~5ms) in exchange for skipping high-noise release
-  // windows that would otherwise burn tokens. A bad/ambiguous shape yields -1,
-  // so the gate below is skipped and Prophet runs (fail open).
+  // Open phase. Flat → existing regime/econ gating (unchanged).
   const positionsResp = await goAxios.get('/api/v1/positions?strategy=v2-options');
   const positionCount = positionCountFromResponse(positionsResp.data);
+  if (positionCount < 0) {
+    return { skip: false, reason: 'positions response shape unexpected' };
+  }
   if (positionCount === 0) {
     const regimeSkip = await regimeGateBlockSkipIfNoPositions(runtime, 0);
     if (regimeSkip) return regimeSkip;
     const econSkip = await econBlackoutSkipIfNoPositions(runtime, 0);
     if (econSkip) return econSkip;
+    return { skip: false, reason: 'phase active — Prophet runs (flat)' };
   }
-  return { skip: false, reason: 'phase active — Prophet runs' };
+
+  // Holding case — bounded-staleness skip (flag-gated, default OFF). When OFF,
+  // behaves exactly as before: open positions always run.
+  const cfg = loadSkipConfig();
+  if (!cfg.enabled) {
+    return { skip: false, reason: `${positionCount} open position(s) to evaluate` };
+  }
+
+  const positions = positionsResp.data.map((p) => ({
+    symbol: p.Symbol,
+    underlying: occUnderlying(p.Symbol),
+    pnlPct: normalizePnlPct(Number(p.UnrealizedPLPC)),
+  }));
+  const underlyings = [...new Set(positions.map((p) => p.underlying))];
+
+  // Fetch intraday signals (held names) + econ blackout concurrently. Both fail
+  // TOWARD running: signal timeout → empty (not quiet → run); econ timeout/error
+  // → treat as blackout → run. isEconomicBlackout has its own 1500ms inner
+  // timeout; the outer PREFLIGHT_TIMEOUT_MS race is the real backstop and also
+  // fails toward run.
+  const [sigSettled, econSettled] = await Promise.allSettled([
+    goAxios.get(`/api/v1/intraday/signals?symbols=${encodeURIComponent(underlyings.join(','))}`, { timeout: 800 }),
+    isEconomicBlackout(new Date(), runtime),
+  ]);
+
+  const signalsByUnderlying = {};
+  if (sigSettled.status === 'fulfilled' && Array.isArray(sigSettled.value?.data?.signals)) {
+    for (const s of sigSettled.value.data.signals) signalsByUnderlying[s.symbol] = s;
+  }
+  const econBlackout = econSettled.status !== 'fulfilled'
+    || econSettled.value?.blackout === true
+    || econSettled.value?.error != null;
+
+  const decision = decideHoldingSkip({
+    positions,
+    signalsByUnderlying,
+    sinceLastExitEvalMs: Number.isFinite(opts?.sinceLastExitEvalMs) ? opts.sinceLastExitEvalMs : Infinity,
+    maxStalenessMs: cfg.maxStalenessMs,
+    econBlackout,
+    thresholds: cfg.thresholds,
+  });
+  return { skip: decision.skip, reason: decision.reason, gate: decision.gate };
 }
 
 const TREND_UNIVERSE = ['TLT', 'GLD', 'USO', 'DBC', 'UUP', 'EEM'];
@@ -661,7 +705,7 @@ export const PREFLIGHT_REGISTRY = {
 
 const PREFLIGHT_TIMEOUT_MS = 2000;
 
-export async function resolvePreflight(strategyId, runtime, agentConfig) {
+export async function resolvePreflight(strategyId, runtime, agentConfig, opts = {}) {
   if (!strategyId) return { skip: false, reason: 'no strategy id on agent config' };
   const fn = PREFLIGHT_REGISTRY[strategyId];
   if (!fn) return { skip: false, reason: 'no preflight registered' };
@@ -669,7 +713,7 @@ export async function resolvePreflight(strategyId, runtime, agentConfig) {
 
   try {
     const result = await Promise.race([
-      fn(runtime, agentConfig),
+      fn(runtime, agentConfig, opts),
       new Promise((_, reject) =>
         setTimeout(() => reject(new Error(`preflight timeout after ${PREFLIGHT_TIMEOUT_MS}ms`)), PREFLIGHT_TIMEOUT_MS)
       ),
@@ -677,8 +721,8 @@ export async function resolvePreflight(strategyId, runtime, agentConfig) {
     if (typeof result?.skip !== 'boolean') {
       return { skip: false, reason: 'preflight returned invalid shape' };
     }
-    return { skip: result.skip, reason: result.reason || '' };
+    return { skip: result.skip, reason: result.reason || '', gate: result.gate ?? null };
   } catch (err) {
-    return { skip: false, reason: `preflight error: ${err.message}` };
+    return { skip: false, reason: `preflight error: ${err.message}`, gate: null };
   }
 }
