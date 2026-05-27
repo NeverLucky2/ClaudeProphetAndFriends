@@ -50,7 +50,7 @@ export function reconcileTrades(loggedTrades, brokerOrders) {
       else counts.unresolved++;
     }
 
-    if (successLogs.length > 0 && took + reject === 0) {
+    if (successLogs.length > 0 && g.broker.length === 0) {
       counts.phantomSuccess += successLogs.length;
       mismatches.push({
         class: 'phantom_success', symbol: g.symbol, side: g.side,

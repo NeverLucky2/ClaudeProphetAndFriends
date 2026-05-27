@@ -52,6 +52,13 @@ test('non-terminal: logged failed vs pending_new order → zero mismatches, unre
   assert.equal(r.counts.unresolved, 1);
 });
 
+test('phantom suppressed when only an in-flight (non-terminal) order exists', () => {
+  const r = reconcileTrades([log('AMD', 'buy', 'success')], [ok('AMD', 'buy', 'pending_new')]);
+  assert.equal(r.counts.phantomSuccess, 0);
+  assert.equal(r.mismatches.length, 0);
+  assert.equal(r.counts.unresolved, 1);
+});
+
 test('empty inputs: no throw, zero counts', () => {
   const r = reconcileTrades([], []);
   assert.equal(r.mismatches.length, 0);

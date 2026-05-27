@@ -143,6 +143,7 @@ for (const evt of EVENTS) {
 // its trade log against the broker. Untagged agents (no strategyId) are skipped
 // — their orders carry no tag to attribute. Soft-fail per sandbox.
 async function runTradeReconciliationAllSandboxes(isoDate) {
+  if (process.env.TRADE_RECONCILIATION_ENABLED === 'false') return; // default ON; kill switch
   const dayStartIso = startOfEtTradingDayIso();
   for (const runtime of orchestrator.runtimes.values()) {
     try {
