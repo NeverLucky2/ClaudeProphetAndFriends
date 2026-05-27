@@ -38,6 +38,10 @@ export function classifyBand(pnlPct, { nearStopPct, nearTargetPct }) {
 // the field names emitted by /api/v1/intraday/signals (see agent/intraday-prompt.js).
 export function isUnderlyingQuiet(signal, thresholds) {
   if (!signal) return false;
+  // Reject sentinel/degraded rows from the Go intraday service. The service
+  // returns a zero-filled row with a non-empty `note` when data is cold or
+  // missing ("no data", "no intraday bars yet"). Any note at all → not quiet.
+  if (signal.note) return false;
   // Reject null/undefined fields BEFORE coercion: Number(null)===0 is finite and
   // would wrongly pass the threshold check for a missing-data signal.
   if (signal.dist_from_vwap_pct == null) return false;
@@ -49,6 +53,10 @@ export function isUnderlyingQuiet(signal, thresholds) {
   const rng = Number(signal.range_over_atr);
   const day = Number(signal.day_change_pct);
   if (![vwap, rvol, rng, day].every(Number.isFinite)) return false;
+  // RVOL is daily-derived; 0 means daily bars were missing (no note emitted in
+  // this path). Legitimate RTH rvol is always > 0. `!(rvol > 0)` also catches
+  // NaN as a fallback (though the isFinite check above handles that).
+  if (!(rvol > 0)) return false;
   return Math.abs(vwap) < thresholds.vwap
     && rvol < thresholds.rvol
     && rng < thresholds.rngAtr

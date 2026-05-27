@@ -71,3 +71,31 @@ test('renderBeatContextBlock: annotates each position with its P&L band', () => 
   assert.match(block, /NVDA260619C00130000: 4 sh, P&L -11\.0% \(\$-300\.00\) \[near_stop\]/);
   assert.match(block, /AAPL260529C00190000: 2 sh, P&L \+3\.0% \(\$50\.00\) \[interior\]/);
 });
+
+// Fix 2 tests — band label scoped to v2-options only
+
+test('renderBeatContextBlock: non-v2-options strategy → position lines have NO band suffix', () => {
+  // Band labels are Prophet-specific (−10/+30 thresholds) — other agents get
+  // plain position lines to avoid misleading labeling.
+  const ctx = {
+    segment_pnl: { strategy: 'trend', unrealized_pnl_percent: 2.0, deployed_percent: 8.0 },
+    positions: [
+      { symbol: 'TLT', qty: 50, unrealized_pnl_pct: 3.5, unrealized_pnl: 175 },
+    ],
+  };
+  const block = renderBeatContextBlock(ctx);
+  assert.match(block, /TLT: 50 sh, P&L \+3\.5% \(\$175\.00\)$/m);
+  assert.doesNotMatch(block, /\[interior\]|\[near_stop\]|\[near_target\]/);
+});
+
+test('renderBeatContextBlock: no segment_pnl at all → position lines have NO band suffix', () => {
+  const ctx = {
+    account: { portfolio_value: 50000 },
+    positions: [
+      { symbol: 'AAPL', qty: 10, unrealized_pnl_pct: 1.5, unrealized_pnl: 45 },
+    ],
+  };
+  const block = renderBeatContextBlock(ctx);
+  assert.match(block, /AAPL: 10 sh, P&L \+1\.5% \(\$45\.00\)$/m);
+  assert.doesNotMatch(block, /\[interior\]|\[near_stop\]|\[near_target\]/);
+});

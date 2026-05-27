@@ -1189,3 +1189,26 @@ test('prophetPreflight holding: enabled + interior + fresh but underlying active
   assert.equal(r.gate, 'not_quiet');
   delete process.env.PROPHET_HOLDING_SKIP_ENABLED;
 });
+
+test('prophetPreflight holding: econ fetch REJECTS (throws) → skip:false (fail toward run)', async () => {
+  // Core invariant: a degraded/throwing econ endpoint must never permit a skip.
+  // makeProphetRuntime supports passing an Error as `blackout` — when the url
+  // starts with /api/v1/econ/blackout it checks instanceof Error and throws.
+  process.env.PROPHET_HOLDING_SKIP_ENABLED = 'true';
+  const rt = {
+    goAxios: {
+      get: async (url) => {
+        if (url.startsWith('/api/v1/positions')) return { data: HELD };
+        if (url.startsWith('/api/v1/intraday/signals')) return { data: { signals: quietSignals } };
+        if (url.startsWith('/api/v1/econ/blackout')) throw new Error('econ endpoint down');
+        if (url.startsWith('/api/v1/regime-gate/status')) return { data: { block_new_entries: false } };
+        throw new Error(`unexpected url: ${url}`);
+      },
+    },
+  };
+  const r = await withFrozenTime(ET_OPEN, () =>
+    resolvePreflight('v2-options', rt, PROPHET_CFG, { sinceLastExitEvalMs: 60_000 })
+  );
+  assert.equal(r.skip, false, 'econ fetch throw must fail toward run, not skip');
+  delete process.env.PROPHET_HOLDING_SKIP_ENABLED;
+});

@@ -182,3 +182,21 @@ test('loadSkipConfig: empty-string env falls back to default', () => {
   const c = loadSkipConfig({ PROPHET_SKIP_MAX_STALENESS_MIN: '' });
   assert.equal(c.maxStalenessMs, 6 * 60 * 1000);
 });
+
+// Fix 1 tests — degraded/sentinel row guards
+
+test('isUnderlyingQuiet: zero-filled signal WITH note: "no data" → false (sentinel row)', () => {
+  // The Go intraday service emits this exact shape for cold/deadline symbols.
+  const degraded = { symbol: 'TSLA', dist_from_vwap_pct: 0, rvol: 0, range_over_atr: 0, day_change_pct: 0, note: 'no data' };
+  assert.equal(isUnderlyingQuiet(degraded, T), false);
+});
+
+test('isUnderlyingQuiet: zero-filled signal WITH note: "no intraday bars yet" → false', () => {
+  const degraded = { symbol: 'TSLA', dist_from_vwap_pct: 0, rvol: 0, range_over_atr: 0, day_change_pct: 0, note: 'no intraday bars yet' };
+  assert.equal(isUnderlyingQuiet(degraded, T), false);
+});
+
+test('isUnderlyingQuiet: otherwise-quiet signal with rvol: 0 (no note, missing daily bars) → false', () => {
+  // Go silently zeroes RVOL when daily bars are absent — no note in this path.
+  assert.equal(isUnderlyingQuiet({ ...quietSig, rvol: 0 }, T), false);
+});
