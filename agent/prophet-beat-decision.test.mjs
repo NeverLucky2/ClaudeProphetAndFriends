@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { occUnderlying } from './prophet-beat-decision.js';
 import { classifyBand, normalizePnlPct } from './prophet-beat-decision.js';
 import { isUnderlyingQuiet } from './prophet-beat-decision.js';
+import { decideHoldingSkip } from './prophet-beat-decision.js';
 
 test('occUnderlying extracts the underlying from an OCC option symbol', () => {
   assert.equal(occUnderlying('TSLA260529C00442500'), 'TSLA');
@@ -61,4 +62,69 @@ test('isUnderlyingQuiet: missing/partial/NaN signal → not quiet (fail toward r
   assert.equal(isUnderlyingQuiet(undefined, T), false);
   assert.equal(isUnderlyingQuiet({ ...quietSig, rvol: undefined }, T), false);
   assert.equal(isUnderlyingQuiet({ ...quietSig, day_change_pct: 'x' }, T), false);
+});
+
+const THRESH = { nearStopPct: -10, nearTargetPct: 30, vwap: 1.5, rvol: 2.0, rngAtr: 1.5, dayPct: 4.0 };
+const sig = (o = {}) => ({ dist_from_vwap_pct: 0.2, rvol: 1.0, range_over_atr: 0.7, day_change_pct: 0.5, ...o });
+const base = {
+  positions: [{ symbol: 'TSLA260529C00442500', underlying: 'TSLA', pnlPct: 5 }],
+  signalsByUnderlying: { TSLA: sig() },
+  sinceLastExitEvalMs: 60_000,
+  maxStalenessMs: 360_000,
+  econBlackout: false,
+  thresholds: THRESH,
+};
+
+test('decideHoldingSkip: interior + quiet + fresh + no blackout → skip', () => {
+  const d = decideHoldingSkip(base);
+  assert.equal(d.skip, true);
+  assert.equal(d.gate, null);
+});
+
+test('decideHoldingSkip: empty positions → run (explicit guard, not vacuous every)', () => {
+  const d = decideHoldingSkip({ ...base, positions: [] });
+  assert.equal(d.skip, false);
+  assert.equal(d.gate, null);
+});
+
+test('decideHoldingSkip: econ blackout → run', () => {
+  const d = decideHoldingSkip({ ...base, econBlackout: true });
+  assert.equal(d.skip, false);
+  assert.equal(d.gate, 'econ_blackout');
+});
+
+test('decideHoldingSkip: staleness cap reached → run', () => {
+  const d = decideHoldingSkip({ ...base, sinceLastExitEvalMs: 360_000 });
+  assert.equal(d.skip, false);
+  assert.equal(d.gate, 'staleness');
+});
+
+test('decideHoldingSkip: NaN staleness → run (fail toward running)', () => {
+  const d = decideHoldingSkip({ ...base, sinceLastExitEvalMs: NaN });
+  assert.equal(d.skip, false);
+  assert.equal(d.gate, 'staleness');
+});
+
+test('decideHoldingSkip: a near_stop position → run', () => {
+  const d = decideHoldingSkip({ ...base, positions: [{ symbol: 'X', underlying: 'X', pnlPct: -12 }] });
+  assert.equal(d.skip, false);
+  assert.equal(d.gate, 'near_stop');
+});
+
+test('decideHoldingSkip: a near_target position → run', () => {
+  const d = decideHoldingSkip({ ...base, positions: [{ symbol: 'X', underlying: 'X', pnlPct: 35 }] });
+  assert.equal(d.skip, false);
+  assert.equal(d.gate, 'near_target');
+});
+
+test('decideHoldingSkip: an active (not quiet) underlying → run', () => {
+  const d = decideHoldingSkip({ ...base, signalsByUnderlying: { TSLA: sig({ rvol: 3.0 }) } });
+  assert.equal(d.skip, false);
+  assert.equal(d.gate, 'not_quiet');
+});
+
+test('decideHoldingSkip: missing signal for a held name → run (not quiet)', () => {
+  const d = decideHoldingSkip({ ...base, signalsByUnderlying: {} });
+  assert.equal(d.skip, false);
+  assert.equal(d.gate, 'not_quiet');
 });

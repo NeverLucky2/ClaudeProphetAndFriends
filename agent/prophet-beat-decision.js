@@ -48,3 +48,51 @@ export function isUnderlyingQuiet(signal, thresholds) {
     && rng < thresholds.rngAtr
     && Math.abs(day) < thresholds.dayPct;
 }
+
+function fmtPct(n) {
+  if (!Number.isFinite(n)) return '?%';
+  return `${n >= 0 ? '+' : ''}${n.toFixed(0)}%`;
+}
+
+// Pure skip decision for the holding case. Returns { skip, gate, reason } where
+// gate is the first failing gate (or null when skip:true / flat). Gate order is
+// deliberate: econ_blackout → staleness → near_stop/near_target → not_quiet.
+// Every non-skip path is a "run the beat" outcome; the function only returns
+// skip:true when ALL gates affirmatively clear with valid data and >=1 position.
+export function decideHoldingSkip({
+  positions, signalsByUnderlying, sinceLastExitEvalMs, maxStalenessMs, econBlackout, thresholds,
+}) {
+  if (!Array.isArray(positions) || positions.length === 0) {
+    return { skip: false, gate: null, reason: 'no positions (flat path owns this)' };
+  }
+  if (econBlackout === true) {
+    return { skip: false, gate: 'econ_blackout', reason: 'econ blackout — exits may need action' };
+  }
+  // `!(a < b)` rather than `a >= b` so a NaN staleness lands on run, not skip.
+  if (!(sinceLastExitEvalMs < maxStalenessMs)) {
+    return {
+      skip: false, gate: 'staleness',
+      reason: `staleness ${Math.round((sinceLastExitEvalMs || 0) / 60000)}m ≥ cap ${Math.round(maxStalenessMs / 60000)}m`,
+    };
+  }
+  for (const p of positions) {
+    const band = classifyBand(p.pnlPct, thresholds);
+    if (band === 'near_stop') {
+      return { skip: false, gate: 'near_stop', reason: `${p.symbol} near stop (${fmtPct(p.pnlPct)})` };
+    }
+    if (band === 'near_target') {
+      return { skip: false, gate: 'near_target', reason: `${p.symbol} near target (${fmtPct(p.pnlPct)})` };
+    }
+  }
+  for (const p of positions) {
+    if (!isUnderlyingQuiet(signalsByUnderlying?.[p.underlying], thresholds)) {
+      return { skip: false, gate: 'not_quiet', reason: `${p.underlying} active (not quiet)` };
+    }
+  }
+  const bands = positions.map((p) => fmtPct(p.pnlPct)).join(', ');
+  const names = [...new Set(positions.map((p) => p.underlying))].join('/');
+  return {
+    skip: true, gate: null,
+    reason: `${positions.length} position(s) interior (${bands}), ${names} quiet, last exit-eval ${Math.round(sinceLastExitEvalMs / 60000)}m ago < ${Math.round(maxStalenessMs / 60000)}m cap`,
+  };
+}
