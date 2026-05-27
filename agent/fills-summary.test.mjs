@@ -4,6 +4,7 @@ import {
   renderFillsSummaryLine,
   fetchFillsSummary,
   startOfEtTradingDayIso,
+  claimConnectRecap,
 } from './fills-summary.js';
 
 const mk = (overrides = {}) => ({
@@ -57,6 +58,34 @@ test('fetchFillsSummary returns data on success and null on throw', async () => 
   assert.deepEqual(await fetchFillsSummary(ok, 'mean-rev-rsi2', 'since'), mk());
   const bad = { get: async () => { throw new Error('boom'); } };
   assert.equal(await fetchFillsSummary(bad, 'mean-rev-rsi2', 'since'), null);
+});
+
+test('claimConnectRecap: first connect of a session emits, reconnects suppressed', () => {
+  // A single dashboard viewer (one page load → one sid) reconnects many times
+  // over a day (visibilitychange, idle drops, sleep/wake). Only the first
+  // connect should surface the recap.
+  const served = new Set();
+  assert.equal(claimConnectRecap(served, 'sess-1'), true);   // initial open
+  assert.equal(claimConnectRecap(served, 'sess-1'), false);  // tab hidden→shown reconnect
+  assert.equal(claimConnectRecap(served, 'sess-1'), false);  // and again
+});
+
+test('claimConnectRecap: distinct viewing sessions each emit once', () => {
+  const served = new Set();
+  assert.equal(claimConnectRecap(served, 'sess-A'), true);   // tab A opens
+  assert.equal(claimConnectRecap(served, 'sess-B'), true);   // a second dashboard opens
+  assert.equal(claimConnectRecap(served, 'sess-A'), false);  // tab A reconnects — no re-spam
+  assert.equal(claimConnectRecap(served, 'sess-B'), false);  // tab B reconnects — no re-spam
+});
+
+test('claimConnectRecap: missing sid always emits and is never recorded (back-compat)', () => {
+  // Older cached client / curl / non-browser caller has no sid: preserve the
+  // prior always-emit behavior rather than silently suppressing.
+  const served = new Set();
+  assert.equal(claimConnectRecap(served, undefined), true);
+  assert.equal(claimConnectRecap(served, ''), true);
+  assert.equal(claimConnectRecap(served, null), true);
+  assert.equal(served.size, 0);
 });
 
 test('startOfEtTradingDayIso is midnight ET for the date (EDT and EST)', () => {

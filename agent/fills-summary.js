@@ -74,6 +74,27 @@ export function startOfEtTradingDayIso(now = new Date()) {
   return new Date(result).toISOString();
 }
 
+// claimConnectRecap decides whether the connect-time recap should be emitted to
+// a freshly-connected SSE client, and atomically records the decision.
+//
+// The recap is meant to fire once per *dashboard viewing session*, not once per
+// TCP connect. A single operator's tab reconnects to /api/events constantly —
+// on every tab hide/show (visibilitychange tears down + rebuilds the stream),
+// on idle-timeout drops the keepalive misses, on sleep/wake. Keying on a
+// per-page-load session id (the client's `sid`) collapses all those reconnects
+// to a single recap, while distinct page loads / second dashboards each still
+// get their own. Returns true (and claims the slot) the first time a sid is
+// seen, false thereafter. A missing sid (older cached client, curl) preserves
+// the prior always-emit behavior and is never recorded. `servedSessions` is a
+// process-lifetime Set; growth is one entry per page load — negligible for a
+// single-operator localhost dashboard.
+export function claimConnectRecap(servedSessions, sid) {
+  if (!sid) return true;
+  if (servedSessions.has(sid)) return false;
+  servedSessions.add(sid);
+  return true;
+}
+
 function formatQty(qty) {
   const n = Number(qty);
   if (!Number.isFinite(n)) return '?';
