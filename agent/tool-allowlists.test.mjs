@@ -121,7 +121,8 @@ test('Prophet (v2-options) is broad but excludes other strategies signals + mana
   // Keeps the discretionary kit (its mandated news path, options, scalping,
   // reports, heartbeat control). get_market_news is the one general news fallback
   // kept after the PROPHET_TRIM cut.
-  for (const tool of ['get_market_news', 'get_quick_market_intelligence', 'get_marketwatch_bulletins', 'get_options_chain', 'place_options_order', 'get_intraday_signals', 'read_latest_report', 'set_heartbeat', 'apply_heartbeat_profile']) {
+  // find_similar_setups stays: TRADING_RULES_V2.md:536 invokes it for loss post-mortems.
+  for (const tool of ['get_market_news', 'get_quick_market_intelligence', 'get_marketwatch_bulletins', 'get_options_chain', 'place_options_order', 'get_intraday_signals', 'read_latest_report', 'set_heartbeat', 'apply_heartbeat_profile', 'find_similar_setups', 'store_trade_setup']) {
     assert.ok(prophet.has(tool), `Prophet should expose discretionary tool "${tool}"`);
   }
   // Excludes the PROPHET_TRIM cost redundancies (duplicate news feeds + foreign

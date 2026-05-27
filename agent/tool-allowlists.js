@@ -180,11 +180,12 @@ const PROPHET_TRIM = [
   'get_news_summary',
   'list_news_summaries',
   'search_news',
-  // equity-swing screeners — foreign to an options-on-mega-caps strategy
+  // equity-swing screeners — VCP/PEAD are equity-base patterns, foreign to an
+  // options-on-mega-caps strategy. NOTE: the trade-journal pair (store_trade_setup
+  // / find_similar_setups) is deliberately NOT trimmed — TRADING_RULES_V2.md:536
+  // invokes find_similar_setups for loss post-mortems, so it stays in Prophet's kit.
   'run_vcp_screener',
   'run_pead_screener',
-  'find_similar_setups',
-  'store_trade_setup',
 ];
 
 // Manager/orchestration tools — agents reconfigure neither themselves nor peers.
