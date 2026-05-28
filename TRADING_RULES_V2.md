@@ -32,13 +32,22 @@ policy still applies on tool error).
 
 ## Heartbeat Cadence
 
-The harness automatically fires a beat at every phase boundary, including the
-09:30 ET market open — that wake is guaranteed regardless of your current
-heartbeat interval. Do **not** tighten your heartbeat during pre-market to
-"land cleanly at the open"; you will be woken at the open for free. When you are
-flat pre-market with no actionable catalyst, hold the default pre-market cadence
-(~15 min). Tighten only when you are managing an open position or reacting to a
-live, time-sensitive catalyst.
+Pre-market has two scheduled wakes: 09:15 ET (the pre-open context beat —
+futures settled, European close digested, last analyst notes) and 09:30 ET
+(market open). The 04:00 ET pre-market phase boundary is suppressed.
+
+A third wake near 04:00 ET may also fire on weekday mornings — this is the
+`closed`-phase cadence (8h) overflowing into the pre_market window. The
+agent's `set_heartbeat` calls have no effect on this either. Treat the 04:00
+beat as a "quiet check-in" — assess and skip unless something extraordinary
+broke overnight; the real pre-open work happens at 09:15.
+
+`set_heartbeat` calls during pre-market have no effect on the scheduled
+09:15 / 09:30 wakes. Do not attempt to tighten heartbeat in pre-market.
+
+Use the 09:15 wake as your pre-open thesis lock. Tighten heartbeat only after
+the open, when managing a position or reacting to a live, time-sensitive
+catalyst.
 
 ---
 

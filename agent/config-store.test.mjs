@@ -186,3 +186,45 @@ test('loadConfig merges code-default agents/strategies missing from persisted co
   const ids = cfg.agents.map(a => a.id);
   assert.equal(new Set(ids).size, ids.length, 'no duplicate agent ids');
 });
+
+test('default agent (Prophet) has additive scheduledBeats and suppresses pre_market snap', async () => {
+  const cfg = await cfgStore.loadConfig();
+  const agents = cfg.agents;
+  const prophet = agents.find(a => a.id === 'default');
+  assert.ok(prophet, 'Prophet agent (id=default) should exist');
+  assert.equal(prophet.heartbeatOverrides?.pre_market, 86400, 'pre_market cadence should be 24h (silenced)');
+  assert.deepEqual(prophet.scheduledBeats?.times, ['09:15'], 'should have 09:15 scheduled wake');
+  assert.equal(prophet.scheduledBeats?.exclusive, false, 'scheduledBeats should be additive');
+  assert.equal(prophet.scheduledBeats?.weekdaysOnly, true, 'scheduledBeats should be weekdays-only');
+  assert.deepEqual(prophet.suppressPhaseSnaps, ['pre_market'], 'should suppress 04:00 pre_market snap');
+});
+
+test('harvest agent has additive scheduledBeats and suppresses pre_market snap', async () => {
+  const cfg = await cfgStore.loadConfig();
+  const agents = cfg.agents;
+  const harvest = agents.find(a => a.id === 'harvest');
+  assert.ok(harvest, 'Harvest agent should exist');
+  assert.equal(harvest.heartbeatOverrides?.pre_market, 86400, 'pre_market cadence should be 24h (silenced)');
+  assert.equal(harvest.heartbeatOverrides?.market_open, 900, 'market_open cadence should be unchanged');
+  assert.deepEqual(harvest.scheduledBeats?.times, ['09:15'], 'should have 09:15 scheduled wake');
+  assert.equal(harvest.scheduledBeats?.exclusive, false, 'scheduledBeats should be additive');
+  assert.deepEqual(harvest.suppressPhaseSnaps, ['pre_market'], 'should suppress 04:00 pre_market snap');
+});
+
+test('non-Prophet/Harvest agents do NOT have the new pre-market scheduled-wake fields', async () => {
+  const cfg = await cfgStore.loadConfig();
+  const agents = cfg.agents;
+
+  // Penny: phase cadence only, no scheduledBeats, no suppressPhaseSnaps
+  const penny = agents.find(a => a.id === 'penny-prophet');
+  assert.ok(penny, 'PennyProphet should exist');
+  assert.equal(penny.scheduledBeats, undefined, 'Penny should have no scheduledBeats');
+  assert.equal(penny.suppressPhaseSnaps, undefined, 'Penny should not suppress any phase snaps');
+  assert.equal(penny.heartbeatOverrides?.pre_market, 900, 'Penny pre_market cadence unchanged');
+
+  // Coil: exclusive scheduledBeats (15:45) — must NOT flip to non-exclusive
+  const coil = agents.find(a => a.id === 'mean-rev');
+  assert.ok(coil, 'Coil should exist');
+  assert.equal(coil.scheduledBeats?.exclusive, true, 'Coil must remain exclusive-mode');
+  assert.equal(coil.suppressPhaseSnaps, undefined, 'Coil should not suppress any phase snaps');
+});

@@ -184,7 +184,17 @@ function defaultAgents() {
       systemPromptTemplate: 'default',
       strategyId: 'v2-options',
       model: 'anthropic/claude-sonnet-4-6',
-      heartbeatOverrides: {},
+      // Pre-market: only fire the 09:15 scheduled wake + 09:30 phase-snap.
+      // Cadence 86400 silences intra-phase ticks; suppressPhaseSnaps skips the
+      // 04:00 boundary; scheduledBeats adds the 09:15 wake.
+      // See docs/superpowers/specs/2026-05-28-prophet-harvest-scheduled-wakes-design.md
+      heartbeatOverrides: { pre_market: 86400 },
+      scheduledBeats: {
+        times: ['09:15'],
+        weekdaysOnly: true,
+        exclusive: false,
+      },
+      suppressPhaseSnaps: ['pre_market'],
       customSystemPrompt: '',
       createdAt: new Date().toISOString(),
     },
@@ -203,14 +213,25 @@ Read your Strategy Rules section carefully — it contains your complete heartbe
       // to intraday news. Exempt from emergency-alert wakes (would just burn a beat).
       respondsToEmergencyWakes: false,
       model: 'anthropic/claude-sonnet-4-6',
+      // Pre-market: only fire the 09:15 scheduled wake + 09:30 phase-snap.
+      // Harvest cannot trade pre-market (options market opens 09:30) and its
+      // IV-based entry signals are daily-bar, so a single pre-open wake is
+      // sufficient. Same pattern as Prophet.
+      // See docs/superpowers/specs/2026-05-28-prophet-harvest-scheduled-wakes-design.md
       heartbeatOverrides: {
-        pre_market: 3600,
+        pre_market: 86400,
         market_open: 900,
         midday: 900,
         market_close: 900,
         after_hours: 7200,
         closed: 28800,
       },
+      scheduledBeats: {
+        times: ['09:15'],
+        weekdaysOnly: true,
+        exclusive: false,
+      },
+      suppressPhaseSnaps: ['pre_market'],
       createdAt: new Date().toISOString(),
     },
     {
@@ -777,7 +798,40 @@ async function migrateLegacyConfig(config, rawSchemaVersion = 0) {
     }
   }
 
-  config.schemaVersion = 7;  // was 6
+  // v7 → v8: Prophet/Harvest pre-market wake schedule. Backfills three new
+  // fields on the Prophet (id='default') and Harvest (id='harvest') records:
+  // - heartbeatOverrides.pre_market: 86400 (silences intra-phase cadence)
+  // - scheduledBeats: { times: ['09:15'], weekdaysOnly: true, exclusive: false }
+  // - suppressPhaseSnaps: ['pre_market']
+  // Required because mergeMissingDefaults only appends missing AGENT IDS — it
+  // does not update existing records. Without this migration, the new
+  // pre-market wake schedule silently does not apply on any existing sandbox.
+  // Preserves user customizations:
+  // - heartbeatOverrides.pre_market is only overwritten if currently undefined
+  //   (Prophet had no override) or equal to the prior code default
+  //   (Harvest had 3600). User-set values like 1200 or 7200 are preserved.
+  // - scheduledBeats / suppressPhaseSnaps are only set if currently undefined.
+  if (rawSchemaVersion < 8) {
+    const PRIOR_PRE_MARKET_DEFAULTS = { default: undefined, harvest: 3600 };
+    const NEW_SCHEDULED_BEATS = { times: ['09:15'], weekdaysOnly: true, exclusive: false };
+    for (const agent of config.agents || []) {
+      if (agent.id === 'default' || agent.id === 'harvest') {
+        if (!agent.heartbeatOverrides) agent.heartbeatOverrides = {};
+        const prior = PRIOR_PRE_MARKET_DEFAULTS[agent.id];
+        if (agent.heartbeatOverrides.pre_market === prior) {
+          agent.heartbeatOverrides.pre_market = 86400;
+        }
+        if (agent.scheduledBeats === undefined) {
+          agent.scheduledBeats = { ...NEW_SCHEDULED_BEATS };
+        }
+        if (agent.suppressPhaseSnaps === undefined) {
+          agent.suppressPhaseSnaps = ['pre_market'];
+        }
+      }
+    }
+  }
+
+  config.schemaVersion = 8;  // was 7
   if (!config.sandboxes) config.sandboxes = {};
 
   // Only auto-create sbx_<accountId> sandboxes during the v4→v5 migration pass.

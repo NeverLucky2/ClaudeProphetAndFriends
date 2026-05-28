@@ -81,6 +81,39 @@ export function secondsToNextPhaseBoundary(now) {
   return null; // unreachable within an 8-day window
 }
 
+// nextPhaseBoundary returns the next phase boundary as `{seconds, phase}`,
+// where `phase` is the phase that boundary ENTERS. Parallels
+// secondsToNextPhaseBoundary's logic (8-day lookahead, weekend + holiday skip)
+// but pairs each boundary with its target phase so suppressPhaseSnaps can be
+// applied selectively. Pure (takes `now`) for testability.
+export function nextPhaseBoundary(now) {
+  const dayName = now.toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'long' });
+  const dayMap = { Monday: 1, Tuesday: 2, Wednesday: 3, Thursday: 4, Friday: 5, Saturday: 6, Sunday: 7 };
+  const nowDow = dayMap[dayName] || 1;
+  const etStr = now.toLocaleTimeString('en-US', {
+    timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  });
+  const [h, m, s] = etStr.split(':').map(Number);
+  const nowSecs = h * 3600 + m * 60 + s;
+
+  // [{phase, startSec}], sorted by startSec ascending
+  const boundaries = Object.entries(PHASE_DEFAULTS)
+    .filter(([, cfg]) => cfg.range)
+    .map(([phase, cfg]) => ({ phase, startSec: cfg.range[0] * 60 }))
+    .sort((a, b) => a.startSec - b.startSec);
+
+  for (let dayOffset = 0; dayOffset < 8; dayOffset++) {
+    const dow = ((nowDow - 1 + dayOffset) % 7) + 1;
+    if (dow === 6 || dow === 7) continue;
+    if (isMarketHoliday(new Date(now.getTime() + dayOffset * 86400 * 1000))) continue;
+    for (const { phase, startSec } of boundaries) {
+      const offset = dayOffset * 86400 + startSec - nowSecs;
+      if (offset > 0) return { seconds: offset, phase };
+    }
+  }
+  return null;
+}
+
 // buildGuardrailBlock formats permission/limit lines for inclusion in the
 // system prompt. Returns an empty string when there are no guardrails to
 // surface. Pulled out of _beat() so the block can live in the system prompt
@@ -761,6 +794,10 @@ ${userBlock}`;
     return secondsToNextPhaseBoundary(new Date());
   }
 
+  _getNextPhaseBoundary() {
+    return nextPhaseBoundary(new Date());
+  }
+
   // Returns ET wall-clock weekday (1=Mon..7=Sun) and seconds-since-midnight ET.
   // Used by scheduledBeats helpers. secondsToNextPhaseBoundary uses the same
   // ET-weekday detection (this helper predates it; kept for the scheduledBeats path).
@@ -846,13 +883,33 @@ ${userBlock}`;
 
     let seconds = this._getHeartbeatSeconds();
     // Fire at phase boundaries so agents always wake at market open, market close, etc.
-    const secsToBoundary = this._getSecondsToNextPhaseBoundary();
-    if (secsToBoundary !== null && secsToBoundary > 10 && secsToBoundary < seconds) {
-      seconds = secsToBoundary;
+    // `suppressPhaseSnaps` opts an agent out of the snap into specific phases
+    // (e.g. Prophet/Harvest skip the 04:00 pre_market boundary because their
+    // explicit 09:15 scheduledBeats wake covers pre-open context).
+    const nextBoundary = this._getNextPhaseBoundary();
+    const suppressed = this._agentConfig?.suppressPhaseSnaps || [];
+    const boundarySuppressed = nextBoundary && suppressed.includes(nextBoundary.phase);
+    if (!boundarySuppressed && nextBoundary && nextBoundary.seconds > 10 && nextBoundary.seconds < seconds) {
+      seconds = nextBoundary.seconds;
       this.state.emit('agent_log', {
         message: `Phase transition in ${Math.round(seconds)}s — scheduling early heartbeat.`,
         level: 'info',
       });
+    }
+    // Additive scheduledBeats (exclusive=false): a scheduled wake adds an extra
+    // beat on top of the phase cadence. If the scheduled time lands before the
+    // next cadence/boundary wake, clamp to it. Exclusive-mode scheduledBeats
+    // (Coil/Drift/Trend) already returned above and never reach here. Reuses the
+    // same `sb` reference declared at the top of this method.
+    if (sb && !sb.exclusive && sb.times?.length) {
+      const secsToScheduled = this._getSecondsToNextScheduledBeat();
+      if (secsToScheduled !== null && secsToScheduled > 10 && secsToScheduled < seconds) {
+        seconds = secsToScheduled;
+        this.state.emit('agent_log', {
+          message: `Scheduled wake in ${Math.round(seconds)}s — clamping next beat.`,
+          level: 'info',
+        });
+      }
     }
     this.state.heartbeatSeconds = seconds;
     this.state.nextBeatTime = new Date(Date.now() + seconds * 1000).toISOString();

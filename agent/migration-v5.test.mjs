@@ -57,7 +57,7 @@ test('v4→v5: 4 duplicate accounts dedup to 1 survivor, sandbox pointers rewrit
   await cfgStore.loadConfig();
   const cfg = cfgStore.getConfig();
 
-  assert.equal(cfg.schemaVersion, 7);
+  assert.equal(cfg.schemaVersion, 8);
   assert.equal(cfg.accounts.length, 1, 'deduped to one account');
   const survivorId = cfg.accounts[0].id;
   assert.equal(cfg.accounts[0].name, 'Paper (from .env)', 'env-seeded account is survivor by name match');
@@ -107,8 +107,8 @@ test('v4→v5: idempotent — re-running on v5 config is a no-op', async () => {
   await cfgStore.loadConfig();
   const afterSecond = await fs.readFile(configPath, 'utf-8');
 
-  assert.equal(JSON.parse(afterFirst).schemaVersion, 7);
-  assert.equal(JSON.parse(afterSecond).schemaVersion, 7);
+  assert.equal(JSON.parse(afterFirst).schemaVersion, 8);
+  assert.equal(JSON.parse(afterSecond).schemaVersion, 8);
 
   // No second backup file written on the no-op migration
   const backups = await fs.readdir(backupDir);
@@ -253,7 +253,7 @@ test('v5→v7: mechanical agents get respondsToEmergencyWakes=false, reactive ag
   const cfg = cfgStore.getConfig();
   const byId = Object.fromEntries(cfg.agents.map(a => [a.id, a]));
 
-  assert.equal(cfg.schemaVersion, 7, 'schemaVersion bumped to 7');
+  assert.equal(cfg.schemaVersion, 8, 'schemaVersion bumped to 8');
   assert.equal(byId['harvest'].respondsToEmergencyWakes, false);
   assert.equal(byId['mean-rev'].respondsToEmergencyWakes, false);
   assert.equal(byId['trend-prophet'].respondsToEmergencyWakes, false);
@@ -303,7 +303,7 @@ test('v6→v7: Drift, omitted from the v6 exempt set, is backfilled to respondsT
   const cfg = cfgStore.getConfig();
   const byId = Object.fromEntries(cfg.agents.map(a => [a.id, a]));
 
-  assert.equal(cfg.schemaVersion, 7, 'schemaVersion bumped to 7');
+  assert.equal(cfg.schemaVersion, 8, 'schemaVersion bumped to 8');
   assert.equal(byId['drift'].respondsToEmergencyWakes, false, 'Drift backfilled exempt');
   // Already-exempt agents stay exempt; news-reactive agents stay reactive.
   assert.equal(byId['harvest'].respondsToEmergencyWakes, false);
@@ -324,4 +324,101 @@ test('v6→v7: a user-set Drift respondsToEmergencyWakes=true is not clobbered',
   await cfgStore.loadConfig();
   const byId = Object.fromEntries(cfgStore.getConfig().agents.map(a => [a.id, a]));
   assert.equal(byId['drift'].respondsToEmergencyWakes, true, 'user value preserved');
+});
+
+// v7→v8: pre-market wake schedule (Prophet + Harvest scheduledBeats /
+// suppressPhaseSnaps / heartbeatOverrides.pre_market backfill).
+// Required because mergeMissingDefaults only appends missing AGENT IDS — it
+// does not update existing records. Without this migration, the new
+// pre-market wake schedule silently does not apply on any existing sandbox.
+test('v7→v8 backfills pre-market scheduledBeats and suppressPhaseSnaps on Prophet and Harvest', async () => {
+  const raw = {
+    schemaVersion: 7,
+    agents: [
+      // Prophet at v7 shape (no scheduledBeats, no suppressPhaseSnaps,
+      // empty heartbeatOverrides)
+      { id: 'default', name: 'Prophet', heartbeatOverrides: {} },
+      // Harvest at v7 shape (pre_market: 3600, no scheduledBeats, no
+      // suppressPhaseSnaps)
+      {
+        id: 'harvest',
+        name: 'Harvest',
+        heartbeatOverrides: {
+          pre_market: 3600,
+          market_open: 900,
+          midday: 900,
+          market_close: 900,
+          after_hours: 7200,
+          closed: 28800,
+        },
+      },
+      // Other agents must NOT receive these fields
+      { id: 'penny-prophet', name: 'PennyProphet', heartbeatOverrides: { pre_market: 900 } },
+      { id: 'mean-rev', name: 'Coil', scheduledBeats: { times: ['15:45'], exclusive: true, weekdaysOnly: true, windowMinutes: 5 } },
+    ],
+    strategies: [],
+  };
+  await fs.writeFile(configPath, JSON.stringify(raw, null, 2));
+  const cfg = await cfgStore.loadConfig();
+
+  const prophet = cfg.agents.find(a => a.id === 'default');
+  assert.equal(prophet.heartbeatOverrides?.pre_market, 86400, 'Prophet pre_market backfilled to 86400');
+  assert.deepEqual(prophet.scheduledBeats?.times, ['09:15'], 'Prophet scheduledBeats backfilled');
+  assert.equal(prophet.scheduledBeats?.exclusive, false, 'Prophet scheduledBeats is additive');
+  assert.deepEqual(prophet.suppressPhaseSnaps, ['pre_market'], 'Prophet suppressPhaseSnaps backfilled');
+
+  const harvest = cfg.agents.find(a => a.id === 'harvest');
+  assert.equal(harvest.heartbeatOverrides?.pre_market, 86400, 'Harvest pre_market upgraded from 3600 to 86400');
+  assert.equal(harvest.heartbeatOverrides?.market_open, 900, 'Harvest market_open preserved');
+  assert.deepEqual(harvest.scheduledBeats?.times, ['09:15'], 'Harvest scheduledBeats backfilled');
+  assert.deepEqual(harvest.suppressPhaseSnaps, ['pre_market'], 'Harvest suppressPhaseSnaps backfilled');
+
+  // Non-target agents untouched
+  const penny = cfg.agents.find(a => a.id === 'penny-prophet');
+  assert.equal(penny.scheduledBeats, undefined, 'Penny not touched');
+  assert.equal(penny.suppressPhaseSnaps, undefined, 'Penny not touched');
+
+  const coil = cfg.agents.find(a => a.id === 'mean-rev');
+  assert.equal(coil.scheduledBeats?.exclusive, true, 'Coil exclusive scheduledBeats preserved');
+  assert.equal(coil.suppressPhaseSnaps, undefined, 'Coil not touched');
+
+  assert.equal(cfg.schemaVersion, 8, 'schemaVersion bumped to 8');
+});
+
+test('v7→v8 preserves user customizations on Prophet/Harvest pre_market fields', async () => {
+  // If a user has manually set pre_market to a non-default value (or set
+  // scheduledBeats with their own times), the migration must NOT overwrite it.
+  const raw = {
+    schemaVersion: 7,
+    agents: [
+      {
+        id: 'default',
+        name: 'Prophet',
+        // User-customized: pre_market is 1200 (not the old default which was
+        // undefined / inherited 900), so the migration should leave it alone.
+        heartbeatOverrides: { pre_market: 1200 },
+      },
+      {
+        id: 'harvest',
+        name: 'Harvest',
+        // User-customized scheduledBeats — must be preserved.
+        scheduledBeats: { times: ['10:00'], weekdaysOnly: true, exclusive: false },
+        heartbeatOverrides: { pre_market: 7200 },
+      },
+    ],
+    strategies: [],
+  };
+  await fs.writeFile(configPath, JSON.stringify(raw, null, 2));
+  const cfg = await cfgStore.loadConfig();
+
+  const prophet = cfg.agents.find(a => a.id === 'default');
+  assert.equal(prophet.heartbeatOverrides?.pre_market, 1200, 'Prophet user-set pre_market preserved');
+  // scheduledBeats was undefined → backfilled
+  assert.deepEqual(prophet.scheduledBeats?.times, ['09:15'], 'Prophet scheduledBeats backfilled (was undefined)');
+  assert.deepEqual(prophet.suppressPhaseSnaps, ['pre_market'], 'Prophet suppressPhaseSnaps backfilled (was undefined)');
+
+  const harvest = cfg.agents.find(a => a.id === 'harvest');
+  assert.equal(harvest.heartbeatOverrides?.pre_market, 7200, 'Harvest user-set pre_market preserved');
+  assert.deepEqual(harvest.scheduledBeats?.times, ['10:00'], 'Harvest user-set scheduledBeats preserved');
+  assert.deepEqual(harvest.suppressPhaseSnaps, ['pre_market'], 'Harvest suppressPhaseSnaps backfilled (was undefined)');
 });
