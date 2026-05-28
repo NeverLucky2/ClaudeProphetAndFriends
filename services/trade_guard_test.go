@@ -771,3 +771,69 @@ func TestCheckOptionsOpen_UniverseGate(t *testing.T) {
 		t.Errorf("empty floor must fail open, got %v", err)
 	}
 }
+
+// agentUniverseConfig builds a config with the per-agent equity universe gate
+// enabled and MeanRev/Drift each given a one-symbol allowlist.
+func agentUniverseConfig() TradeGuardConfig {
+	cfg := defaultConfig()
+	cfg.EnableAgentUniverseGate = true
+	cfg.AgentUniverses = map[AgentSource]map[string]bool{
+		AgentMeanRev: {"AAPL": true},
+		AgentDrift:   {"MSFT": true},
+	}
+	return cfg
+}
+
+func TestCheckBuy_AgentUniverseGate_BlocksOffUniverse(t *testing.T) {
+	g := NewTradeGuard(nil, &stubTrading{portfolio: 100000}, agentUniverseConfig())
+
+	if err := g.CheckBuy(context.Background(), AgentMeanRev, "AAPL", 1000); err != nil {
+		t.Errorf("on-universe AAPL should pass for Coil, got %v", err)
+	}
+	if err := g.CheckBuy(context.Background(), AgentMeanRev, "TSLA", 1000); err == nil {
+		t.Error("off-universe TSLA should be rejected for Coil")
+	}
+	if err := g.CheckBuy(context.Background(), AgentDrift, "MSFT", 1000); err != nil {
+		t.Errorf("on-universe MSFT should pass for Drift, got %v", err)
+	}
+	if err := g.CheckBuy(context.Background(), AgentDrift, "AAPL", 1000); err == nil {
+		t.Error("AAPL is Coil's symbol, not Drift's — should be rejected for Drift")
+	}
+}
+
+func TestCheckBuy_AgentUniverseGate_CaseInsensitive(t *testing.T) {
+	g := NewTradeGuard(nil, &stubTrading{portfolio: 100000}, agentUniverseConfig())
+	if err := g.CheckBuy(context.Background(), AgentMeanRev, "aapl", 1000); err != nil {
+		t.Errorf("lower-case aapl should normalize and pass, got %v", err)
+	}
+}
+
+func TestCheckBuy_AgentUniverseGate_UnconfiguredAgentFailsOpen(t *testing.T) {
+	g := NewTradeGuard(nil, &stubTrading{portfolio: 100000}, agentUniverseConfig())
+	// Trend, Penny, and Main have no configured universe in the map → fail open.
+	if err := g.CheckBuy(context.Background(), AgentTrend, "TSLA", 1000); err != nil {
+		t.Errorf("unconfigured Trend must not be universe-gated, got %v", err)
+	}
+	if err := g.CheckBuy(context.Background(), AgentMain, "TSLA", 1000); err != nil {
+		t.Errorf("unconfigured Main must not be universe-gated, got %v", err)
+	}
+}
+
+func TestCheckBuy_AgentUniverseGate_DisabledNoOp(t *testing.T) {
+	cfg := agentUniverseConfig()
+	cfg.EnableAgentUniverseGate = false
+	g := NewTradeGuard(nil, &stubTrading{portfolio: 100000}, cfg)
+	if err := g.CheckBuy(context.Background(), AgentMeanRev, "TSLA", 1000); err != nil {
+		t.Errorf("gate disabled must not block off-universe buy, got %v", err)
+	}
+}
+
+func TestCheckBuy_AgentUniverseGate_EmptyUniverseFailsOpen(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.EnableAgentUniverseGate = true
+	cfg.AgentUniverses = map[AgentSource]map[string]bool{AgentMeanRev: {}}
+	g := NewTradeGuard(nil, &stubTrading{portfolio: 100000}, cfg)
+	if err := g.CheckBuy(context.Background(), AgentMeanRev, "TSLA", 1000); err != nil {
+		t.Errorf("empty universe for an agent must fail open, got %v", err)
+	}
+}

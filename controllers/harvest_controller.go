@@ -146,6 +146,16 @@ func (hc *HarvestController) HandleOpenCondor(c *gin.Context) {
 		return
 	}
 
+	// Underlying allowlist (flag-gated, default off). When enforcement is on,
+	// reject before the broker call so an off-universe condor never reaches the
+	// market and no condor row is persisted.
+	if !hc.harvestSvc.IsUnderlyingAllowed(req.Underlying) {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error": fmt.Sprintf("underlying %q is not in Harvest's tradable universe", req.Underlying),
+		})
+		return
+	}
+
 	expDate, err := time.Parse("2006-01-02", req.ExpirationDate)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid expiration_date format, use YYYY-MM-DD"})

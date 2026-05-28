@@ -25,6 +25,19 @@ func TestLoadTradableUniverse(t *testing.T) {
 	}
 }
 
+func TestSymbolSet(t *testing.T) {
+	got := SymbolSet([]string{"aapl", " MSFT ", "nvda", ""})
+	for _, want := range []string{"AAPL", "MSFT", "NVDA"} {
+		if !got[want] {
+			t.Errorf("expected %q in set, got %v", want, got)
+		}
+	}
+	// Empty/whitespace entries are dropped; values are upper-cased & trimmed.
+	if len(got) != 3 {
+		t.Errorf("expected 3 names (blank dropped), got %d (%v)", len(got), got)
+	}
+}
+
 func TestLoadTradableUniverse_MissingFileIsEmptyNotError(t *testing.T) {
 	// Missing file = "not configured yet" -> empty map, no error (gate fails open).
 	got, err := LoadTradableUniverse(filepath.Join(t.TempDir(), "absent.txt"))

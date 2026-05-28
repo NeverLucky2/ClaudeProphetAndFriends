@@ -5,6 +5,20 @@ import (
 	"strings"
 )
 
+// SymbolSet builds an upper-cased membership set from a ticker slice, trimming
+// whitespace and dropping empty entries. Used to turn the Go-constant agent
+// universes (MeanRevUniverse, DriftUniverse) into the map form the trade guard
+// consumes.
+func SymbolSet(tickers []string) map[string]bool {
+	out := make(map[string]bool, len(tickers))
+	for _, t := range tickers {
+		if s := strings.ToUpper(strings.TrimSpace(t)); s != "" {
+			out[s] = true
+		}
+	}
+	return out
+}
+
 // LoadTradableUniverse reads a tradable-floor file (one ticker per line, '#'
 // comments and blank lines ignored, inline '#...' trimmed, upper-cased) into a
 // membership set. A missing file returns an empty map and NO error: absence

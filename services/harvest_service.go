@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"prophet-trader/models"
@@ -73,12 +74,38 @@ type MonthlyExpiration struct {
 // exposure. Configurable via SetShortPutDeltaProxy.
 const DefaultShortPutDeltaProxy = 0.30
 
+// HarvestUniverse is the fixed set of underlyings Harvest may open iron
+// condors on (TRADING_RULES_HARVEST.md §Universe: core SPY/QQQ/IWM +
+// secondary GLD/TLT). It is deliberately distinct from isIndexBetaUnderlying
+// (SPY/QQQ/IWM/DIA/VTI), which serves sector-exposure attribution, not entry
+// gating. Enforced only when EnforceUniverse is set.
+var HarvestUniverse = map[string]bool{
+	"SPY": true, "QQQ": true, "IWM": true, "GLD": true, "TLT": true,
+}
+
 // HarvestService provides core harvest logic: state, FOMC, expirations.
 type HarvestService struct {
 	store              harvestStateStore
 	fomcDates          []time.Time
 	shortPutDeltaProxy float64
 	monitorEnabled     bool
+	enforceUniverse    bool
+}
+
+// SetEnforceUniverse toggles the underlying allowlist checked by
+// IsUnderlyingAllowed (and consulted by the condor-open endpoint). Flag-gated,
+// default off; wired from ENABLE_AGENT_UNIVERSE_GATE at boot.
+func (s *HarvestService) SetEnforceUniverse(b bool) { s.enforceUniverse = b }
+
+// IsUnderlyingAllowed reports whether Harvest may open a condor on symbol.
+// When enforcement is off (the default) every symbol is allowed — the gate is
+// opt-in. When on, only members of HarvestUniverse pass (case-insensitive,
+// whitespace-trimmed).
+func (s *HarvestService) IsUnderlyingAllowed(symbol string) bool {
+	if !s.enforceUniverse {
+		return true
+	}
+	return HarvestUniverse[strings.ToUpper(strings.TrimSpace(symbol))]
 }
 
 // SetMonitorEnabled records whether the HarvestExitMonitor goroutine was

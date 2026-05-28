@@ -190,6 +190,18 @@ func main() {
 		tradableUniverse = map[string]bool{}
 	}
 
+	// Per-agent equity universes for the agent-universe gate (Coil/Drift/Trend).
+	// Built from the same Go-constant lists the runtime iterates, so the
+	// order-time guard and the candidate/entry feed can never diverge:
+	// MeanRev/Drift from their scanner constants, Trend from controllers.
+	// TrendUniverse (which services.turtleUniverse mirrors). Agents absent here
+	// (Main/Penny) fail open — the gate never blocks them.
+	agentUniverses := map[services.AgentSource]map[string]bool{
+		services.AgentMeanRev: services.SymbolSet(services.MeanRevUniverse),
+		services.AgentDrift:   services.SymbolSet(services.DriftUniverse),
+		services.AgentTrend:   services.SymbolSet(controllers.TrendUniverse),
+	}
+
 	// Create trade guard and wire into both controllers
 	tradeGuard := services.NewTradeGuard(
 		positionManager,
@@ -204,6 +216,8 @@ func main() {
 			EnablePositionCaps:      cfg.EnablePositionCaps,
 			MaxPositionPct:          cfg.MaxPositionPct,
 			MaxDeployedPct:          cfg.MaxDeployedPct,
+			EnableAgentUniverseGate: cfg.EnableAgentUniverseGate,
+			AgentUniverses:          agentUniverses,
 			EnableUniverseGate:      cfg.EnableUniverseGate,
 			TradableUnderlyings:     tradableUniverse,
 			EnableOptionsSpreadGate: cfg.EnableProphetOptionsSpread,
@@ -226,6 +240,10 @@ func main() {
 		"max_deployed_pct":           cfg.MaxDeployedPct,
 		"universe_gate_enabled":       cfg.EnableUniverseGate,
 		"tradable_universe_count":     len(tradableUniverse),
+		"agent_universe_gate_enabled": cfg.EnableAgentUniverseGate,
+		"meanrev_universe_count":      len(agentUniverses[services.AgentMeanRev]),
+		"drift_universe_count":        len(agentUniverses[services.AgentDrift]),
+		"trend_universe_count":        len(agentUniverses[services.AgentTrend]),
 		"options_spread_gate_enabled": cfg.EnableProphetOptionsSpread,
 		"spread_max_pct":              cfg.ProphetSpreadMaxPct,
 		"quote_max_age_sec":           cfg.ProphetQuoteMaxAgeSec,
@@ -306,6 +324,9 @@ func main() {
 	// Initialize Harvest services
 	harvestIVRSvc := services.NewHarvestIVRService(storageService)
 	harvestSvc := services.NewHarvestService(storageService)
+	// Harvest underlying allowlist (SPY/QQQ/IWM/GLD/TLT), same flag as the
+	// Coil/Drift equity gate. Default off; checked in the condor-open endpoint.
+	harvestSvc.SetEnforceUniverse(cfg.EnableAgentUniverseGate)
 
 	// Wire the IV provider into StockAnalysisService so analyze_stocks
 	// responses include per-symbol IV rank / percentile / days_of_history.

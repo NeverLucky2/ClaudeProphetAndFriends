@@ -50,6 +50,11 @@ type Config struct {
 	MaxPositionPct     float64 // per-position cap, fraction of portfolio (0.12 = 12%)
 	MaxDeployedPct     float64 // whole-account deployed ceiling (0.50 = 50%)
 
+	// Per-agent (non-Prophet) tradable-universe gate. Flag-gated, default OFF
+	// (observe-first). One flag covers Coil/Drift equity buys (via CheckBuy)
+	// and Harvest condor underlyings (via the condor-open endpoint).
+	EnableAgentUniverseGate bool
+
 	// Prophet tradable-universe gate + options spread gate. Both flag-gated,
 	// default OFF (observe-first). See the 2026-05-24 spec.
 	EnableUniverseGate         bool
@@ -117,6 +122,8 @@ func Load() error {
 		EnablePositionCaps: getEnvOrDefault("ENABLE_POSITION_CAPS", "true") == "true",
 		MaxPositionPct:     parseFloat(getEnvOrDefault("MAX_POSITION_PCT", "0.12")),
 		MaxDeployedPct:     parseFloat(getEnvOrDefault("MAX_DEPLOYED_PCT", "0.50")),
+
+		EnableAgentUniverseGate: getEnvOrDefault("ENABLE_AGENT_UNIVERSE_GATE", "false") == "true",
 
 		EnableUniverseGate:         getEnvOrDefault("ENABLE_PROPHET_UNIVERSE_GATE", "false") == "true",
 		TradableUniversePath:       getEnvOrDefault("PROPHET_TRADABLE_UNIVERSE_PATH", "./config/prophet_tradable_universe.txt"),

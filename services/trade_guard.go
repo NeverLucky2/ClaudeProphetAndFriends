@@ -97,6 +97,21 @@ type TradeGuardConfig struct {
 	// (PortfolioValue - Cash + notional) / PortfolioValue. Zero disables.
 	MaxDeployedPct float64 `json:"max_deployed_pct"`
 
+	// EnableAgentUniverseGate flag-gates the per-agent EQUITY-buy allowlist
+	// checked in CheckBuy. It is the non-Prophet counterpart to
+	// EnableUniverseGate (which gates Prophet's options opens). Default off
+	// (observe-first rollout).
+	EnableAgentUniverseGate bool `json:"enable_agent_universe_gate"`
+	// AgentUniverses maps an agent to the set of EQUITY tickers it may open a
+	// new position in. Only agents that trade plain equity symbols through
+	// CheckBuy belong here (e.g. Coil/MeanRev, Drift) — do NOT populate it for
+	// agents that route OCC option symbols through CheckBuy (Prophet/Main),
+	// since an OCC string would never match an equity ticker and would be
+	// wrongly rejected. An agent absent from this map, or mapped to an empty
+	// set, fails OPEN (never blocked) — matching EnableUniverseGate's
+	// "unconfigured = don't halt trading" policy.
+	AgentUniverses map[AgentSource]map[string]bool `json:"-"`
+
 	// EnableUniverseGate flag-gates the Prophet (AgentMain) options-open
 	// underlying allowlist. Default off (observe-first rollout).
 	EnableUniverseGate bool `json:"enable_universe_gate"`
@@ -278,6 +293,12 @@ func NewTradeGuard(positions positionLister, ts interfaces.TradingService, cfg T
 func (g *TradeGuard) CheckBuy(ctx context.Context, agent AgentSource, symbol string, allocationDollars float64) error {
 	if agent == "" {
 		agent = AgentMain
+	}
+
+	// Per-agent equity universe allowlist. Cheap in-memory check, so run it
+	// first — an off-universe symbol is rejected without an account fetch.
+	if err := g.checkAgentUniverse(agent, symbol); err != nil {
+		return err
 	}
 
 	// Lazily fetch account at most once per CheckBuy. Both the value and any
@@ -587,6 +608,33 @@ func (g *TradeGuard) symbolsFor(agent AgentSource) map[string]struct{} {
 	g.mu.RUnlock()
 
 	return result
+}
+
+// checkAgentUniverse enforces the per-agent equity allowlist on opening buys.
+// Fail policy mirrors the Prophet options universe gate: the check is a no-op
+// unless EnableAgentUniverseGate is set AND the agent has a non-empty
+// configured universe. An agent absent from AgentUniverses, or mapped to an
+// empty set, fails OPEN — an unconfigured agent must never be blocked. Because
+// it lives in CheckBuy (opens only), exits via CheckSell are never gated, so a
+// symbol later dropped from a universe can still be closed.
+func (g *TradeGuard) checkAgentUniverse(agent AgentSource, symbol string) error {
+	if !g.cfg.EnableAgentUniverseGate {
+		return nil
+	}
+	universe := g.cfg.AgentUniverses[agent]
+	if len(universe) == 0 {
+		return nil
+	}
+	sym := strings.ToUpper(strings.TrimSpace(symbol))
+	if sym == "" || !universe[sym] {
+		g.logger.WithFields(logrus.Fields{
+			"guard_agent_universe_not_tradable": true,
+			"agent":                             string(agent),
+			"symbol":                            symbol,
+		}).Warn("guard: equity buy blocked — symbol not in agent's tradable universe")
+		return fmt.Errorf("guard: universe — %q is not in %s's tradable universe", symbol, agent)
+	}
+	return nil
 }
 
 // checkDailyLoss blocks new buys when intraday equity is down beyond

@@ -77,6 +77,33 @@ func TestThirdFriday(t *testing.T) {
 	}
 }
 
+// ── Universe (underlying allowlist) tests ───────────────────────────
+
+func TestHarvestService_IsUnderlyingAllowed(t *testing.T) {
+	svc := NewHarvestService(&stubHarvestStore{})
+
+	// Enforcement off (default): everything is allowed — the gate is opt-in.
+	for _, sym := range []string{"SPY", "TSLA", "AAPL", ""} {
+		if !svc.IsUnderlyingAllowed(sym) {
+			t.Errorf("enforcement off: %q should be allowed", sym)
+		}
+	}
+
+	svc.SetEnforceUniverse(true)
+	for _, sym := range []string{"SPY", "QQQ", "IWM", "GLD", "TLT", "spy", " TLT "} {
+		if !svc.IsUnderlyingAllowed(sym) {
+			t.Errorf("enforcement on: %q is a Harvest underlying and should be allowed", sym)
+		}
+	}
+	// DIA/VTI are index-beta for sector attribution but are NOT Harvest
+	// underlyings — the universe is exactly SPY/QQQ/IWM/GLD/TLT.
+	for _, sym := range []string{"TSLA", "AAPL", "DIA", "VTI", ""} {
+		if svc.IsUnderlyingAllowed(sym) {
+			t.Errorf("enforcement on: %q is not a Harvest underlying and should be rejected", sym)
+		}
+	}
+}
+
 // ── Circuit breaker tests ───────────────────────────────────────────
 
 func TestGetState_CircuitBreakerActivates(t *testing.T) {
