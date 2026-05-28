@@ -1384,6 +1384,11 @@ ${userBlock}`;
         if (isNewOrder || isClose) {
           this.state.stats.trades++;
           const { failed, reason } = classifyOrderResult(part);
+          // Stamp sandboxId so state.recentTrades (returned by the dashboard
+          // /state seed endpoints) matches the live SSE payload, which gets
+          // sandboxId injected by the orchestrator. The frontend dedup key
+          // includes sandboxId, so without this the seed renders a duplicate
+          // card with no agent attribution.
           if (isClose) {
             const posId = toolInput.position_id || toolInput.id || '';
             this.state.addTrade({
@@ -1394,6 +1399,7 @@ ${userBlock}`;
               quantity: null,
               price: null,
               status: failed ? 'failed' : 'success',
+              sandboxId: this.sandboxId,
               ...(failed ? { errorReason: reason } : {}),
             });
           } else {
@@ -1407,6 +1413,7 @@ ${userBlock}`;
               quantity: qty || (dollars ? `$${dollars}` : null),
               price: toolInput.limit_price,
               status: failed ? 'failed' : 'success',
+              sandboxId: this.sandboxId,
               ...(failed ? { errorReason: reason } : {}),
             });
           }
