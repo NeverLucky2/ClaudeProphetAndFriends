@@ -955,58 +955,36 @@ func (pm *PositionManager) HeldPennyTickers() map[string]bool {
 	return held
 }
 
-// CloseManagedPosition manually closes a managed position
+// CloseManagedPosition manually closes a managed position.
+//
+// Fail-closed: a position is marked CLOSED only after the broker action that
+// actually flattens it is confirmed *placed*. For an open position that means
+// the market exit order; for a PENDING (unfilled) position it means the entry
+// cancel. If that action errors, the position is left fully intact and an error
+// is returned — we never write a CLOSED ledger row over a still-held broker
+// position. That desync is what stranded Coil's UNH/ADI on 2026-05-26: a failed
+// exit during a rate-limit storm left the broker holding shares (and, because
+// the old code cancelled the stop first, unprotected) while the ledger said
+// CLOSED.
 func (pm *PositionManager) CloseManagedPosition(ctx context.Context, positionID string) error {
 	pm.mu.RLock()
 	position, exists := pm.positions[positionID]
 	pm.mu.RUnlock()
-
 	if !exists {
 		return fmt.Errorf("position not found: %s", positionID)
 	}
 
-	// Cancel all open orders (ignore errors - orders may already be cancelled or market closed)
-
-	// Cancel entry order if still pending
-	if position.EntryOrderID != "" {
-		if err := pm.tradingService.CancelOrder(ctx, position.EntryOrderID); err != nil {
-			pm.logger.WithError(err).Warn("Failed to cancel entry order (may already be filled/cancelled)")
-		} else {
-			pm.logger.WithField("order_id", position.EntryOrderID).Info("Cancelled entry order")
-		}
-	}
-
-	if position.StopLossOrderID != "" {
-		if err := pm.tradingService.CancelOrder(ctx, position.StopLossOrderID); err != nil {
-			pm.logger.WithError(err).Warn("Failed to cancel stop loss order (may already be cancelled)")
-		} else {
-			pm.logger.WithField("order_id", position.StopLossOrderID).Info("Cancelled stop loss order")
-		}
-	}
-	if position.TakeProfitOrderID != "" {
-		if err := pm.tradingService.CancelOrder(ctx, position.TakeProfitOrderID); err != nil {
-			pm.logger.WithError(err).Warn("Failed to cancel take profit order (may already be cancelled)")
-		} else {
-			pm.logger.WithField("order_id", position.TakeProfitOrderID).Info("Cancelled take profit order")
-		}
-	}
-	for _, orderID := range position.PartialExitOrders {
-		if err := pm.tradingService.CancelOrder(ctx, orderID); err != nil {
-			pm.logger.WithError(err).Warn("Failed to cancel partial exit order (may already be cancelled)")
-		} else {
-			pm.logger.WithField("order_id", orderID).Info("Cancelled partial exit order")
-		}
-	}
-
-	// Place market order to close remaining position (ONLY if position is ACTIVE/PARTIAL - i.e., entry was filled)
-	if position.Status == "ACTIVE" || position.Status == "PARTIAL" {
+	switch position.Status {
+	case "ACTIVE", "PARTIAL":
+		// Exit FIRST, before touching the protective bracket. If it can't be
+		// placed, bail with the bracket untouched — position stays ACTIVE and
+		// protected, caller retries.
 		if position.RemainingQty > 0 {
 			exitSide := "sell"
 			if position.Side == "sell" {
 				exitSide = "buy"
 			}
-
-			order := &interfaces.Order{
+			exitOrder := &interfaces.Order{
 				Symbol:      position.Symbol,
 				Qty:         position.RemainingQty,
 				Side:        exitSide,
@@ -1014,32 +992,101 @@ func (pm *PositionManager) CloseManagedPosition(ctx context.Context, positionID 
 				TimeInForce: "day",
 				Status:      "pending",
 				SubmittedAt: time.Now(),
+				// Tag with the owning agent's strategy so the resulting DBOrder
+				// is attributable (matches placeEntryOrder / flattenUnprotected).
+				Strategy: position.AgentStrategy,
+			}
+			result, err := pm.tradingService.PlaceOrder(ctx, exitOrder)
+			if err != nil {
+				pm.logger.WithError(err).WithFields(logrus.Fields{
+					"position_id":              position.ID,
+					"symbol":                   position.Symbol,
+					"operator_review_required": true,
+				}).Error("Close failed: exit order placement failed — position left open and protected (NOT marked CLOSED)")
+				return fmt.Errorf("close %s: exit order placement failed, position remains open: %w", position.Symbol, err)
 			}
 
-			_, err := pm.tradingService.PlaceOrder(ctx, order)
-			if err != nil {
-				// Log error but still close the position in our system
-				pm.logger.WithError(err).Error("Failed to place exit order (market may be closed)")
-				pm.logger.Info("Closing position in database despite order error")
-			} else {
-				pm.logger.WithField("quantity", position.RemainingQty).Info("Placed market exit order")
+			// Exit accepted — persist it for attribution (best-effort), then
+			// tear down the now-redundant protective/partial orders.
+			exitOrder.ID = result.OrderID
+			exitOrder.Status = result.Status
+			if pm.storageService != nil {
+				if saveErr := pm.storageService.SaveOrder(exitOrder); saveErr != nil {
+					pm.logger.WithError(saveErr).WithField("order_id", result.OrderID).Warn("Failed to save exit order to database")
+				}
 			}
+			pm.logger.WithFields(logrus.Fields{
+				"position_id": position.ID,
+				"order_id":    result.OrderID,
+				"quantity":    position.RemainingQty,
+			}).Info("Placed market exit order")
 		}
-	} else if position.Status == "PENDING" {
-		// For pending positions, just log that we cancelled the entry order
-		pm.logger.WithField("position_id", position.ID).Info("Closed pending position (entry order was never filled)")
+		pm.cancelBracketOrders(ctx, position)
+
+	case "PENDING":
+		// Entry never filled — cancel the entry order. Fail-closed: if the
+		// cancel errors, the entry can still fill and become an orphan, so do
+		// NOT mark CLOSED.
+		if position.EntryOrderID != "" {
+			if err := pm.tradingService.CancelOrder(ctx, position.EntryOrderID); err != nil {
+				pm.logger.WithError(err).WithFields(logrus.Fields{
+					"position_id":              position.ID,
+					"symbol":                   position.Symbol,
+					"operator_review_required": true,
+				}).Error("Close failed: could not cancel pending entry order — position left PENDING (NOT marked CLOSED)")
+				return fmt.Errorf("close %s: pending entry cancel failed, position remains pending: %w", position.Symbol, err)
+			}
+			pm.logger.WithField("order_id", position.EntryOrderID).Info("Cancelled pending entry order")
+		}
+
+	default:
+		// CLOSED / STOPPED_OUT / FAILED — already terminal. Idempotent no-op so
+		// a double-close can't place a spurious order.
+		pm.logger.WithFields(logrus.Fields{
+			"position_id": position.ID,
+			"status":      position.Status,
+		}).Debug("CloseManagedPosition called on a terminal position — no-op")
+		return nil
 	}
 
+	pm.mu.Lock()
 	position.Status = "CLOSED"
 	now := time.Now()
 	position.ClosedAt = &now
+	position.UpdatedAt = now
+	pm.mu.Unlock()
 
-	// Save to database
-	pm.savePositionToDB(position)
+	if err := pm.savePositionToDB(position); err != nil {
+		pm.logger.WithError(err).WithFields(logrus.Fields{
+			"position_id":              positionID,
+			"operator_review_required": true,
+		}).Error("Failed to persist CLOSED status after close — may resurrect on reload")
+	}
 
 	pm.logger.WithField("position_id", positionID).Info("Position manually closed")
-
 	return nil
+}
+
+// cancelBracketOrders cancels a position's stop-loss, take-profit, and any
+// partial-exit orders, best-effort. Called only after the exit order has been
+// placed, so cancel errors are non-fatal — the orders may already be filled or
+// cancelled, and the exit is already in flight.
+func (pm *PositionManager) cancelBracketOrders(ctx context.Context, position *ManagedPosition) {
+	if position.StopLossOrderID != "" {
+		if err := pm.tradingService.CancelOrder(ctx, position.StopLossOrderID); err != nil {
+			pm.logger.WithError(err).WithField("order_id", position.StopLossOrderID).Warn("Failed to cancel stop loss order (may already be filled/cancelled)")
+		}
+	}
+	if position.TakeProfitOrderID != "" {
+		if err := pm.tradingService.CancelOrder(ctx, position.TakeProfitOrderID); err != nil {
+			pm.logger.WithError(err).WithField("order_id", position.TakeProfitOrderID).Warn("Failed to cancel take profit order (may already be filled/cancelled)")
+		}
+	}
+	for _, orderID := range position.PartialExitOrders {
+		if err := pm.tradingService.CancelOrder(ctx, orderID); err != nil {
+			pm.logger.WithError(err).WithField("order_id", orderID).Warn("Failed to cancel partial exit order (may already be cancelled)")
+		}
+	}
 }
 
 // Helper functions
