@@ -110,6 +110,7 @@ In these cases:
 | Composite score | Weighted sum of 5 factor scores: gap(25%) + trend(30%) + vol(20%) + ma200(15%) + ma50(10%) |
 | Grade | A ≥ 85, B ≥ 70, C ≥ 55, D < 55 |
 | PEAD stage | MONITORING (no red candle yet), SIGNAL_READY (red formed, no breakout), BREAKOUT (green close > red high), EXPIRED (>5 weeks since earnings) |
+| Continuation | Fast post-earnings momentum entry: ≥1 day after the gap, latest close above BOTH the gap-bar high and the prior day's high. Gated by `ENABLE_DRIFT_CONTINUATION` (shadow by default). |
 | Days held | Calendar trading days elapsed since fill, computed each heartbeat |
 
 ---
@@ -130,6 +131,7 @@ Signal computation is performed by the backend `get_earnings_drift_candidates` e
   ma50_position:      { ma, distance_pct, above_ma, score, ... },
   composite:         { composite_score, grade, component_breakdown, ... },
   pead:              { stage, red_candle, is_breakout, breakout_pct, ... },
+  continuation:      { is_continuation, gap_bar_high, latest_close, prior_high, days_after_gap, extension_pct, ... },
   signal_version
 }
 ```
@@ -142,11 +144,22 @@ For each candidate, the following must all hold (verified by the backend; re-che
 - `ma200_position.above_ma` == true
 - `ma50_position.above_ma` == true
 - `composite.grade` ∈ {"A", "B"}
-- `pead.stage` ∈ {"SIGNAL_READY", "BREAKOUT"} (preferred — see ranking note)
+- **Either** `continuation.is_continuation` == true **OR** `pead.stage` ∈ {"SIGNAL_READY", "BREAKOUT"}
+
+  `continuation.is_continuation` is true when, ≥1 trading day after the gap, the
+  latest daily close is above both the gap-bar high and the prior day's high (a
+  fresh higher-high close confirming the post-earnings move is still advancing).
+
+  **Operator gate:** continuation entries are controlled by the backend env flag
+  `ENABLE_DRIFT_CONTINUATION` (default OFF = shadow). While OFF, the backend
+  reports `continuation.is_continuation = false` and only logs would-be
+  continuation entries — Drift takes no continuation trades until the operator
+  enables it. The `pead.stage` path is always active but is rarely reachable
+  inside the current candidate window.
 
 If any condition fails on the agent's re-check, skip and log the failing condition.
 
-**Ranking preference for entries**: when multiple candidates qualify, prefer `pead.stage == "BREAKOUT"` over `SIGNAL_READY`, then by composite score descending. The backend already sorts by composite descending; the agent does the additional stage-bias re-sort if the position cap binds.
+**Ranking preference for entries**: when multiple candidates qualify, prefer `pead.stage == "BREAKOUT"`, then `SIGNAL_READY`, then continuation-only qualifiers, then by composite score descending. The backend already sorts by composite descending; the agent does the additional stage/continuation-bias re-sort if the position cap binds.
 
 ### Exit signals
 
@@ -282,7 +295,7 @@ Otherwise:
      strategy: "earnings-drift"
    }
    ```
-6. On fill: log entry with `entry_reason: "pead_continuation"`, including `earnings_date`, `earnings_timing`, `composite_score`, `grade`, `pead.stage`, `gap.gap_pct`, and the computed `position_dollars`.
+6. On fill: log entry with `entry_reason` ("pead_continuation" for a `continuation.is_continuation` entry, "pead_breakout" for a `pead.stage` entry), including `earnings_date`, `earnings_timing`, `composite_score`, `grade`, `pead.stage`, `gap.gap_pct`, `continuation.extension_pct` (the close's % extension above the gap-bar high — recorded so an extension/anti-chase guard can be calibrated later), and the computed `position_dollars`.
 
 Stop after the first 3 entries — even if more candidates qualify, the position cap binds.
 
@@ -304,7 +317,7 @@ Before every Drift entry:
 - [ ] `ma200_position.above_ma` == true?
 - [ ] `ma50_position.above_ma` == true?
 - [ ] `composite.grade` ∈ {"A", "B"}?
-- [ ] `pead.stage` ∈ {"SIGNAL_READY", "BREAKOUT"}?
+- [ ] `continuation.is_continuation` == true OR `pead.stage` ∈ {"SIGNAL_READY", "BREAKOUT"}?
 - [ ] No existing Drift position for this ticker this quarter?
 - [ ] Total open Drift positions < 3?
 - [ ] Total Drift-deployed capital < 12%?
