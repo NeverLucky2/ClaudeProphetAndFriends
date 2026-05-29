@@ -818,3 +818,86 @@ func TestDriftCandidatesService_ContinuationDefaultsOff(t *testing.T) {
 		t.Errorf("SetContinuationEnabled(true) did not take effect")
 	}
 }
+
+// buildContinuationBars: grade-A/B, BMO gap +6% at L-5, with highs == closes so
+// a rising tail produces a clean higher-high close → is_continuation == true.
+// PEAD stage is MONITORING (earnings only ~1 week back), so the ONLY actionable
+// path is continuation.
+func buildContinuationBars(ticker string) []*interfaces.Bar {
+	rows := make([]driftBarRow, 220)
+	for i := 0; i < 200; i++ {
+		rows[i] = driftBarRow{Open: 100, High: 100, Low: 99.5, Close: 100, Vol: 100_000}
+	}
+	for i := 200; i < 215; i++ {
+		c := 100 + 0.4*float64(i-199)
+		rows[i] = driftBarRow{Open: c - 0.2, High: c, Low: c - 0.3, Close: c, Vol: 100_000}
+	}
+	earningsIdx := 215
+	prevClose := rows[earningsIdx-1].Close
+	gapOpen := prevClose * 1.06
+	rows[earningsIdx] = driftBarRow{Open: gapOpen, High: gapOpen + 0.5, Low: prevClose, Close: gapOpen + 0.5, Vol: 200_000}
+	for i := earningsIdx + 1; i < 220; i++ {
+		c := rows[i-1].Close + 0.4
+		rows[i] = driftBarRow{Open: c - 0.1, High: c, Low: c - 0.2, Close: c, Vol: 200_000} // High == Close
+	}
+	bars := makeMonFriBars(rows)
+	for _, b := range bars {
+		b.Symbol = ticker
+	}
+	return bars
+}
+
+func TestDriftCandidates_EnforceMode_SurfacesContinuationDropsNonActionable(t *testing.T) {
+	cont := buildContinuationBars("CONT") // continuation true, MONITORING
+	flat := buildGradeABars("FLT")        // continuation false, MONITORING
+	stub := map[string][]*interfaces.Bar{"CONT": cont, "FLT": flat}
+	reports := []RecentReport{
+		{Ticker: "CONT", Date: cont[len(cont)-5].Timestamp, Timing: "bmo"},
+		{Ticker: "FLT", Date: flat[len(flat)-5].Timestamp, Timing: "bmo"},
+	}
+	cs := NewDriftCandidatesService(
+		NewDriftSignalService(&stubDriftBarFetcherSvc{bars: stub}),
+		&stubRecentReporterFetcher{reports: reports},
+		[]string{"CONT", "FLT"},
+	)
+	cs.SetRefreshInterval(-1)
+	cs.SetContinuationEnabled(true) // enforce
+
+	resp := cs.GetCandidates(context.Background(), time.Date(2026, 5, 19, 17, 0, 0, 0, time.UTC))
+	if resp.Count != 1 {
+		t.Fatalf("enforce: expected 1 actionable candidate (CONT), got %d: %+v", resp.Count, resp.Candidates)
+	}
+	if resp.Candidates[0].Ticker != "CONT" {
+		t.Fatalf("enforce: expected CONT, got %s", resp.Candidates[0].Ticker)
+	}
+	if !resp.Candidates[0].Continuation.IsContinuation {
+		t.Errorf("enforce: CONT.is_continuation = false, want true")
+	}
+}
+
+func TestDriftCandidates_ShadowMode_PreservesFilterZeroesField(t *testing.T) {
+	cont := buildContinuationBars("CONT")
+	flat := buildGradeABars("FLT")
+	stub := map[string][]*interfaces.Bar{"CONT": cont, "FLT": flat}
+	reports := []RecentReport{
+		{Ticker: "CONT", Date: cont[len(cont)-5].Timestamp, Timing: "bmo"},
+		{Ticker: "FLT", Date: flat[len(flat)-5].Timestamp, Timing: "bmo"},
+	}
+	cs := NewDriftCandidatesService(
+		NewDriftSignalService(&stubDriftBarFetcherSvc{bars: stub}),
+		&stubRecentReporterFetcher{reports: reports},
+		[]string{"CONT", "FLT"},
+	)
+	cs.SetRefreshInterval(-1)
+	// No SetContinuationEnabled → default shadow.
+
+	resp := cs.GetCandidates(context.Background(), time.Date(2026, 5, 19, 17, 0, 0, 0, time.UTC))
+	if resp.Count != 2 {
+		t.Fatalf("shadow: expected 2 candidates (base-gates filter unchanged), got %d: %+v", resp.Count, resp.Candidates)
+	}
+	for _, c := range resp.Candidates {
+		if c.Continuation.IsContinuation {
+			t.Errorf("shadow: %s.is_continuation = true, want false (must be zeroed for the agent)", c.Ticker)
+		}
+	}
+}

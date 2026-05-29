@@ -840,14 +840,23 @@ func (s *DriftCandidatesService) compute(ctx context.Context, now time.Time) *Dr
 		resp.Errors = append(resp.Errors, fmt.Sprintf("FetchRecentReports: %s", err.Error()))
 		return resp
 	}
+
+	s.mu.RLock()
+	enforce := s.continuationEnabled
+	s.mu.RUnlock()
+
 	var latestAsOf string
+	var inUniverse, fetchErrors, scoredOK, droppedGap, droppedMA, droppedGrade, droppedNotActionable, actionable int
+
 	for _, r := range reports {
 		if !s.universe[strings.ToUpper(r.Ticker)] {
 			continue
 		}
+		inUniverse++
 		sig, err := s.signalSvc.GetSignal(ctx, r.Ticker, r.Date.Format("2006-01-02"), r.Timing)
 		if err != nil {
 			if !errors.Is(err, ErrInsufficientDriftHistory) {
+				fetchErrors++
 				resp.Errors = append(resp.Errors, fmt.Sprintf("%s: %s", r.Ticker, err.Error()))
 			}
 			continue
@@ -855,30 +864,90 @@ func (s *DriftCandidatesService) compute(ctx context.Context, now time.Time) *Dr
 		if sig == nil {
 			continue
 		}
-		// Entry filters mirror TRADING_RULES_DRIFT.md:
-		//   - positive gap ≥ 3% (long-only; gap-downs are filtered out)
-		//   - above MA200 (uptrend regime)
-		//   - above MA50 (medium-term momentum)
-		//   - grade A or B
+		scoredOK++
+
+		// Base entry gates (always applied; mirror TRADING_RULES_DRIFT.md).
 		if sig.Gap.GapPct < 3.0 {
+			droppedGap++
 			continue
 		}
 		if !sig.MA200.AboveMA || !sig.MA50.AboveMA {
+			droppedMA++
 			continue
 		}
 		if sig.Composite.Grade != "A" && sig.Composite.Grade != "B" {
+			droppedGrade++
 			continue
 		}
+
+		peadReady := sig.PEAD.Stage == "SIGNAL_READY" || sig.PEAD.Stage == "BREAKOUT"
+		cont := sig.Continuation.IsContinuation
+
+		// Shadow telemetry: log every would-be continuation entry regardless of
+		// mode (out of the LLM payload). Fields suffice to reconstruct forward
+		// outcomes offline.
+		if cont {
+			s.logger.WithFields(logrus.Fields{
+				"ticker":          sig.Ticker,
+				"earnings_date":   sig.EarningsDate,
+				"timing":          sig.EarningsTiming,
+				"last_close":      sig.LastClose,
+				"gap_pct":         sig.Gap.GapPct,
+				"extension_pct":   sig.Continuation.ExtensionPct,
+				"days_after_gap":  sig.Continuation.DaysAfterGap,
+				"composite_score": sig.Composite.CompositeScore,
+				"grade":           sig.Composite.Grade,
+				"pead_stage":      sig.PEAD.Stage,
+				"mode":            continuationMode(enforce),
+			}).Info("drift: would-be continuation entry")
+		}
+
+		if cont || peadReady {
+			actionable++
+		}
+
+		if enforce {
+			// ENFORCE: only actionable names surface; is_continuation stays truthful.
+			if !cont && !peadReady {
+				droppedNotActionable++
+				continue
+			}
+		} else {
+			// SHADOW: keep the base-gates-only filter (non-actionable in-window
+			// names still surface, preserving near-miss visibility); zero the
+			// field so the agent's "continuation OR pead-ready" rule cannot act.
+			sig.Continuation.IsContinuation = false
+		}
+
 		if sig.AsOf > latestAsOf {
 			latestAsOf = sig.AsOf
 		}
 		resp.Candidates = append(resp.Candidates, *sig)
 	}
+
 	sort.SliceStable(resp.Candidates, func(i, j int) bool {
 		return resp.Candidates[i].Composite.CompositeScore > resp.Candidates[j].Composite.CompositeScore
 	})
 	resp.Count = len(resp.Candidates)
 	resp.AsOf = latestAsOf
+
+	// Per-scan coverage summary (out of the LLM payload). Distinguishes
+	// "fix works, no setups yet" from "fix didn't land", and surfaces the
+	// 429-starvation confound via fetch_errors / in_universe.
+	s.logger.WithFields(logrus.Fields{
+		"mode":                   continuationMode(enforce),
+		"reports_in_window":      len(reports),
+		"in_universe":            inUniverse,
+		"scored_ok":              scoredOK,
+		"dropped_gap":            droppedGap,
+		"dropped_ma":             droppedMA,
+		"dropped_grade":          droppedGrade,
+		"dropped_not_actionable": droppedNotActionable,
+		"fetch_errors":           fetchErrors,
+		"actionable_count":       actionable,
+		"candidate_count":        resp.Count,
+	}).Info("drift: candidate scan summary")
+
 	return resp
 }
 
