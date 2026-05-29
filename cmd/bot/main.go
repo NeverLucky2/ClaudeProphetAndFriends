@@ -444,6 +444,9 @@ func main() {
 		driftRecentReporter,
 		nil, // nil universe = use services.DriftUniverse default
 	)
+	driftCandidatesSvc.SetContinuationEnabled(cfg.EnableDriftContinuation)
+	logger.WithField("mode", map[bool]string{true: "enforce", false: "shadow"}[cfg.EnableDriftContinuation]).
+		Info("Drift continuation entry path")
 	driftController := controllers.NewDriftController(driftCandidatesSvc)
 	logger.Debug("Drift signal service initialized")
 
