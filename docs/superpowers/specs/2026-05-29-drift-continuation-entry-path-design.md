@@ -63,18 +63,48 @@ slow path alone, which is incompatible with the short candidate window.
 
 ## Goal
 
-Implement the missing continuation entry path so Drift can act within days of a
+Implement the missing continuation entry path so Drift *can* act within days of a
 qualifying post-earnings gap, while preserving the PEAD weekly-breakout path as
-an alternative. Keep the deterministic-Go / dumb-LLM-executor architecture.
+an alternative. Ship it **behind a default-OFF flag in shadow mode** so the new,
+unvalidated rule logs would-be entries (and near-miss / universe-coverage
+telemetry) without trading, until the operator consciously enables it. Keep the
+deterministic-Go / dumb-LLM-executor architecture.
 
-**Non-goals (out of scope for this change):**
+### This change does two separable things
 
+1. **Structural fix (unambiguously correct):** make the enumeration window and
+   the entry gate mutually satisfiable by adding a fast entry path that can fire
+   inside the ~14-day window.
+2. **New, unvalidated rule (expectancy unknown):** the higher-high continuation
+   confirm. Its presence in the original spec is *not* evidence it is profitable
+   — it was dropped and never validated. Shipping it in shadow mode first is how
+   we keep #1's correctness from being entangled with #2's uncertainty.
+
+### Half-restored is intentional, not an oversight
+
+This change does **not** widen the enumeration window, so the PEAD weekly-breakout
+path stays effectively stranded (it needs `weeksSinceEarnings ≥ 2`, by which
+point names have aged out). Therefore `continuation OR pead-ready` resolves to
+**continuation in nearly every case** — continuation becomes the de facto sole
+operative path. The original design wanted two complementary patterns (fast
+momentum continuation + pullback-then-resume PEAD); we are deliberately shipping
+only the first. Restoring the PEAD path is a known **companion follow-up**
+(widening / extending the enumeration window for names under PEAD-watch), tracked
+separately and **out of scope here**.
+
+### Non-goals (out of scope for this change)
+
+- Widening the enumeration window to make the PEAD path reachable (the companion
+  follow-up above).
 - The `ENABLE_DRIFT_WARMER` orchestrator wiring (the flag is intentionally
   `false` today; the cold-cache → preflight-fail-open path is accepted).
 - The cross-agent HTTP 429 storm that drops some universe tickers from scoring.
 - Any change to sizing, risk caps, or exit rules.
-- Any anti-chase / large-gap extension guard (the higher-high confirm already
-  filters stalled names; noted as a future tuning lever).
+- Any anti-chase / large-gap extension guard (deferred; we only *instrument* its
+  future inputs here — see Observability).
+- A forward-outcome tracking subsystem in the service. Shadow logging records
+  enough per-event fields that forward outcomes can be reconstructed offline; we
+  do not build live forward-PnL tracking into the Go service.
 
 ---
 
@@ -87,10 +117,33 @@ executor that reads booleans and applies the documented entry/exit rules. The
 continuation signal is computed in Go and surfaced in the `DriftSignal` payload,
 mirroring how `pead` is handled. No agent-side arithmetic.
 
+### Feature flag & rollout (shadow → enforce)
+
+`ENABLE_DRIFT_CONTINUATION` env var, read in `cmd/bot/main.go` and passed to
+`DriftCandidatesService` (mirrors the existing `ENABLE_*` flag plumbing). Default
+**OFF (shadow)**. The flag gates the **backend**, not the agent's rule text — the
+agent never reads env vars (same pattern as `PENNY_DILUTION_FILTER_MODE`: the mode
+controls what the backend returns; the rule describes the enforced behavior).
+
+| | Shadow (default, OFF) | Enforce (ON) |
+|---|---|---|
+| Continuation computed | Yes (always) | Yes |
+| `continuation.is_continuation` **in payload** | forced `false` (agent can't act on it) | truthful |
+| Candidate filter | base gates only — unchanged from today; non-actionable in-window names (e.g. CSCO/MONITORING) still surface | tightened: base gates **AND** (`is_continuation` OR pead-ready) |
+| Would-be continuation entries | logged at service level only | become real (paper) entries |
+| External agent behavior | identical to today (pead-only ⇒ ≈ no entries) + shadow logs | enters on continuation |
+
+Rationale: in shadow mode the candidate list is intentionally left untightened so
+the existing near-miss visibility (the "CSCO rejected, MONITORING" agent lines)
+is preserved — that is the signal that distinguishes "fix works, no setups yet"
+from "fix didn't land." Tightening (which removes those lines) only takes effect
+once continuation is actually doing the work.
+
 ### Component 1 — `computeDriftContinuation` (Go, pure function)
 
 New function and struct in `services/drift_signal_service.go`. Bars are
-oldest-first (package convention).
+oldest-first (package convention). **Always computes the true value, independent
+of the flag** — flag gating happens only in the candidates service.
 
 ```go
 type DriftContinuation struct {
@@ -99,6 +152,7 @@ type DriftContinuation struct {
     LatestClose    float64 `json:"latest_close"`
     PriorHigh      float64 `json:"prior_high"`
     DaysAfterGap   int     `json:"days_after_gap"`
+    ExtensionPct   float64 `json:"extension_pct"` // latest_close / gap_bar_high - 1, in %
     Warning        string  `json:"warning,omitempty"`
 }
 ```
@@ -115,7 +169,9 @@ Logic:
 - `L = len(bars)`, `latestIdx = L-1`.
 - `DaysAfterGap = latestIdx - gapBarIdx`.
 - `GapBarHigh = bars[gapBarIdx].High`, `LatestClose = bars[L-1].Close`,
-  `PriorHigh = bars[L-2].High` (guard `L >= 2`).
+  `PriorHigh = bars[L-2].High` (guard `L >= 2`; given `driftMinBars = 210` this is
+  always satisfied, so it is defensive).
+- `ExtensionPct = roundTo2((LatestClose/GapBarHigh - 1) * 100)` when `GapBarHigh > 0`.
 - `IsContinuation = DaysAfterGap >= 1 AND LatestClose > GapBarHigh AND LatestClose > PriorHigh`.
 
 Rationale (decision: **robust higher-high confirm**):
@@ -127,30 +183,55 @@ Rationale (decision: **robust higher-high confirm**):
 - `LatestClose > PriorHigh` — a fresh higher-high close confirms the advance is
   still active on the evaluation day, filtering names that ran once and stalled.
 
+**Day-1 identity (documented, not a bug):** when `DaysAfterGap == 1`,
+`gapBarIdx == L-2`, so `GapBarHigh == PriorHigh` and the two `LatestClose > …`
+tests are the same comparison — the higher-high confirm only adds independent
+filtering from day 2 on. This matches the original spec's day-1 phrasing
+("close > previous day's high"). A test documents this so a future reader does
+not "simplify" the apparent redundancy.
+
 ### Component 2 — wire into `ComputeDriftSignal`
 
 Add `Continuation DriftContinuation` to the `DriftSignal` struct (json key
 `continuation`) and populate it in `ComputeDriftSignal` alongside `gap`, `pead`,
-etc. Signal version stays `v1` (additive field; no consumer breakage — the agent
-reads the new field only where the rules now reference it).
+etc. **`ComputeDriftSignal` stays pure — it always emits the truthful
+continuation value.** The shadow/enforce gating (forcing `is_continuation=false`
+in shadow) is applied later in `DriftCandidatesService.compute`, so the pure
+function and the `/signal/:symbol` endpoint are unaffected and easy to test.
+Signal version stays `v1` (additive field).
 
-### Component 3 — candidate filter (`DriftCandidatesService.compute`)
+### Component 3 — candidate filter + flag gating (`DriftCandidatesService.compute`)
 
-Today the per-ticker filter is `gap≥3 ∧ aboveMA200 ∧ aboveMA50 ∧ grade∈{A,B}` and
-ignores stage, so non-actionable MONITORING names surface (inflating `count`,
-waking the preflight beat). Tighten it to the actionable gate (confirmed
-decision A):
+The service gains a `continuationEnabled bool` field (set from the env flag in
+`main.go`). Per qualifying ticker, after the existing gap / MA / grade checks:
 
 ```go
 peadReady := sig.PEAD.Stage == "SIGNAL_READY" || sig.PEAD.Stage == "BREAKOUT"
-if !sig.Continuation.IsContinuation && !peadReady {
-    continue
+cont := sig.Continuation.IsContinuation // truthful computed value
+
+// Shadow telemetry is emitted in BOTH modes (see Observability).
+if cont {
+    s.logger.WithFields(...).Info("drift: would-be continuation entry")
 }
+
+if s.continuationEnabled {
+    // ENFORCE: tighten to actionable names; leave is_continuation truthful.
+    if !cont && !peadReady {
+        continue
+    }
+} else {
+    // SHADOW: keep today's base-gates-only filter (non-actionable names still
+    // surface for near-miss visibility); zero the field so the agent, applying
+    // "enter on continuation OR pead-ready", cannot act on it.
+    sig.Continuation.IsContinuation = false
+}
+resp.Candidates = append(resp.Candidates, *sig)
 ```
 
-(Applied after the existing gap / MA / grade checks.) Result: the response
-`count` reflects only truly entry-eligible names, so `driftPreflight` skips dead
-days correctly and only wakes the LLM when there is real work.
+Result: with the flag OFF, `count` and the candidate list are exactly as today
+(near-miss visibility preserved); with the flag ON, `count` reflects only truly
+entry-eligible names, so `driftPreflight` skips dead days and only wakes the LLM
+when there is real work.
 
 ### Component 4 — rules (`TRADING_RULES_DRIFT.md`)
 
@@ -159,8 +240,17 @@ days correctly and only wakes the LLM when there is real work.
   (gap.gap_pct ≥ +3.0, ma200_position.above_ma, ma50_position.above_ma,
   composite.grade ∈ {A,B}) **AND**
   (`continuation.is_continuation == true` **OR** `pead.stage ∈ {SIGNAL_READY, BREAKOUT}`).
+- **Operator note** (mirrors the penny dilution-filter mode note): continuation
+  entries are gated by `ENABLE_DRIFT_CONTINUATION` (default OFF = shadow: the
+  backend reports `is_continuation=false` and logs would-be entries; no
+  continuation trades occur until the operator enables it). The pead.stage path
+  is always active but rarely reachable in the current window.
 - **Ranking preference:** BREAKOUT → SIGNAL_READY → continuation, then composite
   score descending.
+- **Entry logging:** when an entry fires on continuation, the `log_decision`
+  payload records `gap.gap_pct` and `continuation.extension_pct` (the close's
+  extension above the gap-bar high) so the future anti-chase guard starts from a
+  real distribution.
 - **Pre-Trade Checklist:** replace the single `pead.stage` checkbox with a
   combined checkbox: "continuation.is_continuation OR pead.stage ∈ {SIGNAL_READY,
   BREAKOUT}".
@@ -181,11 +271,36 @@ or Exit rules.
           → FetchRecentReports(now, 5)            (≤14 cal-day earnings window)
           → per ticker: GetSignal → ComputeDriftSignal
               → gap, trend, vol, ma200, ma50, composite, pead, CONTINUATION (new)
-          → filter: base gates AND (continuation OR pead-ready)   (CHANGED)
-      → count reflects actionable names → preflight runs the beat iff count>0
+          → log coverage summary + per would-be-continuation (BOTH modes)
+          → filter:
+              shadow  → base gates only (unchanged); is_continuation forced false
+              enforce → base gates AND (is_continuation OR pead-ready)
+      → count → preflight runs the beat iff count>0
   → LLM reads candidates, applies entry rule (continuation OR pead-ready),
     ranks, sizes (unchanged), place_managed_position(stop 10 / target 20)
 ```
+
+---
+
+## Observability (shadow instrumentation)
+
+All emitted via the service `logger` (logrus), **kept out of the LLM payload** to
+respect the token-cost discipline. Present in BOTH shadow and enforce modes.
+
+1. **Per-scan coverage summary** — one line per `compute` run:
+   `reports_in_window`, `in_universe`, `scored_ok`, `dropped_gap`,
+   `dropped_ma`, `dropped_grade`, `dropped_not_actionable` (enforce only),
+   `fetch_errors` (429s etc.), `actionable_count`. This is the line that
+   distinguishes "fix works, no setups yet" from "fix didn't land", and it
+   surfaces the 429-starvation confound (a low `in_universe`/high `fetch_errors`
+   line means the universe was thinned before scoring — check this before tuning
+   continuation thresholds).
+2. **Per would-be-continuation event** — for every ticker where the truthful
+   `is_continuation == true` (logged regardless of flag): `ticker`,
+   `earnings_date`, `timing`, `last_close` (entry reference), `gap_pct`,
+   `extension_pct`, `days_after_gap`, `composite_score`, `grade`, `pead.stage`.
+   These fields are sufficient to reconstruct forward outcomes offline (join
+   against bar history) without building forward tracking into the service.
 
 ---
 
@@ -194,24 +309,29 @@ or Exit rules.
 Go unit tests in `services/drift_signal_service_test.go`:
 
 - `computeDriftContinuation` BMO: day-after bar closes a higher high above the
-  gap-bar high → `IsContinuation == true`, `DaysAfterGap == 1`.
+  gap-bar high → `IsContinuation == true`, `DaysAfterGap == 1`,
+  `ExtensionPct > 0`.
 - AMC variant: gap bar is `earningsIdx+1`; continuation measured against that
   bar's high.
 - Gap is the latest bar (`DaysAfterGap == 0`) → false.
 - Closed above gap-bar high but latest close ≤ prior day's high (stalled / down
-  day) → false.
+  day, `DaysAfterGap ≥ 2`) → false.
+- **Day-1 identity test:** with `DaysAfterGap == 1`, document that the gap-bar
+  high equals the prior-day high (the confirm is a single comparison on day 1).
 - `earnings_date` not in bars → false with warning.
 - AMC with no gap bar yet (`earningsIdx+1` out of range) → false with warning.
 
-Candidates-filter test (drive `compute` via the existing
+Candidates-filter / flag tests (drive `compute` via the existing
 `RecentReporterFetcher` + `BarFetcher` test seams, mirroring existing drift
 candidate tests):
 
-- A fresh post-earnings name showing continuation (MONITORING stage) now appears
-  in `candidates` and contributes to `count`.
-- A MONITORING name with no continuation does **not** appear (regression guard
-  for the old always-surface behavior).
-- A SIGNAL_READY/BREAKOUT name still appears (PEAD path preserved).
+- **Enforce mode:** a fresh post-earnings name showing continuation (MONITORING
+  stage) appears in `candidates` with `is_continuation == true` and contributes
+  to `count`; a MONITORING name with no continuation does **not** appear.
+- **Shadow mode (default):** the same continuation name still appears (base-gates
+  filter unchanged) but with `is_continuation == false` in the payload; the
+  would-be-continuation log event is emitted.
+- A SIGNAL_READY/BREAKOUT name still appears in both modes (PEAD path preserved).
 
 Full regression: `go test ./services/ -count=1`.
 
@@ -219,11 +339,18 @@ Full regression: `go test ./services/ -count=1`.
 
 ## Rollout / risk
 
-- Going-forward only; no backfill. First effect is the next 17:00 ET beat with a
-  qualifying continuation candidate.
-- Bounded risk: entries still use `place_managed_position` with the unchanged
-  −10% stop / +20% target / 60-day time stop and the existing 4% · max-3 · 12%
-  caps. Worst case of a bad continuation entry is a −10% bracketed loss on a 4%
-  position.
-- Reversible: the filter and rule are the only behavior changes; reverting the
-  rule line restores the prior (no-entry) behavior.
+- **Ships OFF (shadow).** Day-one external behavior is identical to today (no
+  continuation trades), plus shadow telemetry. Enabling is a separate, conscious
+  `ENABLE_DRIFT_CONTINUATION=true` step after reviewing the shadow logs (or after
+  the optional offline expectancy replay).
+- Going-forward only; no backfill.
+- When enabled, bounded risk: entries use `place_managed_position` with the
+  unchanged −10% stop / +20% target / 60-day time stop and the existing
+  4% · max-3 · 12% caps. Worst case of a bad continuation entry is a −10%
+  bracketed loss on a 4% position.
+- Reversible: flip the flag back to OFF to return to the prior (no-entry)
+  behavior; no data migration.
+- **Reading results:** if, once enabled, trade frequency is low, check the
+  per-scan coverage log (point 1) for `fetch_errors`/thin `in_universe`
+  (429-starvation) *before* concluding the continuation thresholds are too
+  strict.
