@@ -697,3 +697,109 @@ func TestDriftCandidatesService_RefreshBypassesTTL(t *testing.T) {
 		t.Fatalf("Refresh should have recomputed an empty result into cache; got %d", after.Count)
 	}
 }
+
+func TestComputeDriftContinuation_BMO_DayAfterHigherHigh(t *testing.T) {
+	bars := makeDriftBars([]driftBarRow{
+		{Open: 100, High: 101, Low: 99, Close: 100, Vol: 1000},
+		{Open: 104, High: 106, Low: 103, Close: 105, Vol: 5000}, // earnings (gap bar)
+		{Open: 106, High: 108, Low: 105, Close: 107, Vol: 4000}, // day-after
+	})
+	earningsDate := bars[1].Timestamp.UTC().Format("2006-01-02")
+	got := computeDriftContinuation(bars, earningsDate, "bmo")
+	if !got.IsContinuation {
+		t.Errorf("IsContinuation = false, want true (%+v)", got)
+	}
+	if got.DaysAfterGap != 1 {
+		t.Errorf("DaysAfterGap = %d, want 1", got.DaysAfterGap)
+	}
+	if got.GapBarHigh != 106 {
+		t.Errorf("GapBarHigh = %v, want 106", got.GapBarHigh)
+	}
+	if got.ExtensionPct <= 0 {
+		t.Errorf("ExtensionPct = %v, want > 0", got.ExtensionPct)
+	}
+	if got.GapBarHigh != got.PriorHigh {
+		t.Errorf("day-1 identity broken: GapBarHigh=%v PriorHigh=%v (must be equal when DaysAfterGap==1)", got.GapBarHigh, got.PriorHigh)
+	}
+}
+
+func TestComputeDriftContinuation_AMC_DayAfterHigherHigh(t *testing.T) {
+	bars := makeDriftBars([]driftBarRow{
+		{Open: 100, High: 101, Low: 99, Close: 100, Vol: 1000},  // earnings date
+		{Open: 103, High: 107, Low: 102, Close: 106, Vol: 5000}, // gap bar (next day)
+		{Open: 106, High: 109, Low: 105, Close: 108, Vol: 4000}, // latest
+	})
+	earningsDate := bars[0].Timestamp.UTC().Format("2006-01-02")
+	got := computeDriftContinuation(bars, earningsDate, "amc")
+	if !got.IsContinuation {
+		t.Errorf("IsContinuation = false, want true (%+v)", got)
+	}
+	if got.GapBarHigh != 107 {
+		t.Errorf("GapBarHigh = %v, want 107 (AMC gap bar = earningsIdx+1)", got.GapBarHigh)
+	}
+	if got.DaysAfterGap != 1 {
+		t.Errorf("DaysAfterGap = %d, want 1", got.DaysAfterGap)
+	}
+}
+
+func TestComputeDriftContinuation_GapIsLatestBar_False(t *testing.T) {
+	bars := makeDriftBars([]driftBarRow{
+		{Open: 100, High: 101, Low: 99, Close: 100, Vol: 1000},
+		{Open: 104, High: 106, Low: 103, Close: 105, Vol: 5000}, // earnings = latest
+	})
+	earningsDate := bars[1].Timestamp.UTC().Format("2006-01-02")
+	got := computeDriftContinuation(bars, earningsDate, "bmo")
+	if got.IsContinuation {
+		t.Errorf("IsContinuation = true, want false (DaysAfterGap=%d)", got.DaysAfterGap)
+	}
+	if got.DaysAfterGap != 0 {
+		t.Errorf("DaysAfterGap = %d, want 0", got.DaysAfterGap)
+	}
+}
+
+func TestComputeDriftContinuation_StalledBelowPriorHigh_False(t *testing.T) {
+	bars := makeDriftBars([]driftBarRow{
+		{Open: 100, High: 101, Low: 99, Close: 100, Vol: 1000},
+		{Open: 104, High: 106, Low: 103, Close: 105, Vol: 5000}, // earnings (gap bar, high 106)
+		{Open: 106, High: 110, Low: 105, Close: 109, Vol: 4000}, // day-after, high 110
+		{Open: 108, High: 109, Low: 107, Close: 107, Vol: 3000}, // latest: close 107 > 106 but < priorHigh 110
+	})
+	earningsDate := bars[1].Timestamp.UTC().Format("2006-01-02")
+	got := computeDriftContinuation(bars, earningsDate, "bmo")
+	if got.IsContinuation {
+		t.Errorf("IsContinuation = true, want false (close %v <= priorHigh %v)", got.LatestClose, got.PriorHigh)
+	}
+	if got.DaysAfterGap != 2 {
+		t.Errorf("DaysAfterGap = %d, want 2", got.DaysAfterGap)
+	}
+}
+
+func TestComputeDriftContinuation_EarningsNotInBars(t *testing.T) {
+	bars := makeDriftBars([]driftBarRow{{Open: 100, High: 101, Low: 99, Close: 100, Vol: 1000}})
+	got := computeDriftContinuation(bars, "1999-01-01", "bmo")
+	if got.IsContinuation || got.Warning == "" {
+		t.Errorf("want IsContinuation=false with warning; got %+v", got)
+	}
+}
+
+func TestComputeDriftContinuation_AMC_NoGapBarYet(t *testing.T) {
+	bars := makeDriftBars([]driftBarRow{{Open: 100, High: 101, Low: 99, Close: 100, Vol: 1000}})
+	earningsDate := bars[0].Timestamp.UTC().Format("2006-01-02")
+	got := computeDriftContinuation(bars, earningsDate, "amc")
+	if got.IsContinuation || got.Warning == "" {
+		t.Errorf("want IsContinuation=false with warning; got %+v", got)
+	}
+}
+
+func TestComputeDriftSignal_PopulatesContinuation(t *testing.T) {
+	bars := makeDriftBars([]driftBarRow{
+		{Open: 100, High: 101, Low: 99, Close: 100, Vol: 1000},
+		{Open: 104, High: 106, Low: 103, Close: 105, Vol: 5000}, // earnings
+		{Open: 106, High: 108, Low: 105, Close: 107, Vol: 4000},
+	})
+	earningsDate := bars[1].Timestamp.UTC().Format("2006-01-02")
+	sig := ComputeDriftSignal("TEST", bars, earningsDate, "bmo")
+	if !sig.Continuation.IsContinuation {
+		t.Errorf("signal.Continuation.IsContinuation = false, want true (%+v)", sig.Continuation)
+	}
+}

@@ -323,6 +323,55 @@ func computeDriftMA50(bars []*interfaces.Bar) DriftMAPosition {
 	}
 }
 
+// computeDriftContinuation evaluates the robust higher-high continuation rule:
+//
+//	IsContinuation = DaysAfterGap >= 1
+//	    AND latestClose > gapBarHigh   (cleared the earnings reaction high)
+//	    AND latestClose > priorHigh    (fresh higher-high close, still advancing)
+//
+// Day-1 note: when DaysAfterGap == 1 the gap bar IS the prior bar, so
+// GapBarHigh == PriorHigh and the two comparisons coincide (this matches the
+// original spec's day-1 "close > previous day's high"); the higher-high confirm
+// only adds independent filtering from day 2 on. Do not "simplify" the two
+// checks into one.
+func computeDriftContinuation(bars []*interfaces.Bar, earningsDate, timing string) DriftContinuation {
+	idx := findBarIndexByDate(bars, earningsDate)
+	if idx < 0 {
+		return DriftContinuation{Warning: "earnings_date not in bars"}
+	}
+	gapBarIdx := idx
+	if strings.ToLower(timing) != "bmo" {
+		gapBarIdx = idx + 1 // AMC / unknown: gap manifests on the next bar's open
+	}
+	if gapBarIdx >= len(bars) {
+		return DriftContinuation{Warning: "no gap bar yet for AMC"}
+	}
+	L := len(bars)
+	if L < 2 {
+		return DriftContinuation{Warning: "insufficient bars for continuation"}
+	}
+	latestIdx := L - 1
+	gapBarHigh := bars[gapBarIdx].High
+	latestClose := bars[L-1].Close
+	priorHigh := bars[L-2].High
+	daysAfterGap := latestIdx - gapBarIdx
+
+	var extPct float64
+	if gapBarHigh > 0 {
+		extPct = roundTo2((latestClose/gapBarHigh - 1.0) * 100.0)
+	}
+
+	isCont := daysAfterGap >= 1 && latestClose > gapBarHigh && latestClose > priorHigh
+	return DriftContinuation{
+		IsContinuation: isCont,
+		GapBarHigh:     roundTo2(gapBarHigh),
+		LatestClose:    roundTo2(latestClose),
+		PriorHigh:      roundTo2(priorHigh),
+		DaysAfterGap:   daysAfterGap,
+		ExtensionPct:   extPct,
+	}
+}
+
 // DriftComposite is the weighted-sum scorecard with grade and component
 // breakdown. ComponentBreakdown values are weighted contributions (raw
 // score * weight) so callers can audit how the composite was built.
@@ -471,6 +520,21 @@ type DriftPEAD struct {
 	Stage              string          `json:"stage"`
 }
 
+// DriftContinuation is the fast post-earnings continuation signal: a fresh
+// higher-high close above the gap-bar high, confirming the move is still
+// advancing. Bars are oldest-first. The gap bar is the bar the earnings gap is
+// measured on (earningsIdx for BMO, earningsIdx+1 for AMC) — matching
+// computeDriftGap.
+type DriftContinuation struct {
+	IsContinuation bool    `json:"is_continuation"`
+	GapBarHigh     float64 `json:"gap_bar_high"`
+	LatestClose    float64 `json:"latest_close"`
+	PriorHigh      float64 `json:"prior_high"`
+	DaysAfterGap   int     `json:"days_after_gap"`
+	ExtensionPct   float64 `json:"extension_pct"` // (latest_close / gap_bar_high - 1) * 100
+	Warning        string  `json:"warning,omitempty"`
+}
+
 // findEarningsWeekIdx returns the index of the ISO-week containing
 // earningsDate in oldest-first weeklyCandles, or -1.
 func findEarningsWeekIdx(weeklies []DriftWeeklyCandle, earningsDate string) int {
@@ -575,20 +639,21 @@ func analyzeDriftPEAD(weeklies []DriftWeeklyCandle, earningsDate string, watchWe
 
 // DriftSignal is the full per-ticker drift signal payload.
 type DriftSignal struct {
-	Ticker         string          `json:"ticker"`
-	AsOf           string          `json:"as_of"`
-	BarsCount      int             `json:"bars_count"`
-	LastClose      float64         `json:"last_close"`
-	EarningsDate   string          `json:"earnings_date"`
-	EarningsTiming string          `json:"earnings_timing"`
-	Gap            DriftGap        `json:"gap"`
-	Trend          DriftTrend      `json:"pre_earnings_trend"`
-	VolRatio       DriftVolRatio   `json:"volume_trend"`
-	MA200          DriftMAPosition `json:"ma200_position"`
-	MA50           DriftMAPosition `json:"ma50_position"`
-	Composite      DriftComposite  `json:"composite"`
-	PEAD           DriftPEAD       `json:"pead"`
-	SignalVersion  string          `json:"signal_version"`
+	Ticker         string            `json:"ticker"`
+	AsOf           string            `json:"as_of"`
+	BarsCount      int               `json:"bars_count"`
+	LastClose      float64           `json:"last_close"`
+	EarningsDate   string            `json:"earnings_date"`
+	EarningsTiming string            `json:"earnings_timing"`
+	Gap            DriftGap          `json:"gap"`
+	Trend          DriftTrend        `json:"pre_earnings_trend"`
+	VolRatio       DriftVolRatio     `json:"volume_trend"`
+	MA200          DriftMAPosition   `json:"ma200_position"`
+	MA50           DriftMAPosition   `json:"ma50_position"`
+	Composite      DriftComposite    `json:"composite"`
+	PEAD           DriftPEAD         `json:"pead"`
+	Continuation   DriftContinuation `json:"continuation"`
+	SignalVersion  string            `json:"signal_version"`
 }
 
 // DriftSignalService is the per-ticker compute service.
@@ -631,6 +696,7 @@ func ComputeDriftSignal(symbol string, bars []*interfaces.Bar, earningsDate, tim
 	composite := computeDriftComposite(gap.Score, trend.Score, vol.Score, ma200.Score, ma50.Score)
 	weeklies := dailyToWeekly(bars)
 	pead := analyzeDriftPEAD(weeklies, earningsDate, driftPEADWatchWeeks)
+	continuation := computeDriftContinuation(bars, earningsDate, timing)
 	return &DriftSignal{
 		Ticker:         strings.ToUpper(symbol),
 		AsOf:           bars[L-1].Timestamp.Format(time.RFC3339),
@@ -645,6 +711,7 @@ func ComputeDriftSignal(symbol string, bars []*interfaces.Bar, earningsDate, tim
 		MA50:           ma50,
 		Composite:      composite,
 		PEAD:           pead,
+		Continuation:   continuation,
 		SignalVersion:  driftSignalVersion,
 	}
 }
