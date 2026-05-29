@@ -803,3 +803,18 @@ func TestComputeDriftSignal_PopulatesContinuation(t *testing.T) {
 		t.Errorf("signal.Continuation.IsContinuation = false, want true (%+v)", sig.Continuation)
 	}
 }
+
+func TestDriftCandidatesService_ContinuationDefaultsOff(t *testing.T) {
+	cs := NewDriftCandidatesService(
+		NewDriftSignalService(&stubDriftBarFetcherSvc{}),
+		&stubRecentReporterFetcher{},
+		[]string{"AAA"},
+	)
+	if cs.continuationEnabled {
+		t.Errorf("continuationEnabled = true, want false (shadow is the default)")
+	}
+	cs.SetContinuationEnabled(true)
+	if !cs.continuationEnabled {
+		t.Errorf("SetContinuationEnabled(true) did not take effect")
+	}
+}

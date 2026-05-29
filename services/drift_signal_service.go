@@ -746,6 +746,7 @@ type DriftCandidatesService struct {
 	cached          *DriftCandidatesResponse
 	cachedAt        time.Time
 	refreshInterval time.Duration
+	continuationEnabled bool
 }
 
 // NewDriftCandidatesService creates the candidates service.
@@ -776,6 +777,25 @@ func (s *DriftCandidatesService) SetRefreshInterval(d time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.refreshInterval = d
+}
+
+// SetContinuationEnabled toggles the continuation entry path. Default false
+// (shadow): the candidate filter is unchanged and continuation is reported as
+// false to the agent (would-be entries are logged only). True (enforce): the
+// filter tightens to (continuation OR pead-ready) and is_continuation is
+// reported truthfully so the agent can act. See the 2026-05-29 spec.
+func (s *DriftCandidatesService) SetContinuationEnabled(enabled bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.continuationEnabled = enabled
+}
+
+// continuationMode renders the flag as a log label.
+func continuationMode(enabled bool) string {
+	if enabled {
+		return "enforce"
+	}
+	return "shadow"
 }
 
 // GetCandidates returns the cached candidates response, recomputing if the
