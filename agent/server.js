@@ -34,6 +34,7 @@ import { appendTrade, readTrades } from './trades-store.js';
 import { fetchFillsSummary, renderFillsSummaryLine, startOfEtTradingDayIso, claimConnectRecap } from './fills-summary.js';
 import { SSE_KEEPALIVE_MS, sendSseKeepalive } from './sse-keepalive.js';
 import { runReconciliationForSandbox, readReconciliationSummary } from './trade-reconciliation.js';
+import { readRange, buildCostsResponse, _etDate as _etDateCS } from './cost-store.js';
 import nodeFs from 'node:fs/promises';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -836,6 +837,25 @@ app.get('/api/reconciliation', async (req, res) => {
     res.json(summary);
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/v1/costs?days=N — returns aggregated per-agent cost data.
+// Returns 404 when COST_TRACKING_ENABLED=false. Default days=7, max 90.
+app.get('/api/v1/costs', async (req, res) => {
+  if (process.env.COST_TRACKING_ENABLED === 'false') {
+    return res.status(404).json({ error: 'cost tracking disabled' });
+  }
+  const days = Math.min(Math.max(parseInt(req.query.days, 10) || 7, 1), 90);
+  const today = _etDateCS(new Date());
+  const fromDate = new Date(`${today}T00:00:00Z`);
+  fromDate.setUTCDate(fromDate.getUTCDate() - (days - 1));
+  const from = fromDate.toISOString().slice(0, 10);
+  try {
+    const rangeData = await readRange(PROJECT_ROOT, { from, to: today });
+    res.json(buildCostsResponse(rangeData, days, today));
+  } catch (err) {
+    res.status(500).json({ error: `cost endpoint failed: ${err.message}` });
   }
 });
 
