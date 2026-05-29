@@ -2596,7 +2596,7 @@ async function refreshPortfolio() {
       const arr = positions.positions || positions || [];
       const html = arr.length ? arr.map(pos => {
         const sym = pos.Symbol||pos.symbol||'??', pnl = Number(pos.UnrealizedPL||pos.unrealized_pl||0);
-        const pct = (Number(pos.UnrealizedPLPercent||pos.unrealized_plpc||0)*100).toFixed(1);
+        const pct = (Number(pos.UnrealizedPLPC||pos.unrealized_plpc||0)*100).toFixed(1);
         const c = pnl>=0? 'var(--success)' : 'var(--error)';
         return '<div class="card"><div style="display:flex;justify-content:space-between"><span class="symbol">'+sym+'</span><span class="pnl" style="color:'+c+'">'+(pnl>=0?'+':'')+'$'+pnl.toFixed(2)+' ('+pct+'%)</span></div><div style="color:var(--ink-faint);font-size:11px;margin-top:3px">Qty: '+(pos.Qty||pos.qty)+' | Avg: $'+Number(pos.AvgEntryPrice||pos.avg_entry_price||0).toFixed(2)+'</div></div>';
       }).join('') : '<div class="no-data">No open positions</div>';
