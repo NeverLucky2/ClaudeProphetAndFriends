@@ -9,6 +9,8 @@
  *   6:10 AM ET Mondays             → review_performance_penny (if not done this week) → adapt_strategy_penny
  *   4:30 PM ET weekdays            → loss checks: Prophet (≥-4% latest) → postmortem + adapt_strategy
  *                                                  Penny (≥-3% latest)  → postmortem_penny + adapt_strategy_penny
+ *   4:45 PM ET weekdays            → trade_reconciliation (after fills settle)
+ *   4:50 PM ET weekdays            → daily_cost_report (data/reports/cost_{date}.md, if COST_TRACKING_ENABLED)
  *   6:00 PM ET Sundays             → weekly_screeners
  *
  * Startup-based (on server start, if criteria met):
@@ -36,6 +38,8 @@ import {
   briefAsOfETDate,
 } from './daily-brief-freshness.js';
 import { isMarketHoliday } from './market-calendar.js';
+import { readRange, aggregateByAgent, _etDate as _etDateCS } from './cost-store.js';
+import { renderDailyReportMarkdown } from './cost-report-writer.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(__dirname, '..');
@@ -250,6 +254,23 @@ export function weeklyReportIsForDate(raw, isoDate) {
   }
 }
 
+// writeDailyCostReport renders the daily markdown report and writes it to
+// data/reports/cost_{date}.md. Pure helper that does the I/O; the
+// scheduling decision (when to fire it) is in the scheduler wiring below.
+export async function writeDailyCostReport(projectRoot, date) {
+  // 7-day window ending on `date` (inclusive). aggregateByAgent +
+  // renderDailyReportMarkdown derive the today vs 7d-avg basis.
+  const fromDate = new Date(`${date}T00:00:00Z`);
+  fromDate.setUTCDate(fromDate.getUTCDate() - 7);
+  const from = fromDate.toISOString().slice(0, 10);
+  const rangeData = await readRange(projectRoot, { from, to: date });
+  const agg = aggregateByAgent(rangeData);
+  const md = renderDailyReportMarkdown(agg, date);
+  const reportsDir = path.join(projectRoot, 'data', 'reports');
+  await fs.mkdir(reportsDir, { recursive: true });
+  await fs.writeFile(path.join(reportsDir, `cost_${date}.md`), md, 'utf-8');
+}
+
 export class AnalysisScheduler extends EventEmitter {
   constructor(options = {}) {
     super();
@@ -286,6 +307,7 @@ export class AnalysisScheduler extends EventEmitter {
     this._lastMarketTopDate = null;     // YYYY-MM-DD (daily market-top-detector run)
     this._lastBubbleDate = null;        // YYYY-MM-DD (daily us-market-bubble-detector run)
     this._lastTradeReconcileDate = null; // YYYY-MM-DD (daily after-close reconciliation)
+    this._lastDailyCostReportDate = null; // YYYY-MM-DD (daily cost report)
   }
 
   async start() {
@@ -934,6 +956,7 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
       this._lastMacroRegimeDate = s.lastMacroRegimeDate || null;
       this._lastMarketTopDate = s.lastMarketTopDate || null;
       this._lastBubbleDate = s.lastBubbleDate || null;
+      this._lastDailyCostReportDate = s.lastDailyCostReportDate || null;
       const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
       const persisted = s.firedAlertFingerprints || {};
       // Only restore today's fingerprints — older dates are irrelevant
@@ -964,6 +987,7 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
         lastMacroRegimeDate: this._lastMacroRegimeDate,
         lastMarketTopDate: this._lastMarketTopDate,
         lastBubbleDate: this._lastBubbleDate,
+        lastDailyCostReportDate: this._lastDailyCostReportDate,
         firedAlertFingerprints,
       }, null, 2), 'utf-8');
     } catch {}
@@ -1165,6 +1189,21 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
     // Daily trade-log ↔ broker reconciliation — 4:45 PM ET, after fills settle.
     if (isWeekday && hour === 16 && minute === 45 && this._lastTradeReconcileDate !== isoDate) {
       await this.triggerJob('trade_reconciliation').catch(() => {});
+    }
+
+    // Daily cost report — 4:50 PM ET, after trade reconciliation settles.
+    if (isWeekday && hour === 16 && minute === 50 && this._lastDailyCostReportDate !== isoDate) {
+      this._lastDailyCostReportDate = isoDate;
+      await this._saveState();
+      if (process.env.COST_TRACKING_ENABLED !== 'false') {
+        try {
+          const todayEt = _etDateCS(new Date());
+          await writeDailyCostReport(PROJECT_ROOT, todayEt);
+          this._log(`cost daily report written: data/reports/cost_${todayEt}.md`, 'success');
+        } catch (err) {
+          this._log(`cost daily report write failed: ${err.message}`, 'warning');
+        }
+      }
     }
 
     if (isSunday && hour === 18 && minute === 0 && this._lastWeeklyScreenDate !== isoDate) {

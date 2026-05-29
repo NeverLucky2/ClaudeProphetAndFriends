@@ -13,6 +13,7 @@ import { renderIntradayBlock, shouldInjectIntraday } from './intraday-prompt.js'
 import { fetchBeatContext, renderBeatContextBlock } from './beat-context.js';
 import { fetchFillsSummary, renderFillsSummaryLine, startOfEtTradingDayIso } from './fills-summary.js';
 import { extractTokenDelta, formatBeatCostLine } from './beat-cost.js';
+import { recordBeat as recordCostBeat } from './cost-store.js';
 import { resolveAllowedTools } from './tool-allowlists.js';
 import { resolveStrategyRules, computeStrategyVersion, buildVersionMarker, writeVersionMarker } from '../scripts/strategy-version.mjs';
 
@@ -1231,7 +1232,7 @@ ${userBlock}`;
       let sessionId = null;
       let buffer = '';
       let totalCost = 0;
-      const tok = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+      const tok = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 };
       let ocError = null;
 
       const makeCtx = () => ({
@@ -1240,7 +1241,7 @@ ${userBlock}`;
         setSession: (id) => { sessionId = id; },
         addCost: (c) => { totalCost += c; },
         addTokenDelta: (d) => {
-          tok.input += d.input; tok.output += d.output;
+          tok.input += d.input; tok.output += d.output; tok.reasoning += d.reasoning;
           tok.cacheRead += d.cacheRead; tok.cacheWrite += d.cacheWrite;
         },
         setError: (e) => { ocError = e; },
@@ -1294,6 +1295,33 @@ ${userBlock}`;
             }),
             level: 'info',
           });
+
+          // Persist for daily rollup. Fire-and-forget — cost tracking is
+          // observability and must never block beat completion. Soft-fail
+          // via .catch; matches the existing fs.unlink fire-and-forget pattern
+          // above. Default ON; COST_TRACKING_ENABLED=false disables.
+          if (process.env.COST_TRACKING_ENABLED !== 'false') {
+            const beatStartAt = this.state.lastBeatTime instanceof Date
+              ? this.state.lastBeatTime.toISOString()
+              : new Date(this.state.lastBeatTime || Date.now()).toISOString();
+            recordCostBeat(this.projectRoot || process.cwd(), {
+              accountId: this.state.activeAccountId || this.accountId || '',
+              sandboxId: this.sandboxId || '',
+              agentId: this._agentConfig?.id || '',
+              agentName: this._agentConfig?.name || '',
+              model: ocModel,
+              phase: this.getCurrentPhaseFn ? this.getCurrentPhaseFn() : 'unknown',
+              cost: totalCost,
+              input: tok.input, output: tok.output, reasoning: tok.reasoning,
+              cacheRead: tok.cacheRead, cacheWrite: tok.cacheWrite,
+              beatStartAt,
+            }).catch(err => {
+              this.state.emit('agent_log', {
+                message: `cost-store write failed: ${err.message}`,
+                level: 'warn',
+              });
+            });
+          }
         }
 
         // If we were interrupted by a user message, resolve gracefully
