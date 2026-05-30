@@ -32,6 +32,7 @@ import {
 } from './config-store.js';
 import { appendTrade, readTrades } from './trades-store.js';
 import { readTips, createTip, dismissTip, getSources } from './tips-store.js';
+import { scoreTips } from './tips-scorer.js';
 import { fetchFillsSummary, renderFillsSummaryLine, startOfEtTradingDayIso, claimConnectRecap } from './fills-summary.js';
 import { SSE_KEEPALIVE_MS, sendSseKeepalive } from './sse-keepalive.js';
 import { runReconciliationForSandbox, readReconciliationSummary } from './trade-reconciliation.js';
@@ -859,6 +860,14 @@ app.post('/api/tips/:id/dismiss', async (req, res) => {
     const ok = await dismissTip(PROJECT_ROOT, req.params.id);
     if (!ok) return res.status(404).json({ error: 'tip not found' });
     res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/tips/ledger', async (req, res) => {
+  if (!tipsEnabled()) return res.status(404).json({ error: 'tips ledger disabled' });
+  try {
+    const ledger = await scoreTips(PROJECT_ROOT, {});
+    res.json({ ledger });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 

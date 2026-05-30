@@ -903,6 +903,8 @@
     .hb-fill { height: 100%; background: var(--accent); transition: width 1s linear; }
 
     .no-data { color: var(--ink-faint); font-size: 12px; font-style: italic; padding: 8px 0; }
+    .pnl-pos { color: var(--success, #2e7d32); }
+    .pnl-neg { color: var(--error, #c62828); }
 
     /* ── Form Elements ──────────────────── */
     .btn {
@@ -1255,6 +1257,7 @@
           </div>
           <div id="tip-error" style="color:var(--error); font-size:12px; margin-top:6px;"></div>
         </div>
+        <div id="tips-ledger"></div>
         <div id="tips-list"><div class="no-data">No tips yet.</div></div>
       </div>
     </div>
@@ -1812,6 +1815,7 @@ async function loadTipsPanel() {
     if (srcRes.status === 404) { disabled.style.display = ''; formWrap.style.display = 'none'; list.innerHTML = ''; return; }
     disabled.style.display = 'none';
     formWrap.style.display = '';
+    loadTipsLedger();
     const { sources } = await srcRes.json();
     const sel = document.getElementById('tip-source');
     sel.innerHTML = sources.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('');
@@ -1851,6 +1855,82 @@ async function submitTip() {
     document.getElementById('tip-thesis').value = '';
     loadTipsPanel();
   } catch (err) { errEl.textContent = String(err); }
+}
+
+function pct(x) { return x == null ? '—' : (x >= 0 ? '+' : '') + (x * 100).toFixed(1) + '%'; }
+function usd(x) { return x == null ? '—' : (x >= 0 ? '+$' : '-$') + Math.abs(x).toLocaleString(undefined, { maximumFractionDigits: 0 }); }
+function retClass(x) { return x == null ? '' : (x >= 0 ? 'pnl-pos' : 'pnl-neg'); }
+
+async function loadTipsLedger() {
+  const host = document.getElementById('tips-ledger');
+  if (!host) return;
+  let ledger;
+  try {
+    const res = await fetch('/api/tips/ledger');
+    if (!res.ok) { host.innerHTML = ''; return; }
+    ledger = (await res.json()).ledger;
+  } catch { host.innerHTML = ''; return; }
+
+  const m = ledger.meta;
+  // View A rows — misses/pending shown at equal prominence (D12).
+  const aRows = ledger.viewA.rows.map(r => `
+    <div class="trade-card">
+      <div class="trade-header">
+        <span><span class="trade-symbol">${esc(r.ticker)}</span>
+          <span class="trade-agent-badge">${esc(r.source)}</span>
+          <span class="trade-agent-badge">${r.agentSurfaced ? 'agent-discoverable' : 'human-exclusive'}</span></span>
+        <span class="trade-time">${esc((r.actionableAt || '').slice(0, 10))} · ${r.windowDays || m.windowDays}TD</span>
+      </div>
+      <div class="trade-details">
+        ${r.status === 'ok'
+          ? `<span class="${retClass(r.excessReturn)}">${pct(r.underlyingReturn)} vs SPY ${pct(r.spyReturn)} → excess <b>${pct(r.excessReturn)}</b></span>`
+          : `<span class="no-data" style="display:inline">${r.status === 'pending' ? 'window still open' : 'no price data'}</span>`}
+        ${r.thesis ? `<div style="opacity:.7;margin-top:4px;">${esc(r.thesis)}</div>` : ''}
+      </div>
+    </div>`).join('') || '<div class="no-data">No active tips to score yet.</div>';
+
+  // View B rows.
+  const bRows = ledger.viewB.rows.map(r => `
+    <div class="trade-card">
+      <div class="trade-header">
+        <span><span class="trade-symbol">${esc(r.underlying)}</span>
+          <span class="trade-agent-badge">${esc(r.source)}</span>
+          <span class="trade-agent-badge">${esc(r.optionSymbol)}</span></span>
+        <span class="trade-time">${esc((r.closeAt || '').slice(0, 10))}</span>
+      </div>
+      <div class="trade-details">
+        ${r.pnl == null
+          ? `<span class="no-data" style="display:inline">P&amp;L unresolved (data gap) — not counted</span>`
+          : `<span class="${retClass(r.pnl)}">${usd(r.pnl)}</span> <span style="opacity:.6;">(${esc(r.pnlConfidence)})</span>`}
+      </div>
+    </div>`).join('') || '<div class="no-data">No influenced trades matched yet.</div>';
+
+  const srcLine = (label, bySrc) => Object.entries(bySrc).map(([s, d]) =>
+    `<div>${esc(s)}: n=${d.n}${d.smallSample ? ' <span style="opacity:.6;">(small sample — ranking suppressed)</span>' : ''}, median ${label === 'A' ? pct(d.median) : usd(d.median)}, sum ${label === 'A' ? pct(d.sum) : usd(d.sum)}</div>`).join('') || '<div style="opacity:.6;">—</div>';
+
+  host.innerHTML = `
+    <div class="settings-content" style="margin-bottom:18px;">
+      <h3>A · Tip-call quality <span style="opacity:.6;font-weight:normal;">— was the call good? (forward return vs SPY, ${m.windowDays} trading days)</span></h3>
+      <div style="opacity:.7;font-size:12px;margin-bottom:8px;">Scores every active tip, traded or not. Misses and open windows shown at equal prominence.</div>
+      ${aRows}
+      <div style="margin-top:8px;font-size:12px;">
+        <b>Per source (excess return):</b> ${srcLine('A', ledger.perSource.viewA_excess)}
+      </div>
+    </div>
+    <div class="settings-content" style="margin-bottom:18px;">
+      <h3>B · Influenced-trade P&amp;L <span style="opacity:.6;font-weight:normal;">— what Prophet did with it (entangled: your call + its selection + its exit)</span></h3>
+      <div style="opacity:.7;font-size:12px;margin-bottom:8px;">Coverage: ${ledger.viewB.coverage.resolved} resolved, ${ledger.viewB.coverage.unresolved} unresolved (shown as gaps, never $0).</div>
+      ${bRows}
+      <div style="margin-top:8px;font-size:12px;">
+        <b>Per source (realized P&amp;L):</b> ${srcLine('B', ledger.perSource.viewB_pnl)}
+      </div>
+    </div>
+    <div class="settings-content" style="margin-bottom:18px;">
+      <h3>C · Context <span style="opacity:.6;font-weight:normal;">— catalyst trades vs everything else (NOT human-vs-agent)</span></h3>
+      <div style="font-size:12px;">Influenced: n=${ledger.viewC.influenced.n}, sum ${usd(ledger.viewC.influenced.sum)}, median ${usd(ledger.viewC.influenced.median)}</div>
+      <div style="font-size:12px;">Autonomous: n=${ledger.viewC.autonomous.n}, sum ${usd(ledger.viewC.autonomous.sum)}, median ${usd(ledger.viewC.autonomous.median)}</div>
+    </div>
+    <div style="opacity:.55;font-size:11px;margin-bottom:8px;">${esc(m.agentSurfacedCaveat)}</div>`;
 }
 
 async function renderCostsTab() {

@@ -10,7 +10,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isMarketHoliday, etDateString, MARKET_HOLIDAYS } from './market-calendar.js';
+import { isMarketHoliday, etDateString, MARKET_HOLIDAYS, isTradingDay, nextTradingDay, addTradingDays } from './market-calendar.js';
 import { getCurrentPhase, secondsToNextPhaseBoundary } from './harness.js';
 import { isClosedPhase, outOfTrendWindow } from './preflight.js';
 
@@ -89,4 +89,27 @@ test('outOfTrendWindow: holiday inside the 17:00 window → out', () => {
 
 test('outOfTrendWindow: normal weekday inside the 17:00 window → in window', () => {
   assert.equal(outOfTrendWindow(new Date('2026-05-21T21:00:00Z')).out, false); // Thu 17:00 ET
+});
+
+// ── Trading-day arithmetic ────────────────────────────────────────────
+
+test('isTradingDay: weekdays true, weekends and holidays false', () => {
+  assert.equal(isTradingDay('2026-05-28'), true);   // Thursday
+  assert.equal(isTradingDay('2026-05-30'), false);  // Saturday
+  assert.equal(isTradingDay('2026-05-31'), false);  // Sunday
+  assert.equal(isTradingDay('2026-05-25'), false);  // Memorial Day (holiday)
+});
+
+test('nextTradingDay skips weekend', () => {
+  assert.equal(nextTradingDay('2026-05-29'), '2026-06-01'); // Fri -> Mon
+});
+
+test('nextTradingDay skips a holiday', () => {
+  assert.equal(nextTradingDay('2026-05-22'), '2026-05-26'); // Fri -> (Sat/Sun/Memorial) -> Tue
+});
+
+test('addTradingDays counts only trading days, holiday-aware', () => {
+  // From Thu 2026-05-21: +1=Fri 22, +2 skips Sat/Sun/Memorial -> Tue 26, +3 -> Wed 27
+  assert.equal(addTradingDays('2026-05-21', 3), '2026-05-27');
+  assert.equal(addTradingDays('2026-05-21', 0), '2026-05-21'); // n=0 is identity
 });

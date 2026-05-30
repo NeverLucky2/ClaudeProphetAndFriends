@@ -43,3 +43,34 @@ export function etDateString(now) {
 export function isMarketHoliday(now) {
   return MARKET_HOLIDAYS.has(etDateString(now));
 }
+
+// ── Trading-day arithmetic (holiday-aware) ──────────────────────────────────
+// All helpers operate on ET calendar-date strings "YYYY-MM-DD". A noon-UTC
+// anchor is used for stepping so DST never shifts the calendar date.
+function _addCalendarDay(etDate) {
+  const d = new Date(etDate + 'T12:00:00Z');
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
+// isTradingDay: a weekday that is not a full-close holiday.
+export function isTradingDay(etDate) {
+  const dow = new Date(etDate + 'T12:00:00Z').getUTCDay(); // 0 Sun .. 6 Sat
+  if (dow === 0 || dow === 6) return false;
+  return !MARKET_HOLIDAYS.has(etDate);
+}
+
+// nextTradingDay: the first trading day strictly after etDate.
+export function nextTradingDay(etDate) {
+  let d = _addCalendarDay(etDate);
+  while (!isTradingDay(d)) d = _addCalendarDay(d);
+  return d;
+}
+
+// addTradingDays: advance n trading days from etDate (n=0 returns etDate as-is,
+// even if etDate itself is a weekend/holiday — callers anchor the start first).
+export function addTradingDays(etDate, n) {
+  let d = etDate;
+  for (let i = 0; i < n; i++) d = nextTradingDay(d);
+  return d;
+}
