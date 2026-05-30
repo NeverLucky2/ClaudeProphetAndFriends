@@ -323,6 +323,55 @@ func computeDriftMA50(bars []*interfaces.Bar) DriftMAPosition {
 	}
 }
 
+// computeDriftContinuation evaluates the robust higher-high continuation rule:
+//
+//	IsContinuation = DaysAfterGap >= 1
+//	    AND latestClose > gapBarHigh   (cleared the earnings reaction high)
+//	    AND latestClose > priorHigh    (fresh higher-high close, still advancing)
+//
+// Day-1 note: when DaysAfterGap == 1 the gap bar IS the prior bar, so
+// GapBarHigh == PriorHigh and the two comparisons coincide (this matches the
+// original spec's day-1 "close > previous day's high"); the higher-high confirm
+// only adds independent filtering from day 2 on. Do not "simplify" the two
+// checks into one.
+func computeDriftContinuation(bars []*interfaces.Bar, earningsDate, timing string) DriftContinuation {
+	idx := findBarIndexByDate(bars, earningsDate)
+	if idx < 0 {
+		return DriftContinuation{Warning: "earnings_date not in bars"}
+	}
+	gapBarIdx := idx
+	if strings.ToLower(timing) != "bmo" {
+		gapBarIdx = idx + 1 // AMC / unknown: gap manifests on the next bar's open
+	}
+	if gapBarIdx >= len(bars) {
+		return DriftContinuation{Warning: "no gap bar yet for AMC"}
+	}
+	L := len(bars)
+	if L < 2 {
+		return DriftContinuation{Warning: "insufficient bars for continuation"}
+	}
+	latestIdx := L - 1
+	gapBarHigh := bars[gapBarIdx].High
+	latestClose := bars[L-1].Close
+	priorHigh := bars[L-2].High
+	daysAfterGap := latestIdx - gapBarIdx
+
+	var extPct float64
+	if gapBarHigh > 0 {
+		extPct = roundTo2((latestClose/gapBarHigh - 1.0) * 100.0)
+	}
+
+	isCont := daysAfterGap >= 1 && latestClose > gapBarHigh && latestClose > priorHigh
+	return DriftContinuation{
+		IsContinuation: isCont,
+		GapBarHigh:     roundTo2(gapBarHigh),
+		LatestClose:    roundTo2(latestClose),
+		PriorHigh:      roundTo2(priorHigh),
+		DaysAfterGap:   daysAfterGap,
+		ExtensionPct:   extPct,
+	}
+}
+
 // DriftComposite is the weighted-sum scorecard with grade and component
 // breakdown. ComponentBreakdown values are weighted contributions (raw
 // score * weight) so callers can audit how the composite was built.
@@ -471,6 +520,21 @@ type DriftPEAD struct {
 	Stage              string          `json:"stage"`
 }
 
+// DriftContinuation is the fast post-earnings continuation signal: a fresh
+// higher-high close above the gap-bar high, confirming the move is still
+// advancing. Bars are oldest-first. The gap bar is the bar the earnings gap is
+// measured on (earningsIdx for BMO, earningsIdx+1 for AMC) — matching
+// computeDriftGap.
+type DriftContinuation struct {
+	IsContinuation bool    `json:"is_continuation"`
+	GapBarHigh     float64 `json:"gap_bar_high"`
+	LatestClose    float64 `json:"latest_close"`
+	PriorHigh      float64 `json:"prior_high"`
+	DaysAfterGap   int     `json:"days_after_gap"`
+	ExtensionPct   float64 `json:"extension_pct"` // (latest_close / gap_bar_high - 1) * 100
+	Warning        string  `json:"warning,omitempty"`
+}
+
 // findEarningsWeekIdx returns the index of the ISO-week containing
 // earningsDate in oldest-first weeklyCandles, or -1.
 func findEarningsWeekIdx(weeklies []DriftWeeklyCandle, earningsDate string) int {
@@ -575,20 +639,21 @@ func analyzeDriftPEAD(weeklies []DriftWeeklyCandle, earningsDate string, watchWe
 
 // DriftSignal is the full per-ticker drift signal payload.
 type DriftSignal struct {
-	Ticker         string          `json:"ticker"`
-	AsOf           string          `json:"as_of"`
-	BarsCount      int             `json:"bars_count"`
-	LastClose      float64         `json:"last_close"`
-	EarningsDate   string          `json:"earnings_date"`
-	EarningsTiming string          `json:"earnings_timing"`
-	Gap            DriftGap        `json:"gap"`
-	Trend          DriftTrend      `json:"pre_earnings_trend"`
-	VolRatio       DriftVolRatio   `json:"volume_trend"`
-	MA200          DriftMAPosition `json:"ma200_position"`
-	MA50           DriftMAPosition `json:"ma50_position"`
-	Composite      DriftComposite  `json:"composite"`
-	PEAD           DriftPEAD       `json:"pead"`
-	SignalVersion  string          `json:"signal_version"`
+	Ticker         string            `json:"ticker"`
+	AsOf           string            `json:"as_of"`
+	BarsCount      int               `json:"bars_count"`
+	LastClose      float64           `json:"last_close"`
+	EarningsDate   string            `json:"earnings_date"`
+	EarningsTiming string            `json:"earnings_timing"`
+	Gap            DriftGap          `json:"gap"`
+	Trend          DriftTrend        `json:"pre_earnings_trend"`
+	VolRatio       DriftVolRatio     `json:"volume_trend"`
+	MA200          DriftMAPosition   `json:"ma200_position"`
+	MA50           DriftMAPosition   `json:"ma50_position"`
+	Composite      DriftComposite    `json:"composite"`
+	PEAD           DriftPEAD         `json:"pead"`
+	Continuation   DriftContinuation `json:"continuation"`
+	SignalVersion  string            `json:"signal_version"`
 }
 
 // DriftSignalService is the per-ticker compute service.
@@ -631,6 +696,7 @@ func ComputeDriftSignal(symbol string, bars []*interfaces.Bar, earningsDate, tim
 	composite := computeDriftComposite(gap.Score, trend.Score, vol.Score, ma200.Score, ma50.Score)
 	weeklies := dailyToWeekly(bars)
 	pead := analyzeDriftPEAD(weeklies, earningsDate, driftPEADWatchWeeks)
+	continuation := computeDriftContinuation(bars, earningsDate, timing)
 	return &DriftSignal{
 		Ticker:         strings.ToUpper(symbol),
 		AsOf:           bars[L-1].Timestamp.Format(time.RFC3339),
@@ -645,6 +711,7 @@ func ComputeDriftSignal(symbol string, bars []*interfaces.Bar, earningsDate, tim
 		MA50:           ma50,
 		Composite:      composite,
 		PEAD:           pead,
+		Continuation:   continuation,
 		SignalVersion:  driftSignalVersion,
 	}
 }
@@ -679,6 +746,7 @@ type DriftCandidatesService struct {
 	cached          *DriftCandidatesResponse
 	cachedAt        time.Time
 	refreshInterval time.Duration
+	continuationEnabled bool
 }
 
 // NewDriftCandidatesService creates the candidates service.
@@ -709,6 +777,25 @@ func (s *DriftCandidatesService) SetRefreshInterval(d time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.refreshInterval = d
+}
+
+// SetContinuationEnabled toggles the continuation entry path. Default false
+// (shadow): the candidate filter is unchanged and continuation is reported as
+// false to the agent (would-be entries are logged only). True (enforce): the
+// filter tightens to (continuation OR pead-ready) and is_continuation is
+// reported truthfully so the agent can act. See the 2026-05-29 spec.
+func (s *DriftCandidatesService) SetContinuationEnabled(enabled bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.continuationEnabled = enabled
+}
+
+// continuationMode renders the flag as a log label.
+func continuationMode(enabled bool) string {
+	if enabled {
+		return "enforce"
+	}
+	return "shadow"
 }
 
 // GetCandidates returns the cached candidates response, recomputing if the
@@ -753,14 +840,23 @@ func (s *DriftCandidatesService) compute(ctx context.Context, now time.Time) *Dr
 		resp.Errors = append(resp.Errors, fmt.Sprintf("FetchRecentReports: %s", err.Error()))
 		return resp
 	}
+
+	s.mu.RLock()
+	enforce := s.continuationEnabled
+	s.mu.RUnlock()
+
 	var latestAsOf string
+	var inUniverse, fetchErrors, scoredOK, droppedGap, droppedMA, droppedGrade, droppedNotActionable, actionable int
+
 	for _, r := range reports {
 		if !s.universe[strings.ToUpper(r.Ticker)] {
 			continue
 		}
+		inUniverse++
 		sig, err := s.signalSvc.GetSignal(ctx, r.Ticker, r.Date.Format("2006-01-02"), r.Timing)
 		if err != nil {
 			if !errors.Is(err, ErrInsufficientDriftHistory) {
+				fetchErrors++
 				resp.Errors = append(resp.Errors, fmt.Sprintf("%s: %s", r.Ticker, err.Error()))
 			}
 			continue
@@ -768,30 +864,90 @@ func (s *DriftCandidatesService) compute(ctx context.Context, now time.Time) *Dr
 		if sig == nil {
 			continue
 		}
-		// Entry filters mirror TRADING_RULES_DRIFT.md:
-		//   - positive gap ≥ 3% (long-only; gap-downs are filtered out)
-		//   - above MA200 (uptrend regime)
-		//   - above MA50 (medium-term momentum)
-		//   - grade A or B
+		scoredOK++
+
+		// Base entry gates (always applied; mirror TRADING_RULES_DRIFT.md).
 		if sig.Gap.GapPct < 3.0 {
+			droppedGap++
 			continue
 		}
 		if !sig.MA200.AboveMA || !sig.MA50.AboveMA {
+			droppedMA++
 			continue
 		}
 		if sig.Composite.Grade != "A" && sig.Composite.Grade != "B" {
+			droppedGrade++
 			continue
 		}
+
+		peadReady := sig.PEAD.Stage == "SIGNAL_READY" || sig.PEAD.Stage == "BREAKOUT"
+		cont := sig.Continuation.IsContinuation
+
+		// Shadow telemetry: log every would-be continuation entry regardless of
+		// mode (out of the LLM payload). Fields suffice to reconstruct forward
+		// outcomes offline.
+		if cont {
+			s.logger.WithFields(logrus.Fields{
+				"ticker":          sig.Ticker,
+				"earnings_date":   sig.EarningsDate,
+				"timing":          sig.EarningsTiming,
+				"last_close":      sig.LastClose,
+				"gap_pct":         sig.Gap.GapPct,
+				"extension_pct":   sig.Continuation.ExtensionPct,
+				"days_after_gap":  sig.Continuation.DaysAfterGap,
+				"composite_score": sig.Composite.CompositeScore,
+				"grade":           sig.Composite.Grade,
+				"pead_stage":      sig.PEAD.Stage,
+				"mode":            continuationMode(enforce),
+			}).Info("drift: would-be continuation entry")
+		}
+
+		if cont || peadReady {
+			actionable++
+		}
+
+		if enforce {
+			// ENFORCE: only actionable names surface; is_continuation stays truthful.
+			if !cont && !peadReady {
+				droppedNotActionable++
+				continue
+			}
+		} else {
+			// SHADOW: keep the base-gates-only filter (non-actionable in-window
+			// names still surface, preserving near-miss visibility); zero the
+			// field so the agent's "continuation OR pead-ready" rule cannot act.
+			sig.Continuation.IsContinuation = false
+		}
+
 		if sig.AsOf > latestAsOf {
 			latestAsOf = sig.AsOf
 		}
 		resp.Candidates = append(resp.Candidates, *sig)
 	}
+
 	sort.SliceStable(resp.Candidates, func(i, j int) bool {
 		return resp.Candidates[i].Composite.CompositeScore > resp.Candidates[j].Composite.CompositeScore
 	})
 	resp.Count = len(resp.Candidates)
 	resp.AsOf = latestAsOf
+
+	// Per-scan coverage summary (out of the LLM payload). Distinguishes
+	// "fix works, no setups yet" from "fix didn't land", and surfaces the
+	// 429-starvation confound via fetch_errors / in_universe.
+	s.logger.WithFields(logrus.Fields{
+		"mode":                   continuationMode(enforce),
+		"reports_in_window":      len(reports),
+		"in_universe":            inUniverse,
+		"scored_ok":              scoredOK,
+		"dropped_gap":            droppedGap,
+		"dropped_ma":             droppedMA,
+		"dropped_grade":          droppedGrade,
+		"dropped_not_actionable": droppedNotActionable,
+		"fetch_errors":           fetchErrors,
+		"actionable_count":       actionable,
+		"candidate_count":        resp.Count,
+	}).Info("drift: candidate scan summary")
+
 	return resp
 }
 
