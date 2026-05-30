@@ -32,6 +32,9 @@ ORCL
 NFLX
 ADBE
 CRM
+IBM
+CSCO
+TXN
 
 # Financials
 JPM
@@ -40,6 +43,8 @@ GS
 MS
 V
 MA
+C
+WFC
 
 # Healthcare
 LLY
@@ -47,6 +52,7 @@ UNH
 JNJ
 ABBV
 MRK
+PFE
 
 # Energy
 XOM
@@ -64,6 +70,8 @@ COST
 HD
 PG
 DIS
+KO
+MCD
 
 # Crypto-correlated (Prophet's active set)
 MSTR
