@@ -1186,6 +1186,10 @@
             <input type="checkbox" id="trades-historic-toggle" />
             Show historic trades
           </label>
+          <label class="trades-historic-toggle">
+            <input type="checkbox" id="trades-tipped-toggle" onchange="applyTradesFilter()" />
+            Tipped only
+          </label>
           <span id="trades-historic-controls" style="display:none">
             <input type="date" id="trades-from-date" />
             <input type="date" id="trades-to-date" />
@@ -1257,8 +1261,10 @@
           </div>
           <div id="tip-error" style="color:var(--error); font-size:12px; margin-top:6px;"></div>
         </div>
+        <div id="tips-news"></div>
         <div id="tips-candidates"></div>
         <div id="tips-ledger"></div>
+        <div id="tips-sources"></div>
         <div id="tips-list"><div class="no-data">No tips yet.</div></div>
       </div>
     </div>
@@ -1817,7 +1823,9 @@ async function loadTipsPanel() {
     disabled.style.display = 'none';
     formWrap.style.display = '';
     loadTipsLedger();
+    loadTipsSources();
     loadTipsCandidates();
+    loadTipsNews();
     const { sources } = await srcRes.json();
     const sel = document.getElementById('tip-source');
     sel.innerHTML = sources.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('');
@@ -1989,6 +1997,105 @@ async function promoteCandidate(id, ticker) {
     if (!res.ok) { alert('Promote failed: ' + (j.error || res.status)); return; }
     loadTipsPanel(); // refresh: candidate leaves the queue, becomes an active tip
   } catch (err) { alert(String(err)); }
+}
+
+async function loadTipsNews() {
+  const host = document.getElementById('tips-news');
+  if (!host) return;
+  let cands;
+  try {
+    const res = await fetch('/api/tips/news-candidates');
+    if (!res.ok) { host.innerHTML = ''; return; }
+    cands = (await res.json()).candidates || [];
+  } catch { host.innerHTML = ''; return; }
+  if (!cands.length) { host.innerHTML = ''; return; }
+  host.innerHTML = `
+    <div class="settings-content" style="margin-bottom:18px;">
+      <h3>News candidates <span style="opacity:.6;font-weight:normal;">— out-of-universe catalyst names from the scans (suggestions only; never auto-traded)</span></h3>
+      ${cands.map(c => `
+        <div class="trade-card" id="news-${esc(c.ticker)}">
+          <div class="trade-header">
+            <span><span class="trade-symbol">${esc(c.ticker)}</span>
+              <span class="trade-agent-badge">${esc(c.feed || 'news')}</span></span>
+            <span class="trade-time">${esc((c.feedAt || '').slice(0, 10))}</span>
+          </div>
+          <div class="trade-details">${esc(c.catalyst || '')}</div>
+          <div style="margin-top:6px; display:flex; gap:8px;">
+            <button onclick='approveNewsCandidate(${JSON.stringify(c).replace(/'/g, "&#39;")})'>Approve &rarr; candidate</button>
+            <button onclick="dismissNewsCandidate('${esc(c.ticker)}')">Dismiss</button>
+          </div>
+        </div>`).join('')}
+    </div>`;
+}
+
+async function approveNewsCandidate(c) {
+  try {
+    const res = await fetch('/api/tips/news-candidates/approve', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ticker: c.ticker, catalyst: c.catalyst, feed: c.feed, feedAt: c.feedAt }),
+    });
+    if (!res.ok) { const e = await res.json().catch(() => ({})); alert('Approve failed: ' + (e.error || res.status)); return; }
+    loadTipsPanel();
+  } catch (err) { alert(String(err)); }
+}
+
+async function dismissNewsCandidate(ticker) {
+  try {
+    const res = await fetch('/api/tips/news-candidates/dismiss', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ticker }),
+    });
+    if (!res.ok) { alert('Dismiss failed: ' + res.status); return; }
+    loadTipsNews();
+  } catch (err) { alert(String(err)); }
+}
+
+const TIPS_DEFAULT_SOURCES = ['self', 'dad'];
+async function loadTipsSources() {
+  const host = document.getElementById('tips-sources');
+  if (!host) return;
+  let sources;
+  try {
+    const res = await fetch('/api/tips/sources');
+    if (!res.ok) { host.innerHTML = ''; return; }
+    sources = (await res.json()).sources || [];
+  } catch { host.innerHTML = ''; return; }
+  host.innerHTML = `
+    <div class="settings-content" style="margin-bottom:18px;">
+      <h3>Tip sources <span style="opacity:.6;font-weight:normal;">— whose call was it? (news is reserved)</span></h3>
+      <div style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px;">
+        ${sources.map(s => `<span class="trade-agent-badge">${esc(s)}${TIPS_DEFAULT_SOURCES.includes(s) ? '' : ` <a href="#" onclick="removeTipSource('${esc(s)}');return false;" style="text-decoration:none;">&times;</a>`}</span>`).join('')}
+      </div>
+      <div style="display:flex; gap:8px; align-items:center;">
+        <input id="new-source-name" maxlength="24" placeholder="add a source…" style="width:160px;">
+        <button onclick="addTipSource()">Add source</button>
+        <span id="source-edit-error" style="color:var(--error); font-size:12px;"></span>
+      </div>
+    </div>`;
+}
+
+async function addTipSource() {
+  const name = (document.getElementById('new-source-name').value || '').trim();
+  const err = document.getElementById('source-edit-error');
+  if (err) err.textContent = '';
+  if (!name) return;
+  try {
+    const res = await fetch('/api/tips/sources', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }),
+    });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) { if (err) err.textContent = j.error || j.reason || ('error ' + res.status); return; }
+    loadTipsSources();
+  } catch (e) { if (err) err.textContent = String(e); }
+}
+
+async function removeTipSource(name) {
+  try {
+    const res = await fetch('/api/tips/sources/' + encodeURIComponent(name), { method: 'DELETE' });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) { alert('Remove failed: ' + (j.reason || j.error || res.status)); return; }
+    loadTipsSources();
+  } catch (e) { alert(String(e)); }
 }
 
 async function renderCostsTab() {
@@ -2851,6 +2958,15 @@ let _historicMode = false;
 const TRADE_CAP_LIVE = 50;
 const TRADE_CAP_HISTORIC = 2000;
 const _renderedTradeKeys = new Set();
+const _tippedIndex = new Map(); // _tradeKey -> source
+async function loadInfluencedTrades(from, to) {
+  try {
+    const res = await fetch('/api/tips/influenced?from=' + encodeURIComponent(from) + '&to=' + encodeURIComponent(to));
+    if (!res.ok) return; // flag off or error -> no badges
+    const { influenced } = await res.json();
+    for (const it of influenced || []) _tippedIndex.set(_tradeKey(it), it.source);
+  } catch { /* no badges */ }
+}
 
 function _tradeKey(t) {
   return [t.sandboxId || '', t.timestamp || '', t.tool || '', t.symbol || ''].join('|');
@@ -2882,6 +2998,8 @@ function addTradeCard(trade) {
   card.className = 'trade-card' + (isFailed ? ' is-failed' : '');
   card.dataset.agentId = agentId;
   card.dataset.sandboxId = sandboxId;
+  const tippedSource = _tippedIndex.get(key);
+  if (tippedSource) card.dataset.tipped = tippedSource;
   card.onclick = (ev) => toggleTradeCard(card, ev);
 
   const t = trade.timestamp ? new Date(trade.timestamp).toLocaleTimeString('en-US',{hour12:false}) : '--';
@@ -2892,6 +3010,7 @@ function addTradeCard(trade) {
       '<span style="display:flex;align-items:center">' +
         '<span class="trade-symbol">' + esc(trade.symbol||'??') + '</span>' +
         '<span class="trade-agent-badge">' + esc(agentName) + '</span>' +
+        (tippedSource ? '<span class="trade-agent-badge" title="influenced by a logged tip">Tipped &middot; ' + esc(tippedSource) + '</span>' : '') +
       '</span>' +
       '<span style="display:flex;align-items:center">' +
         '<span class="trade-side ' + esc(trade.side||'') + '">' + esc((trade.side||'--').toUpperCase()) + '</span>' +
@@ -2966,6 +3085,7 @@ async function seedTodayTrades() {
   try {
     const today = _todayEt();
     const data = await fetchTrades(today, today);
+    await loadInfluencedTrades(today, today);
     renderTradesBulk(data.trades);
   } catch (err) {
     console.warn('seedTodayTrades failed:', err);
@@ -3049,6 +3169,7 @@ async function applyHistoricRange() {
   try {
     const data = await fetchTrades(from, to);
     feed.innerHTML = '';
+    await loadInfluencedTrades(from, to);
     renderTradesBulk(data.trades);
     truncEl.textContent = data.truncated
       ? `truncated: showing ${data.trades.length} of more`
@@ -3091,10 +3212,13 @@ function refreshTradesFilterCount() {
 function applyTradesFilter() {
   const sel = document.getElementById('trades-agent-filter');
   _tradesAgentFilter = sel ? sel.value : '__all__';
+  const tippedOnly = document.getElementById('trades-tipped-toggle')?.checked;
   const cards = document.querySelectorAll('#trades-feed .trade-card');
   let shown = 0;
   cards.forEach(c => {
-    const match = _tradesAgentFilter === '__all__' || c.dataset.agentId === _tradesAgentFilter;
+    const agentMatch = _tradesAgentFilter === '__all__' || c.dataset.agentId === _tradesAgentFilter;
+    const tippedMatch = !tippedOnly || !!c.dataset.tipped;
+    const match = agentMatch && tippedMatch;
     c.style.display = match ? '' : 'none';
     if (match) shown++;
   });
@@ -3102,7 +3226,10 @@ function applyTradesFilter() {
 }
 
 function applyTradesFilterToCard(card) {
-  if (_tradesAgentFilter !== '__all__' && card.dataset.agentId !== _tradesAgentFilter) {
+  const tippedOnly = document.getElementById('trades-tipped-toggle')?.checked;
+  const agentHidden = _tradesAgentFilter !== '__all__' && card.dataset.agentId !== _tradesAgentFilter;
+  const tippedHidden = tippedOnly && !card.dataset.tipped;
+  if (agentHidden || tippedHidden) {
     card.style.display = 'none';
   }
   refreshTradesFilterCount();

@@ -36,6 +36,9 @@ import { scoreTips } from './tips-scorer.js';
 import { promoteCandidate } from './tips-store.js';
 import { addToUniverse } from './universe-store.js';
 import { evaluateCandidate } from './options-eligibility.js';
+import { addSource, removeSource, approveSuggestion, suppressSuggestion } from './tips-store.js';
+import { listNewsCandidates } from './news-candidates.js';
+import { matchTippedTrades } from './tips-scorer.js';
 import { fetchFillsSummary, renderFillsSummaryLine, startOfEtTradingDayIso, claimConnectRecap } from './fills-summary.js';
 import { SSE_KEEPALIVE_MS, sendSseKeepalive } from './sse-keepalive.js';
 import { runReconciliationForSandbox, readReconciliationSummary } from './trade-reconciliation.js';
@@ -898,6 +901,57 @@ app.post('/api/tips/:id/promote', async (req, res) => {
     const promoted = await promoteCandidate(PROJECT_ROOT, tip.id);
     if (!promoted.ok) return res.status(409).json({ error: promoted.reason, universe });
     res.json({ ok: true, tip: promoted.tip, universe, note: 'Universe add takes effect on next agent restart.' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Editable tip-source list (news reserved). GET already exists from Phase 1a.
+app.post('/api/tips/sources', async (req, res) => {
+  if (!tipsEnabled()) return res.status(404).json({ error: 'tips ledger disabled' });
+  try {
+    const r = await addSource(PROJECT_ROOT, (req.body || {}).name);
+    res.status(r.ok ? 201 : 409).json(r);
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+app.delete('/api/tips/sources/:name', async (req, res) => {
+  if (!tipsEnabled()) return res.status(404).json({ error: 'tips ledger disabled' });
+  try {
+    const r = await removeSource(PROJECT_ROOT, req.params.name);
+    res.status(r.ok ? 200 : 409).json(r);
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+
+// News-candidate feed (D14) — OOU suggestions only; approve -> candidate queue;
+// dismiss -> suppress. Never triggers the agent, never a scored tip.
+app.get('/api/tips/news-candidates', async (req, res) => {
+  if (!tipsEnabled()) return res.status(404).json({ error: 'tips ledger disabled' });
+  try { res.json({ candidates: await listNewsCandidates(PROJECT_ROOT) }); }
+  catch (err) { res.status(500).json({ error: err.message }); }
+});
+app.post('/api/tips/news-candidates/approve', async (req, res) => {
+  if (!tipsEnabled()) return res.status(404).json({ error: 'tips ledger disabled' });
+  try {
+    const { ticker, catalyst, feed, feedAt } = req.body || {};
+    const tip = await approveSuggestion(PROJECT_ROOT, { ticker, catalyst, feed, feedAt });
+    res.status(201).json({ tip });
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+app.post('/api/tips/news-candidates/dismiss', async (req, res) => {
+  if (!tipsEnabled()) return res.status(404).json({ error: 'tips ledger disabled' });
+  try {
+    const r = await suppressSuggestion(PROJECT_ROOT, (req.body || {}).ticker);
+    res.json(r);
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+
+// Influenced trades for the Trades-tab badge.
+app.get('/api/tips/influenced', async (req, res) => {
+  if (!tipsEnabled()) return res.status(404).json({ error: 'tips ledger disabled' });
+  try {
+    const { from, to } = req.query;
+    if (!from || !to) return res.status(400).json({ error: 'from and to required' });
+    const tips = await readTips(PROJECT_ROOT);
+    const { trades } = await readTrades(PROJECT_ROOT, { from: String(from), to: String(to) });
+    res.json({ influenced: matchTippedTrades(tips, trades, {}) });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 

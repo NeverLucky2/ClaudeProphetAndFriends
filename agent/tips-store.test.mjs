@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { readUniverse, createTip, readTips, getSources, dismissTip, promoteCandidate } from './tips-store.js';
+import { readUniverse, createTip, readTips, getSources, dismissTip, promoteCandidate, addSource, removeSource, approveSuggestion, suppressSuggestion, readSuppressed } from './tips-store.js';
 
 const _roots = [];
 async function tmpRoot() {
@@ -121,4 +121,48 @@ test('promoteCandidate refuses a non-candidate or unknown id', async () => {
   const active = await createTip(root, { ticker: 'IBM', thesis: 'x', source: 'self' }); // in-universe -> active
   assert.equal((await promoteCandidate(root, active.id)).ok, false);
   assert.equal((await promoteCandidate(root, 'nope')).ok, false);
+});
+
+test('addSource adds a custom human source; refuses dup, blank, and reserved news', async () => {
+  const root = await tmpRoot();
+  const r = await addSource(root, 'broker-x');
+  assert.equal(r.ok, true);
+  assert.ok((await getSources(root)).includes('broker-x'));
+  assert.equal((await addSource(root, 'broker-x')).ok, false);     // dup
+  await assert.rejects(() => addSource(root, '  '), /source/);      // blank
+  await assert.rejects(() => addSource(root, 'news'), /reserved/);  // reserved
+});
+
+test('removeSource removes a custom source but refuses defaults, news, and in-use sources', async () => {
+  const root = await tmpRoot();
+  await addSource(root, 'broker-x');
+  assert.equal((await removeSource(root, 'broker-x')).ok, true);
+  assert.equal((await getSources(root)).includes('broker-x'), false);
+  assert.equal((await removeSource(root, 'self')).ok, false);   // default protected
+  await assert.rejects(() => removeSource(root, 'news'), /reserved/);
+  // in-use guard:
+  await addSource(root, 'broker-y');
+  await createTip(root, { ticker: 'IBM', thesis: 'x', source: 'broker-y' });
+  assert.equal((await removeSource(root, 'broker-y')).ok, false); // in use -> refused
+});
+
+test('approveSuggestion creates a recommended news candidate (never active, never news in human sources)', async () => {
+  const root = await tmpRoot();
+  const tip = await approveSuggestion(root, { ticker: 'smci', catalyst: 'AI server demand', feed: 'Bloomberg', feedAt: '2026-05-29T13:00:00Z' });
+  assert.equal(tip.ticker, 'SMCI');
+  assert.equal(tip.phase, 'pending_candidate');
+  assert.equal(tip.origin, 'recommended');
+  assert.equal(tip.source, 'news');
+  assert.equal(tip.actionableAt, null);
+  assert.equal(tip.recommendation.feed, 'Bloomberg');
+  assert.equal((await getSources(root)).includes('news'), false);
+  assert.equal((await readTips(root)).length, 1);
+});
+
+test('suppressSuggestion records a ticker and readSuppressed returns it (idempotent)', async () => {
+  const root = await tmpRoot();
+  await suppressSuggestion(root, 'tsla');
+  await suppressSuggestion(root, 'TSLA'); // idempotent, case-insensitive
+  const s = await readSuppressed(root);
+  assert.deepEqual([...s], ['TSLA']);
 });

@@ -133,3 +133,102 @@ export async function promoteCandidate(projectRoot, id) {
     return { ok: true, tip };
   });
 }
+
+const RESERVED_SOURCES = ['news'];
+
+async function _writeSources(projectRoot, sources) {
+  const dir = tipsDir(projectRoot);
+  await fs.mkdir(dir, { recursive: true });
+  const tmp = sourcesFile(projectRoot) + '.tmp';
+  await fs.writeFile(tmp, JSON.stringify(sources, null, 2));
+  await fs.rename(tmp, sourcesFile(projectRoot));
+}
+
+// addSource: append a custom human source. Refuses blanks, duplicates, and the
+// reserved system source `news` (which is never a human-selectable source).
+export async function addSource(projectRoot, name) {
+  const n = String(name || '').trim();
+  if (!n) throw new Error('source name is required');
+  if (RESERVED_SOURCES.includes(n.toLowerCase())) throw new Error(`'${n}' is reserved`);
+  return serialize(async () => {
+    const sources = await getSources(projectRoot);
+    if (sources.includes(n)) return { ok: false, reason: 'duplicate', sources };
+    const next = [...sources, n];
+    await _writeSources(projectRoot, next);
+    return { ok: true, sources: next };
+  });
+}
+
+// removeSource: drop a custom source. Refuses the reserved `news`, the built-in
+// defaults (self/dad), and any source currently attached to a tip (no orphans).
+export async function removeSource(projectRoot, name) {
+  const n = String(name || '').trim();
+  if (RESERVED_SOURCES.includes(n.toLowerCase())) throw new Error(`'${n}' is reserved`);
+  return serialize(async () => {
+    if (DEFAULT_SOURCES.includes(n)) return { ok: false, reason: 'default_protected' };
+    const sources = await getSources(projectRoot);
+    if (!sources.includes(n)) return { ok: false, reason: 'not_found' };
+    const inUse = (await readTips(projectRoot)).some(t => t.source === n);
+    if (inUse) return { ok: false, reason: 'in_use' };
+    const next = sources.filter(s => s !== n);
+    await _writeSources(projectRoot, next);
+    return { ok: true, sources: next };
+  });
+}
+
+function suppressedFile(projectRoot) { return path.join(tipsDir(projectRoot), 'suppressed.json'); }
+
+export async function readSuppressed(projectRoot) {
+  try {
+    const arr = JSON.parse(await fs.readFile(suppressedFile(projectRoot), 'utf-8'));
+    return new Set(Array.isArray(arr) ? arr : []);
+  } catch (err) {
+    if (err.code === 'ENOENT') return new Set();
+    throw err;
+  }
+}
+
+// approveSuggestion: turn a news-feed suggestion into a pending_candidate record.
+// Bypasses createTip's human-source validation because `news` is the reserved
+// system source. Never active, never scored as an influenced tip until a human
+// promotes it via the Phase-2 Add-to-universe flow (D14).
+export async function approveSuggestion(projectRoot, { ticker, catalyst, feed, feedAt } = {}) {
+  const t = String(ticker || '').trim().toUpperCase();
+  if (!/^[A-Z][A-Z.]*$/.test(t)) throw new Error('invalid ticker');
+  const surfacedAt = new Date().toISOString();
+  const tip = {
+    id: `tip_${Date.now()}_${t}_${Math.random().toString(36).slice(2, 6)}`,
+    ticker: t,
+    thesis: String(catalyst || '').trim() || 'news catalyst',
+    source: 'news',
+    phase: 'pending_candidate',
+    origin: 'recommended',
+    surfacedAt,
+    actionableAt: null,
+    inUniverseAtLog: false,
+    dismissed: false,
+    recommendation: { catalyst: String(catalyst || ''), feed: String(feed || ''), feedAt: feedAt || surfacedAt },
+  };
+  return serialize(async () => {
+    const tips = await readTips(projectRoot);
+    tips.push(tip);
+    await _atomicWriteTips(projectRoot, tips);
+    return tip;
+  });
+}
+
+// suppressSuggestion: stop a ticker from reappearing in the news feed.
+export async function suppressSuggestion(projectRoot, ticker) {
+  const t = String(ticker || '').trim().toUpperCase();
+  if (!t) throw new Error('ticker is required');
+  return serialize(async () => {
+    const set = await readSuppressed(projectRoot);
+    set.add(t);
+    const dir = tipsDir(projectRoot);
+    await fs.mkdir(dir, { recursive: true });
+    const tmp = suppressedFile(projectRoot) + '.tmp';
+    await fs.writeFile(tmp, JSON.stringify([...set], null, 2));
+    await fs.rename(tmp, suppressedFile(projectRoot));
+    return { ok: true, ticker: t };
+  });
+}

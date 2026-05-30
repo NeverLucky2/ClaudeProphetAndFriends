@@ -202,6 +202,23 @@ test('computeViewB reports unresolved closes as data-gaps, never as $0', () => {
 
 import { summarizeDistribution, scoreTips } from './tips-scorer.js';
 
+import { matchTippedTrades } from './tips-scorer.js';
+
+test('matchTippedTrades flags buys on an active tip underlying within the window', () => {
+  const tips = [{ id: 't1', ticker: 'AMD', source: 'self', phase: 'active', actionableAt: '2026-05-20T14:00:00-04:00', dismissed: false }];
+  const trades = [
+    { sandboxId: 'sbx_6e4f26af', tool: 'place_options_order', symbol: 'AMD260717C00460000', side: 'buy', timestamp: '2026-05-20T15:00:00Z' },
+    { sandboxId: 'sbx_6e4f26af', tool: 'place_options_order', symbol: 'AMD260717C00460000', side: 'sell', timestamp: '2026-05-21T15:00:00Z' },
+    { sandboxId: 'sbx_6e4f26af', tool: 'place_options_order', symbol: 'NVDA260717C00230000', side: 'buy', timestamp: '2026-05-20T15:00:00Z' },
+    { sandboxId: 'sbx_6e4f26af', tool: 'place_options_order', symbol: 'AMD260717C00460000', side: 'buy', timestamp: '2026-07-01T15:00:00Z' },
+  ];
+  const out = matchTippedTrades(tips, trades, { windowDays: 3 });
+  assert.equal(out.length, 1);
+  assert.equal(out[0].symbol, 'AMD260717C00460000');
+  assert.equal(out[0].source, 'self');
+  assert.equal(out[0].timestamp, '2026-05-20T15:00:00Z');
+});
+
 test('summarizeDistribution flags small samples and demotes profit factor (D11)', () => {
   const s = summarizeDistribution([-795, 240, 120], { minSample: 20 });
   assert.equal(s.n, 3);

@@ -381,3 +381,31 @@ export async function scoreTips(projectRoot, opts = {}) {
     },
   };
 }
+
+// matchTippedTrades — for the Trades-tab badge. A trade is "influenced" iff it is
+// a BUY whose underlying matches an active tip and whose timestamp is within that
+// tip's window. Returns the matched trades' identity fields + the tip source.
+// Read-only; operates on already-loaded tips + trades.
+export function matchTippedTrades(tips, trades, opts = {}) {
+  const windowDays = opts.windowDays ?? 3;
+  const active = tips.filter(t => !t.dismissed && t.phase === 'active' && t.actionableAt);
+  const out = [];
+  for (const tr of trades) {
+    if (String(tr.side || '').toLowerCase() !== 'buy') continue;
+    const u = underlyingOf(tr.symbol);
+    const tradeEt = tr.timestamp ? etDateString(new Date(tr.timestamp)) : null;
+    if (!tradeEt) continue;
+    let matchedSource = null;
+    for (const tip of active) {
+      if (tip.ticker !== u) continue;
+      const startEt = etDateString(new Date(tip.actionableAt));
+      const anchored = isTradingDay(startEt) ? startEt : nextTradingDay(startEt);
+      const endEt = addTradingDays(anchored, windowDays);
+      if (tradeEt >= anchored && tradeEt <= endEt) { matchedSource = tip.source; break; }
+    }
+    if (matchedSource) {
+      out.push({ sandboxId: tr.sandboxId, timestamp: tr.timestamp, tool: tr.tool, symbol: tr.symbol, source: matchedSource });
+    }
+  }
+  return out;
+}
