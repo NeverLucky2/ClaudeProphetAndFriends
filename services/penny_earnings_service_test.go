@@ -822,6 +822,73 @@ func TestFetchRecentReports_ZeroDaysReturnsEmpty(t *testing.T) {
 	}
 }
 
+func TestFetchReportsInRange_ParsesExplicitWindow(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.Path, "/stable/earnings-calendar") {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("from"); got != "2023-01-01" {
+			t.Errorf("from = %q, want 2023-01-01", got)
+		}
+		if got := r.URL.Query().Get("to"); got != "2023-01-31" {
+			t.Errorf("to = %q, want 2023-01-31", got)
+		}
+		w.Write([]byte(`[{"symbol":"AAPL","date":"2023-01-15","time":"amc"},{"symbol":"MSFT","date":"2023-01-20","time":"bmo"}]`))
+	}))
+	defer srv.Close()
+
+	s := NewEarningsCalendarService("k", "ak", "sk", "https://paper-api.alpaca.markets", srv.Client())
+	s.fmpBaseURL = srv.URL
+
+	loc, _ := time.LoadLocation("America/New_York")
+	from := time.Date(2023, 1, 1, 0, 0, 0, 0, loc)
+	to := time.Date(2023, 1, 31, 0, 0, 0, 0, loc)
+	out, err := s.FetchReportsInRange(context.Background(), from, to)
+	if err != nil {
+		t.Fatalf("FetchReportsInRange: %v", err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("got %d reports, want 2: %+v", len(out), out)
+	}
+	if out[0].Ticker != "AAPL" || out[0].Timing != "amc" {
+		t.Errorf("report[0] = %+v, want AAPL/amc", out[0])
+	}
+}
+
+func TestFetchSymbolReports_FiltersReportedInWindow(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.Path, "/stable/earnings") {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("symbol"); got != "CSCO" {
+			t.Errorf("symbol = %q, want CSCO", got)
+		}
+		w.Write([]byte(`[
+			{"symbol":"CSCO","date":"2026-08-12","epsActual":null,"epsEstimated":1.16},
+			{"symbol":"CSCO","date":"2026-02-11","epsActual":1.04,"epsEstimated":1.0},
+			{"symbol":"CSCO","date":"2024-01-01","epsActual":0.9,"epsEstimated":0.9}
+		]`))
+	}))
+	defer srv.Close()
+	s := NewEarningsCalendarService("k", "ak", "sk", "https://paper-api.alpaca.markets", srv.Client())
+	s.fmpBaseURL = srv.URL
+
+	from := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2026, 5, 30, 0, 0, 0, 0, time.UTC)
+	out, err := s.FetchSymbolReports(context.Background(), "CSCO", from, to)
+	if err != nil {
+		t.Fatalf("FetchSymbolReports: %v", err)
+	}
+	// 2026-08-12 dropped (epsActual null); 2024-01-01 dropped (before from);
+	// only 2026-02-11 kept.
+	if len(out) != 1 {
+		t.Fatalf("got %d, want 1: %+v", len(out), out)
+	}
+	if out[0].Ticker != "CSCO" || out[0].Date.Format("2006-01-02") != "2026-02-11" || out[0].Timing != "" {
+		t.Errorf("report = %+v, want CSCO/2026-02-11/empty-timing", out[0])
+	}
+}
+
 // Silence unused-symbol guard when test file is built without referencing logrus
 // elsewhere in this section.
 var _ = logrus.New

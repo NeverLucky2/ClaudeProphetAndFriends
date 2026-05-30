@@ -216,10 +216,24 @@ func (s *EarningsCalendarService) FetchRecentReports(ctx context.Context, now ti
 		loc = time.UTC
 	}
 	nowET := now.In(loc)
-	from := nowET.AddDate(0, 0, -(days*2 + 4)).Format("2006-01-02")
-	to := nowET.Format("2006-01-02")
+	from := nowET.AddDate(0, 0, -(days*2 + 4))
+	return s.FetchReportsInRange(ctx, from, nowET)
+}
+
+// FetchReportsInRange does a one-off (uncached) FMP /stable/earnings-calendar
+// fetch over [from, to] (inclusive, by calendar date) and returns parsed
+// RecentReport entries with timing normalized to "bmo"/"amc"/"". Entries
+// outside [from, to] are dropped. Used by FetchRecentReports and the offline
+// driftreplay tool (which needs arbitrary historical windows).
+func (s *EarningsCalendarService) FetchReportsInRange(ctx context.Context, from, to time.Time) ([]RecentReport, error) {
+	loc := nyLoc
+	if loc == nil {
+		loc = time.UTC
+	}
+	fromYMD := from.In(loc).Format("2006-01-02")
+	toYMD := to.In(loc).Format("2006-01-02")
 	url := fmt.Sprintf("%s/stable/earnings-calendar?from=%s&to=%s&apikey=%s",
-		s.fmpBaseURL, from, to, s.fmpAPIKey)
+		s.fmpBaseURL, fromYMD, toYMD, s.fmpAPIKey)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -227,11 +241,11 @@ func (s *EarningsCalendarService) FetchRecentReports(ctx context.Context, now ti
 	}
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("fmp recent earnings fetch: %w", err)
+		return nil, fmt.Errorf("fmp earnings fetch: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("fmp recent earnings returned HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("fmp earnings returned HTTP %d", resp.StatusCode)
 	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -239,12 +253,11 @@ func (s *EarningsCalendarService) FetchRecentReports(ctx context.Context, now ti
 	}
 	var items []fmpEarningsItem
 	if err := json.Unmarshal(body, &items); err != nil {
-		return nil, fmt.Errorf("parse recent earnings JSON: %w", err)
+		return nil, fmt.Errorf("parse earnings JSON: %w", err)
 	}
-	todayYMD := nowET.Format("2006-01-02")
 	out := make([]RecentReport, 0, len(items))
 	for _, it := range items {
-		if it.Date < from || it.Date > todayYMD {
+		if it.Date < fromYMD || it.Date > toYMD {
 			continue
 		}
 		d, perr := time.ParseInLocation("2006-01-02", it.Date, loc)
@@ -256,6 +269,67 @@ func (s *EarningsCalendarService) FetchRecentReports(ctx context.Context, now ti
 			t = ""
 		}
 		out = append(out, RecentReport{Ticker: it.Symbol, Date: d, Timing: t})
+	}
+	return out, nil
+}
+
+// symbolEarningsItem parses the per-symbol /stable/earnings response, which —
+// unlike /stable/earnings-calendar — carries no "time" (bmo/amc) field and
+// includes epsActual (null for not-yet-reported / scheduled dates).
+type symbolEarningsItem struct {
+	Symbol    string   `json:"symbol"`
+	Date      string   `json:"date"`
+	EpsActual *float64 `json:"epsActual"`
+}
+
+// FetchSymbolReports fetches one symbol's earnings history from FMP
+// /stable/earnings (full multi-year history; NOT subject to the
+// earnings-calendar endpoint's ~1-year `from` cap or 4000-row truncation) and
+// returns the REPORTED earnings (epsActual present) whose date is within
+// [from, to]. Timing is always "" — the per-symbol endpoint has no bmo/amc
+// field, so the AMC gap-bar convention applies downstream.
+func (s *EarningsCalendarService) FetchSymbolReports(ctx context.Context, symbol string, from, to time.Time) ([]RecentReport, error) {
+	loc := nyLoc
+	if loc == nil {
+		loc = time.UTC
+	}
+	fromYMD := from.In(loc).Format("2006-01-02")
+	toYMD := to.In(loc).Format("2006-01-02")
+	url := fmt.Sprintf("%s/stable/earnings?symbol=%s&apikey=%s", s.fmpBaseURL, symbol, s.fmpAPIKey)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fmp symbol earnings fetch %s: %w", symbol, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("fmp symbol earnings %s returned HTTP %d", symbol, resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	var items []symbolEarningsItem
+	if err := json.Unmarshal(body, &items); err != nil {
+		return nil, fmt.Errorf("parse symbol earnings JSON %s: %w", symbol, err)
+	}
+	out := make([]RecentReport, 0, len(items))
+	for _, it := range items {
+		if it.EpsActual == nil { // not yet reported (scheduled/future)
+			continue
+		}
+		if it.Date < fromYMD || it.Date > toYMD {
+			continue
+		}
+		d, perr := time.ParseInLocation("2006-01-02", it.Date, loc)
+		if perr != nil {
+			continue
+		}
+		out = append(out, RecentReport{Ticker: strings.ToUpper(it.Symbol), Date: d, Timing: ""})
 	}
 	return out, nil
 }
