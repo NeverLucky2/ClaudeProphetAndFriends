@@ -1146,6 +1146,7 @@
     <button class="tab" data-tab="trades" onclick="switchTab('trades')">Trades</button>
     <button class="tab" data-tab="history" onclick="switchTab('history')">History</button>
     <button class="tab" data-tab="costs" onclick="switchTab('costs')">Costs</button>
+    <button class="tab" data-tab="tips" onclick="switchTab('tips')">Tips</button>
     <button class="tab tab-portfolio-mobile" data-tab="portfolio" onclick="switchTab('portfolio')"><span class="tab-full">Portfolio</span><span class="tab-short">Port</span></button>
     <button class="tab" data-tab="agents" onclick="switchTab('agents')">Agents</button>
     <button class="tab" data-tab="sandboxes" onclick="switchTab('sandboxes')"><span class="tab-full">Sandboxes</span><span class="tab-short">Sbox</span></button>
@@ -1234,6 +1235,27 @@
           <span id="costs-anchor-date" style="margin-left:auto; opacity:0.7;"></span>
         </div>
         <div id="costs-tab-body"><div style="padding:24px; opacity:0.6;">Loading…</div></div>
+      </div>
+    </div>
+
+    <!-- Tips Panel -->
+    <div class="panel" id="panel-tips">
+      <div class="settings-content">
+        <h2>Tips &amp; Influence Ledger</h2>
+        <p class="subtitle">Log a call before it plays out. Prophet still only trades its universe — this is the honest record.</p>
+        <div id="tips-disabled" class="no-data" style="display:none">
+          Tips ledger is off. Set <code>ENABLE_TIPS_SCORECARD=true</code> and restart to enable.
+        </div>
+        <div id="tips-form-wrap" style="display:none; margin-bottom:16px;">
+          <div style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap;">
+            <label>Ticker<br><input id="tip-ticker" maxlength="8" style="text-transform:uppercase; width:90px;"></label>
+            <label>Thesis (one line)<br><input id="tip-thesis" style="width:320px;"></label>
+            <label>Source<br><select id="tip-source"></select></label>
+            <button id="tip-submit" onclick="submitTip()">Log Tip</button>
+          </div>
+          <div id="tip-error" style="color:var(--error); font-size:12px; margin-top:6px;"></div>
+        </div>
+        <div id="tips-list"><div class="no-data">No tips yet.</div></div>
       </div>
     </div>
 
@@ -1745,6 +1767,7 @@ function switchTab(id) {
   if (panel) panel.classList.add('active');
   if (id === 'history' && !historyState.loaded) loadHistoryPanel();
   if (id === 'costs') renderCostsTab();
+  if (id === 'tips') loadTipsPanel();
 }
 
 // ── Costs Tab ──────────────────────────────
@@ -1777,6 +1800,57 @@ function fmtDeltaJs(p) {
 function deltaColor(p) {
   if (p === null || p === undefined || Math.abs(p) < 5) return '';
   return p < 0 ? 'color:#7dd87d;' : 'color:#e89090;';
+}
+
+// ── Tips Tab ───────────────────────────────
+async function loadTipsPanel() {
+  const disabled = document.getElementById('tips-disabled');
+  const formWrap = document.getElementById('tips-form-wrap');
+  const list = document.getElementById('tips-list');
+  try {
+    const srcRes = await fetch('/api/tips/sources');
+    if (srcRes.status === 404) { disabled.style.display = ''; formWrap.style.display = 'none'; list.innerHTML = ''; return; }
+    disabled.style.display = 'none';
+    formWrap.style.display = '';
+    const { sources } = await srcRes.json();
+    const sel = document.getElementById('tip-source');
+    sel.innerHTML = sources.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('');
+
+    const res = await fetch('/api/tips');
+    const { tips } = await res.json();
+    if (!tips.length) { list.innerHTML = '<div class="no-data">No tips yet.</div>'; return; }
+    list.innerHTML = tips.map(t => `
+      <div class="trade-card">
+        <div class="trade-header">
+          <span><span class="trade-symbol">${esc(t.ticker)}</span>
+            <span class="trade-agent-badge">${esc(t.source)}</span>
+            <span class="trade-agent-badge">${t.phase === 'active' ? 'active' : 'candidate · OOU'}</span></span>
+          <span class="trade-time">${esc((t.surfacedAt || '').replace('T', ' ').slice(0, 16))}</span>
+        </div>
+        <div class="trade-details">${esc(t.thesis)}</div>
+      </div>`).join('');
+  } catch (err) {
+    list.innerHTML = '<div class="no-data">Failed to load tips.</div>';
+    console.warn('loadTipsPanel failed:', err);
+  }
+}
+
+async function submitTip() {
+  const ticker = document.getElementById('tip-ticker').value;
+  const thesis = document.getElementById('tip-thesis').value;
+  const source = document.getElementById('tip-source').value;
+  const errEl = document.getElementById('tip-error');
+  errEl.textContent = '';
+  try {
+    const res = await fetch('/api/tips', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ticker, thesis, source }),
+    });
+    if (!res.ok) { const e = await res.json().catch(() => ({})); errEl.textContent = e.error || ('error ' + res.status); return; }
+    document.getElementById('tip-ticker').value = '';
+    document.getElementById('tip-thesis').value = '';
+    loadTipsPanel();
+  } catch (err) { errEl.textContent = String(err); }
 }
 
 async function renderCostsTab() {

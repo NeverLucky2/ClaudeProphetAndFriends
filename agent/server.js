@@ -31,6 +31,7 @@ import {
   createSandboxForAccount,
 } from './config-store.js';
 import { appendTrade, readTrades } from './trades-store.js';
+import { readTips, createTip, dismissTip, getSources } from './tips-store.js';
 import { fetchFillsSummary, renderFillsSummaryLine, startOfEtTradingDayIso, claimConnectRecap } from './fills-summary.js';
 import { SSE_KEEPALIVE_MS, sendSseKeepalive } from './sse-keepalive.js';
 import { runReconciliationForSandbox, readReconciliationSummary } from './trade-reconciliation.js';
@@ -820,6 +821,45 @@ app.get('/api/trades', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// ── Tips & Influence Ledger (flag-gated, default OFF) ───────────────────────
+// All routes 404 when ENABLE_TIPS_SCORECARD !== 'true', mirroring /api/v1/costs.
+function tipsEnabled() { return process.env.ENABLE_TIPS_SCORECARD === 'true'; }
+
+app.get('/api/tips/sources', async (req, res) => {
+  if (!tipsEnabled()) return res.status(404).json({ error: 'tips ledger disabled' });
+  try {
+    res.json({ sources: await getSources(PROJECT_ROOT) });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/tips', async (req, res) => {
+  if (!tipsEnabled()) return res.status(404).json({ error: 'tips ledger disabled' });
+  try {
+    const all = await readTips(PROJECT_ROOT);
+    const tips = req.query.includeDismissed === 'true' ? all : all.filter(t => !t.dismissed);
+    tips.sort((a, b) => (b.surfacedAt || '').localeCompare(a.surfacedAt || ''));
+    res.json({ count: tips.length, tips });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/tips', async (req, res) => {
+  if (!tipsEnabled()) return res.status(404).json({ error: 'tips ledger disabled' });
+  const { ticker, thesis, source } = req.body || {};
+  try {
+    const tip = await createTip(PROJECT_ROOT, { ticker, thesis, source });
+    res.status(201).json({ tip });
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+
+app.post('/api/tips/:id/dismiss', async (req, res) => {
+  if (!tipsEnabled()) return res.status(404).json({ error: 'tips ledger disabled' });
+  try {
+    const ok = await dismissTip(PROJECT_ROOT, req.params.id);
+    if (!ok) return res.status(404).json({ error: 'tip not found' });
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // Reconciliation summary for a date (default: today ET). Aggregates across
