@@ -1257,6 +1257,7 @@
           </div>
           <div id="tip-error" style="color:var(--error); font-size:12px; margin-top:6px;"></div>
         </div>
+        <div id="tips-candidates"></div>
         <div id="tips-ledger"></div>
         <div id="tips-list"><div class="no-data">No tips yet.</div></div>
       </div>
@@ -1816,6 +1817,7 @@ async function loadTipsPanel() {
     disabled.style.display = 'none';
     formWrap.style.display = '';
     loadTipsLedger();
+    loadTipsCandidates();
     const { sources } = await srcRes.json();
     const sel = document.getElementById('tip-source');
     sel.innerHTML = sources.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('');
@@ -1931,6 +1933,62 @@ async function loadTipsLedger() {
       <div style="font-size:12px;">Autonomous: n=${ledger.viewC.autonomous.n}, sum ${usd(ledger.viewC.autonomous.sum)}, median ${usd(ledger.viewC.autonomous.median)}</div>
     </div>
     <div style="opacity:.55;font-size:11px;margin-bottom:8px;">${esc(m.agentSurfacedCaveat)}</div>`;
+}
+
+async function loadTipsCandidates() {
+  const host = document.getElementById('tips-candidates');
+  if (!host) return;
+  let tips;
+  try {
+    const res = await fetch('/api/tips');
+    if (!res.ok) { host.innerHTML = ''; return; }
+    tips = (await res.json()).tips.filter(t => t.phase === 'pending_candidate');
+  } catch { host.innerHTML = ''; return; }
+  if (!tips.length) { host.innerHTML = ''; return; }
+  host.innerHTML = `
+    <div class="settings-content" style="margin-bottom:18px;">
+      <h3>Candidates <span style="opacity:.6;font-weight:normal;">— out-of-universe tips awaiting eligibility review</span></h3>
+      ${tips.map(t => `
+        <div class="trade-card" id="cand-${esc(t.id)}">
+          <div class="trade-header">
+            <span><span class="trade-symbol">${esc(t.ticker)}</span>
+              <span class="trade-agent-badge">${esc(t.source)}</span></span>
+            <span class="trade-time">${esc((t.surfacedAt || '').slice(0, 10))}</span>
+          </div>
+          <div class="trade-details">${esc(t.thesis || '')}</div>
+          <div style="margin-top:6px; display:flex; gap:8px; align-items:center;">
+            <button onclick="evaluateCandidate('${esc(t.id)}')">Evaluate</button>
+            <span id="cand-verdict-${esc(t.id)}" style="font-size:12px;"></span>
+          </div>
+        </div>`).join('')}
+    </div>`;
+}
+
+async function evaluateCandidate(id) {
+  const out = document.getElementById('cand-verdict-' + id);
+  if (out) out.textContent = 'evaluating…';
+  try {
+    const res = await fetch('/api/tips/candidates/' + id + '/evaluate');
+    if (!res.ok) { if (out) out.textContent = 'error ' + res.status; return; }
+    const { evaluation: e } = await res.json();
+    const sp = e.liquidity.spreadPct == null ? 'n/a' : (e.liquidity.spreadPct * 100).toFixed(1) + '%';
+    const ctx = e.context.realizedVol == null ? '' : ` · rvol ${(e.context.realizedVol * 100).toFixed(0)}%`;
+    const canAdd = e.verdict !== 'reject';
+    if (out) out.innerHTML =
+      `<b class="${e.verdict === 'reject' ? 'pnl-neg' : 'pnl-pos'}">${esc(e.verdict)}</b> `
+      + `(spread ${sp}${ctx})${e.liquidity.available ? '' : ' — ' + esc(e.liquidity.reason)} `
+      + (canAdd ? `<button onclick="promoteCandidate('${esc(id)}','${esc(e.ticker)}')">Add to universe</button>` : '');
+  } catch (err) { if (out) out.textContent = String(err); }
+}
+
+async function promoteCandidate(id, ticker) {
+  if (!confirm('Add ' + ticker + ' to the tradable universe?\nTakes effect on the next agent restart.')) return;
+  try {
+    const res = await fetch('/api/tips/' + id + '/promote', { method: 'POST' });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) { alert('Promote failed: ' + (j.error || res.status)); return; }
+    loadTipsPanel(); // refresh: candidate leaves the queue, becomes an active tip
+  } catch (err) { alert(String(err)); }
 }
 
 async function renderCostsTab() {

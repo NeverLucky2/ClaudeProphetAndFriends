@@ -33,6 +33,9 @@ import {
 import { appendTrade, readTrades } from './trades-store.js';
 import { readTips, createTip, dismissTip, getSources } from './tips-store.js';
 import { scoreTips } from './tips-scorer.js';
+import { promoteCandidate } from './tips-store.js';
+import { addToUniverse } from './universe-store.js';
+import { evaluateCandidate } from './options-eligibility.js';
 import { fetchFillsSummary, renderFillsSummaryLine, startOfEtTradingDayIso, claimConnectRecap } from './fills-summary.js';
 import { SSE_KEEPALIVE_MS, sendSseKeepalive } from './sse-keepalive.js';
 import { runReconciliationForSandbox, readReconciliationSummary } from './trade-reconciliation.js';
@@ -868,6 +871,33 @@ app.get('/api/tips/ledger', async (req, res) => {
   try {
     const ledger = await scoreTips(PROJECT_ROOT, {});
     res.json({ ledger });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Standalone candidate eligibility (D6/D15) — read-only, options-liquidity-first.
+app.get('/api/tips/candidates/:id/evaluate', async (req, res) => {
+  if (!tipsEnabled()) return res.status(404).json({ error: 'tips ledger disabled' });
+  try {
+    const tip = (await readTips(PROJECT_ROOT)).find(t => t.id === req.params.id);
+    if (!tip) return res.status(404).json({ error: 'tip not found' });
+    if (tip.phase !== 'pending_candidate') return res.status(400).json({ error: 'not a pending candidate' });
+    const evaluation = await evaluateCandidate(PROJECT_ROOT, tip.ticker, {});
+    res.json({ evaluation });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Add-to-universe + promote (D7) — the sanctioned, human-gated write. Appends to
+// the universe file (effective next restart) and flips the tip to active.
+app.post('/api/tips/:id/promote', async (req, res) => {
+  if (!tipsEnabled()) return res.status(404).json({ error: 'tips ledger disabled' });
+  try {
+    const tip = (await readTips(PROJECT_ROOT)).find(t => t.id === req.params.id);
+    if (!tip) return res.status(404).json({ error: 'tip not found' });
+    if (tip.phase !== 'pending_candidate') return res.status(400).json({ error: 'not a pending candidate' });
+    const universe = await addToUniverse(PROJECT_ROOT, tip.ticker, {});
+    const promoted = await promoteCandidate(PROJECT_ROOT, tip.id);
+    if (!promoted.ok) return res.status(409).json({ error: promoted.reason, universe });
+    res.json({ ok: true, tip: promoted.tip, universe, note: 'Universe add takes effect on next agent restart.' });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 

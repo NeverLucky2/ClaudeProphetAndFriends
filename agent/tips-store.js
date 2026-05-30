@@ -113,3 +113,23 @@ export async function dismissTip(projectRoot, id) {
     return true;
   });
 }
+
+// promoteCandidate: the D7 transition. An out-of-universe pending_candidate
+// becomes active when a human adds its ticker to the universe; the scoring
+// window anchors to add-time (actionableAt = now), not the original log time,
+// so the tip is not penalised for the span the name was structurally untradable.
+// Single-writer (D13): serialized like every other mutation.
+export async function promoteCandidate(projectRoot, id) {
+  return serialize(async () => {
+    const tips = await readTips(projectRoot);
+    const tip = tips.find(t => t.id === id);
+    if (!tip) return { ok: false, reason: 'not_found' };
+    if (tip.phase !== 'pending_candidate') return { ok: false, reason: 'not_a_candidate', tip };
+    const now = new Date().toISOString();
+    tip.phase = 'active';
+    tip.actionableAt = now;
+    tip.promotedAt = now;
+    await _atomicWriteTips(projectRoot, tips);
+    return { ok: true, tip };
+  });
+}

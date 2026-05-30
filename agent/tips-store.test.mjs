@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { readUniverse, createTip, readTips, getSources, dismissTip } from './tips-store.js';
+import { readUniverse, createTip, readTips, getSources, dismissTip, promoteCandidate } from './tips-store.js';
 
 const _roots = [];
 async function tmpRoot() {
@@ -98,4 +98,27 @@ test('concurrent createTip calls do not clobber each other', async () => {
   );
   const tips = await readTips(root);
   assert.equal(tips.length, 20);
+});
+
+test('promoteCandidate flips an OOU candidate to active, anchoring the window to now', async () => {
+  const root = await tmpRoot();
+  const cand = await createTip(root, { ticker: 'SMCI', thesis: 'AI servers', source: 'dad' });
+  assert.equal(cand.phase, 'pending_candidate');
+  assert.equal(cand.actionableAt, null);
+  const before = Date.now();
+  const r = await promoteCandidate(root, cand.id);
+  assert.equal(r.ok, true);
+  assert.equal(r.tip.phase, 'active');
+  assert.ok(r.tip.actionableAt && Date.parse(r.tip.actionableAt) >= before - 1000);
+  assert.ok(r.tip.promotedAt);
+  const stored = (await readTips(root)).find(t => t.id === cand.id);
+  assert.equal(stored.phase, 'active');
+  assert.equal(stored.actionableAt, r.tip.actionableAt);
+});
+
+test('promoteCandidate refuses a non-candidate or unknown id', async () => {
+  const root = await tmpRoot();
+  const active = await createTip(root, { ticker: 'IBM', thesis: 'x', source: 'self' }); // in-universe -> active
+  assert.equal((await promoteCandidate(root, active.id)).ok, false);
+  assert.equal((await promoteCandidate(root, 'nope')).ok, false);
 });
