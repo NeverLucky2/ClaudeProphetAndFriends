@@ -1,0 +1,16 @@
+=== RUN   TestCheckEntryOrder_PartialFill_AcceptsAndCancelsRemainder
+time="2026-05-29T18:19:23-05:00" level=info msg="Entry partially filled — accepted partial, cancelled remainder" filled_qty=2 ordered_qty=98 position_id=pos_1780096763696019300 symbol=III
+time="2026-05-29T18:19:23-05:00" level=info msg="Entry order filled - position now active" fill_price=4.47 filled_qty=2 position_id=pos_1780096763696019300 symbol=III
+time="2026-05-29T18:19:23-05:00" level=info msg="Stop loss order placed" order_id=bracket-1 position_id=pos_1780096763696019300 stop_price=4.56
+time="2026-05-29T18:19:23-05:00" level=info msg="Take profit order placed" limit_price=6.08 order_id=bracket-1 position_id=pos_1780096763696019300
+--- PASS: TestCheckEntryOrder_PartialFill_AcceptsAndCancelsRemainder (0.01s)
+=== RUN   TestCheckEntryOrder_Rejected_MarksFailed
+time="2026-05-29T18:19:23-05:00" level=warning msg="Entry order failed at broker — position marked FAILED (no shares acquired)" position_id=pos_1780096763701906700 reason=entry_rejected symbol=III
+--- PASS: TestCheckEntryOrder_Rejected_MarksFailed (0.01s)
+=== RUN   TestCheckEntryOrder_FullFill_StillActivates
+time="2026-05-29T18:19:23-05:00" level=info msg="Entry order filled - position now active" fill_price=5.07 filled_qty=98 position_id=pos_1780096763707404500 symbol=III
+time="2026-05-29T18:19:23-05:00" level=info msg="Stop loss order placed" order_id=bracket-1 position_id=pos_1780096763707404500 stop_price=4.56
+time="2026-05-29T18:19:23-05:00" level=info msg="Take profit order placed" limit_price=6.08 order_id=bracket-1 position_id=pos_1780096763707404500
+--- PASS: TestCheckEntryOrder_FullFill_StillActivates (0.01s)
+PASS
+ok  	prophet-trader/services	(cached)

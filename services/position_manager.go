@@ -500,7 +500,12 @@ func (pm *PositionManager) checkPositions(ctx context.Context) {
 	}
 }
 
-// checkEntryOrder checks if entry order has filled
+// checkEntryOrder advances a PENDING position based on the broker truth of its
+// entry order. It MUST handle every terminal/partial outcome, not just "filled":
+// the original single-branch version left a partially_filled or rejected entry
+// stuck PENDING forever, which froze the price, never placed a protective
+// bracket, and hid the real (unprotected) shares from reconcileWithBroker — the
+// III-on-Spark hang of 2026-05-27 (2 of 98 filled, row PENDING for 4+ minutes).
 func (pm *PositionManager) checkEntryOrder(ctx context.Context, position *ManagedPosition) {
 	order, err := pm.tradingService.GetOrder(ctx, position.EntryOrderID)
 	if err != nil {
@@ -508,32 +513,119 @@ func (pm *PositionManager) checkEntryOrder(ctx context.Context, position *Manage
 		return
 	}
 
-	if order.Status == "filled" {
-		position.Status = "ACTIVE"
-		position.EntryPrice = *order.FilledAvgPrice
-		position.UpdatedAt = time.Now()
+	switch order.Status {
+	case "filled":
+		// Activate on the full ordered quantity (FilledQty == Quantity here).
+		pm.activateFilledEntry(ctx, position, order, position.Quantity)
 
-		pm.logger.WithFields(logrus.Fields{
-			"position_id": position.ID,
-			"symbol":      position.Symbol,
-			"fill_price":  position.EntryPrice,
-		}).Info("Entry order filled - position now active")
-
-		// Place risk management orders. placeRiskOrders may mutate
-		// position.Status (e.g. to FAILED after auto-flatten), so save
-		// AFTER it returns and surface persistence errors loudly — a
-		// silent save failure here is what produced Spark's
-		// PENDING-in-DB / ACTIVE-in-memory drift on 2026-05-18.
-		pm.placeRiskOrders(ctx, position)
-
-		if err := pm.savePositionToDB(position); err != nil {
-			pm.logger.WithError(err).WithFields(logrus.Fields{
+	case "partially_filled":
+		// Accept the shares actually filled and CANCEL the unfilled remainder so
+		// it cannot fill later at a worse price and re-desync the managed row
+		// from broker truth. Only after the remainder is bounded do we bracket
+		// the real quantity. If FilledQty is not yet positive under this status,
+		// there is nothing to act on — wait for the next tick.
+		if order.FilledQty <= 0 {
+			return
+		}
+		if cancelErr := pm.tradingService.CancelOrder(ctx, position.EntryOrderID); cancelErr != nil {
+			// Could not bound the remainder — it may still fill and grow the
+			// position. Do NOT activate against a quantity that can still change;
+			// stay PENDING and retry next tick. The shares already filled remain
+			// unprotected until then, so this is logged for operator awareness.
+			pm.logger.WithError(cancelErr).WithFields(logrus.Fields{
 				"position_id":              position.ID,
 				"symbol":                   position.Symbol,
-				"status":                   position.Status,
+				"filled_qty":               order.FilledQty,
 				"operator_review_required": true,
-			}).Error("Failed to persist position state after entry fill — broker/DB out of sync")
+			}).Warn("Partial fill: could not cancel entry remainder — leaving PENDING, will retry")
+			return
 		}
+		pm.logger.WithFields(logrus.Fields{
+			"position_id":  position.ID,
+			"symbol":       position.Symbol,
+			"ordered_qty":  position.Quantity,
+			"filled_qty":   order.FilledQty,
+		}).Info("Entry partially filled — accepted partial, cancelled remainder")
+		pm.activateFilledEntry(ctx, position, order, order.FilledQty)
+
+	case "canceled", "rejected", "expired":
+		// Broker-terminal with no more fills coming. Previously these left the
+		// row stuck PENDING indefinitely.
+		if order.FilledQty > 0 {
+			// Some shares filled before the terminal state — accept + bracket
+			// them rather than abandon a real, unprotected position.
+			pm.logger.WithFields(logrus.Fields{
+				"position_id": position.ID,
+				"symbol":      position.Symbol,
+				"status":      order.Status,
+				"filled_qty":  order.FilledQty,
+			}).Warn("Entry order terminal with a partial fill — bracketing the filled shares")
+			pm.activateFilledEntry(ctx, position, order, order.FilledQty)
+			return
+		}
+		pm.markEntryFailed(position, "entry_"+order.Status)
+
+	default:
+		// "new", "accepted", "pending_new", etc.: the entry is still working
+		// (a GTC limit entry can legitimately rest here). Wait for the next tick.
+	}
+}
+
+// activateFilledEntry transitions a PENDING position to ACTIVE on the quantity
+// actually filled, sets the broker fill price, sizes the position (and its
+// bracket) to the real fill, and places the protective bracket. Saving happens
+// AFTER placeRiskOrders because that call may mutate Status (e.g. to FAILED on
+// auto-flatten); a silent save failure here is what produced Spark's
+// PENDING-in-DB / ACTIVE-in-memory drift on 2026-05-18, so persistence errors
+// are surfaced loudly.
+func (pm *PositionManager) activateFilledEntry(ctx context.Context, position *ManagedPosition, order *interfaces.Order, filledQty float64) {
+	position.Status = "ACTIVE"
+	if order.FilledAvgPrice != nil {
+		position.EntryPrice = *order.FilledAvgPrice
+	}
+	position.Quantity = filledQty
+	position.RemainingQty = filledQty
+	position.UpdatedAt = time.Now()
+
+	pm.logger.WithFields(logrus.Fields{
+		"position_id": position.ID,
+		"symbol":      position.Symbol,
+		"fill_price":  position.EntryPrice,
+		"filled_qty":  filledQty,
+	}).Info("Entry order filled - position now active")
+
+	pm.placeRiskOrders(ctx, position)
+
+	if err := pm.savePositionToDB(position); err != nil {
+		pm.logger.WithError(err).WithFields(logrus.Fields{
+			"position_id":              position.ID,
+			"symbol":                   position.Symbol,
+			"status":                   position.Status,
+			"operator_review_required": true,
+		}).Error("Failed to persist position state after entry fill — broker/DB out of sync")
+	}
+}
+
+// markEntryFailed marks a position FAILED when its entry order reached a broker
+// terminal state with nothing filled, so it cannot hang PENDING forever. No
+// flatten is needed (no shares were acquired).
+func (pm *PositionManager) markEntryFailed(position *ManagedPosition, reason string) {
+	position.Status = "FAILED"
+	position.UpdatedAt = time.Now()
+	position.Notes = strings.TrimSpace(position.Notes + " entry_failed:" + reason)
+
+	pm.logger.WithFields(logrus.Fields{
+		"position_id": position.ID,
+		"symbol":      position.Symbol,
+		"reason":      reason,
+	}).Warn("Entry order failed at broker — position marked FAILED (no shares acquired)")
+
+	if err := pm.savePositionToDB(position); err != nil {
+		pm.logger.WithError(err).WithFields(logrus.Fields{
+			"position_id":              position.ID,
+			"symbol":                   position.Symbol,
+			"operator_review_required": true,
+		}).Error("Failed to persist FAILED entry state")
 	}
 }
 
