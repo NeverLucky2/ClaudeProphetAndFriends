@@ -64,7 +64,10 @@ A **firing** is a tuple `(ticker, day d, direction s ∈ {+1 long, −1 short})`
 
 - **Trigger (the "when"):** a catalyst flag is active on `(ticker, d)` — `ma` or `earnings` (earnings-whisper)
   per the `catalyst-news` classifier — on a name in the **56-name optionable universe**
-  (`.claude/skills/analyst-actions/universe.txt`), using only news **timestamped ≤ d's close**.
+  (`config/prophet_tradable_universe.txt` — the static curated floor shared with the Go `tradable_universe`
+  guard), using only news **timestamped ≤ d's close**. The experiment uses the **static file only** (no FMP
+  dynamic top-up): a frozen, hashable universe is required for pre-registration, and a dynamic top-up would be
+  both non-reproducible and lookahead-tainted (it encodes future liquidity).
 - **Direction `s` (the "which way"):** set by **news-sentiment sign** AND **price-state**, which must agree:
   - `s = +1` if sentiment > 0 **and** price-state bullish;
   - `s = −1` if sentiment < 0 **and** price-state bearish;
@@ -241,7 +244,7 @@ as a future extension *only* if data depth surprises upward.
   "created_utc": "<iso>",
   "horizon_sessions": 3,
   "entry": "open[d+1]", "exit": "close[d+3]",
-  "universe_file": ".claude/skills/analyst-actions/universe.txt", "universe_hash": "<sha256-8>",
+  "universe_file": "config/prophet_tradable_universe.txt", "universe_hash": "<sha256-8>",
   "signal": {
     "trigger": "catalyst flag (ma|earnings) on (ticker,d), news <= d close",
     "sentiment_source": "keyword_polarity_v1",

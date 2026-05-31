@@ -763,7 +763,7 @@ export function buildPreregArtifact({ universeText, frictionText, splitDate, cre
     created_utc: createdUtc ?? new Date().toISOString(),
     horizon_sessions: 3,
     entry: 'open[d+1]', exit: 'close[d+3]',
-    universe_file: '.claude/skills/analyst-actions/universe.txt',
+    universe_file: 'config/prophet_tradable_universe.txt',
     universe_hash: sha256short(universeText),
     signal: {
       trigger: 'catalyst flag (ma|earnings) on (ticker,d), news <= d close',
@@ -814,7 +814,7 @@ export function writePrereg(artifact, outPath) {
     if (!splitDate) { process.stderr.write('Usage: --split-date YYYY-MM-DD [--out <path>]\n'); process.exit(2); }
     const root = process.cwd();
     const out = flag('--out') ?? join(root, 'data', 'lab', 'stage1-preregistration.json');
-    const universePath = join(root, '.claude', 'skills', 'analyst-actions', 'universe.txt');
+    const universePath = join(root, 'config', 'prophet_tradable_universe.txt');
     const frictionPath = join(root, 'config', 'friction.json');
     const universeText = existsSync(universePath) ? readFileSync(universePath, 'utf8') : '';
     const frictionText = existsSync(frictionPath) ? readFileSync(frictionPath, 'utf8') : '';
@@ -1084,7 +1084,9 @@ def _real_fetch(client):
 
 # in __main__/argparse: if args.frm and args.to:
 #     client = fmp_client.Client(api_key=os.environ["FMP_API_KEY"])
-#     rows = build_historical_table(load_universe(), args.frm, args.to, _real_fetch(client))
+#     from universe_builder import load_static_universe, DEFAULT_STATIC_PATH  # static floor only, NO FMP top-up
+#     tickers = load_static_universe(DEFAULT_STATIC_PATH)  # frozen, hashable, matches the prereg universe_hash
+#     rows = build_historical_table(tickers, args.frm, args.to, _real_fetch(client))
 #     out = Path("data/lab") / f"catalysts-{args.frm}-{args.to}.json"
 #     out.parent.mkdir(parents=True, exist_ok=True)
 #     out.write_text(json.dumps(rows, indent=2), encoding="utf-8")
