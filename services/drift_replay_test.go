@@ -362,3 +362,82 @@ func TestUniverseEarningsReporter_MergesAndSoftFails(t *testing.T) {
 		t.Fatalf("got %d reports, want 2: %+v", len(out), out)
 	}
 }
+
+func TestRunReplay_RecordsResolvedTiming(t *testing.T) {
+	cont := buildContinuationBars("CONT")
+	edate := cont[len(cont)-5].Timestamp
+	stub := &stubDriftBarFetcherSvc{bars: map[string][]*interfaces.Bar{"CONT": cont}}
+	// Reporter passes UNKNOWN timing ("") — the replay must infer it.
+	rep := &stubRangeReporter{reports: []RecentReport{{Ticker: "CONT", Date: edate, Timing: ""}}}
+	fr := StockFriction{PerShareSlippage: 0.02, StopGapThroughPct: 0.003, RegFeePerShare: 0.0001}
+
+	outcomes, cov := RunReplay(context.Background(), stub, rep, []string{"CONT"},
+		edate.AddDate(0, 0, -5), edate.AddDate(0, 0, 5), fr, stdExitCfg)
+
+	// buildContinuationBars is BMO-shaped → inferred "bmo".
+	if cov.TimingFill["bmo"] == 0 {
+		t.Errorf("TimingFill = %+v, want bmo>0 (inferred)", cov.TimingFill)
+	}
+	if cov.TimingFill[""] != 0 {
+		t.Errorf("TimingFill[\"\"] = %d, want 0 (no raw unknowns recorded)", cov.TimingFill[""])
+	}
+	var sawResolved bool
+	for _, o := range outcomes {
+		if o.Cohort == "deployed" {
+			sawResolved = true
+			if o.Timing != "bmo" {
+				t.Errorf("outcome.Timing = %q, want bmo", o.Timing)
+			}
+			if o.TimingSource != "inferred" {
+				t.Errorf("outcome.TimingSource = %q, want inferred", o.TimingSource)
+			}
+		}
+	}
+	if !sawResolved {
+		t.Fatalf("no deployed outcome; got %+v", outcomes)
+	}
+}
+
+func toT(cohort, timing, source string, ratio, gross, fr float64) TradeOutcome {
+	return TradeOutcome{Cohort: cohort, ExitReason: "target", Timing: timing, TimingSource: source,
+		TimingInferRatio: ratio, GrossReturnPct: gross, FrictionReturnPct: fr}
+}
+
+func TestAggregate_TimingBreakdownPerCohort(t *testing.T) {
+	out := []TradeOutcome{
+		toT("deployed", "bmo", "inferred", 4.0, 20, 19.9),
+		toT("deployed", "amc", "inferred", 1.2, -10, -10.3), // near-tie (ratio<1.5)
+		toT("deployed", "amc", "inferred_fallback", 0, 5, 4.9),
+		toT("control", "bmo", "inferred", 3.0, 20, 19.9),
+	}
+	r := Aggregate(out)
+	if r.DeployedTiming.BMO != 1 || r.DeployedTiming.AMC != 2 {
+		t.Errorf("deployed split = %+v, want bmo=1 amc=2", r.DeployedTiming)
+	}
+	if r.DeployedTiming.Fallback != 1 {
+		t.Errorf("deployed fallback = %d, want 1", r.DeployedTiming.Fallback)
+	}
+	if r.DeployedTiming.NearTies != 1 {
+		t.Errorf("deployed near-ties = %d, want 1 (the ratio=1.2 inferred entry)", r.DeployedTiming.NearTies)
+	}
+	// Ratio stats over the two MEASURED inferred entries (4.0, 1.2): min 1.2, max 4.0.
+	if r.DeployedTiming.RatioMin != 1.2 || r.DeployedTiming.RatioMax != 4.0 {
+		t.Errorf("ratio min/max = %v/%v, want 1.2/4.0", r.DeployedTiming.RatioMin, r.DeployedTiming.RatioMax)
+	}
+	if r.ControlTiming.BMO != 1 {
+		t.Errorf("control split = %+v, want bmo=1", r.ControlTiming)
+	}
+}
+
+func TestFindEntries_NeverEvaluatesBeforeEPlus1(t *testing.T) {
+	bars := buildContinuationBars("CONT")
+	eIdx := len(bars) - 5
+	edate := bars[eIdx].Timestamp.UTC().Format("2006-01-02")
+	dep, ctrl := findEntries("CONT", bars, edate, "bmo", 14)
+	// Any found entry's SignalIdx (evaluation day D) must be >= E+1; entry fills at D+1.
+	for _, er := range []EntryResult{dep, ctrl} {
+		if er.Found && er.SignalIdx <= eIdx {
+			t.Errorf("evaluated day %d <= earnings idx %d — window start regressed to E (lookahead risk)", er.SignalIdx, eIdx)
+		}
+	}
+}

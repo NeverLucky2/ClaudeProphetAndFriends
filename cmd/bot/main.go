@@ -435,6 +435,9 @@ func main() {
 	// earnings calendar is available — otherwise the candidates endpoint
 	// returns an "no earnings source configured" error in resp.Errors.
 	driftSignalSvc := services.NewDriftSignalService(dataService)
+	driftSignalSvc.SetInferTimingEnabled(cfg.EnableDriftInferTiming)
+	logger.WithField("mode", map[bool]string{true: "on", false: "off (legacy amc-default)"}[cfg.EnableDriftInferTiming]).
+		Info("Drift earnings-timing inference")
 	var driftRecentReporter services.RecentReporterFetcher
 	if earningsService != nil {
 		driftRecentReporter = earningsService

@@ -238,6 +238,9 @@ type TradeOutcome struct {
 	DaysAfterGap      int     `json:"days_after_gap"`
 	CompositeScore    float64 `json:"composite_score"`
 	Grade             string  `json:"grade"`
+	Timing            string  `json:"timing"`
+	TimingSource      string  `json:"timing_source"`
+	TimingInferRatio  float64 `json:"timing_infer_ratio"`
 	ExitReason        string  `json:"exit_reason"`
 	HoldingDays       int     `json:"holding_days"`
 	GrossReturnPct    float64 `json:"gross_return_pct"`
@@ -276,8 +279,10 @@ type Bucket struct {
 
 // ReplaySummary is the full aggregation.
 type ReplaySummary struct {
-	Deployed             CohortReport `json:"deployed"`
-	Control              CohortReport `json:"control"`
+	Deployed             CohortReport  `json:"deployed"`
+	Control              CohortReport  `json:"control"`
+	DeployedTiming       TimingBreakdown `json:"deployed_timing"`
+	ControlTiming        TimingBreakdown `json:"control_timing"`
 	MarginalEdgeGrossPct float64      `json:"marginal_edge_gross_pct"`
 	MarginalEdgeFricPct  float64      `json:"marginal_edge_friction_pct"`
 	ExtSpearman          float64      `json:"extension_spearman"`
@@ -409,6 +414,48 @@ var extBucketEdges = []struct {
 	{"[7+]", 7, math.Inf(1)},
 }
 
+// TimingBreakdown summarizes one cohort's resolved-timing composition and the
+// inference-confidence distribution over its MEASURED inferred entries. NearTies
+// (0 < ratio < 1.5) is descriptive context for risk #1, not a gate.
+type TimingBreakdown struct {
+	BMO         int     `json:"bmo"`
+	AMC         int     `json:"amc"`
+	Fallback    int     `json:"fallback"`
+	NearTies    int     `json:"near_ties"`
+	RatioMin    float64 `json:"ratio_min"`
+	RatioMedian float64 `json:"ratio_median"`
+	RatioMax    float64 `json:"ratio_max"`
+}
+
+func summarizeTiming(out []TradeOutcome) TimingBreakdown {
+	var tb TimingBreakdown
+	var ratios []float64
+	for _, o := range out {
+		switch o.Timing {
+		case "bmo":
+			tb.BMO++
+		case "amc":
+			tb.AMC++
+		}
+		if o.TimingSource == "inferred_fallback" {
+			tb.Fallback++
+		}
+		if o.TimingSource == "inferred" { // measured
+			ratios = append(ratios, o.TimingInferRatio)
+			if o.TimingInferRatio > 0 && o.TimingInferRatio < 1.5 {
+				tb.NearTies++
+			}
+		}
+	}
+	if len(ratios) > 0 {
+		sort.Float64s(ratios)
+		tb.RatioMin = roundTo2(ratios[0])
+		tb.RatioMax = roundTo2(ratios[len(ratios)-1])
+		tb.RatioMedian = roundTo2(ratios[len(ratios)/2])
+	}
+	return tb
+}
+
 // wilson returns the Wilson 95% CI (z=1.96) for a proportion.
 func wilson(wins, n float64) (lo, hi float64) {
 	if n == 0 {
@@ -484,6 +531,8 @@ func Aggregate(outcomes []TradeOutcome) ReplaySummary {
 		r.ExtSpearman = spearman(xs, ys)
 		r.ExtOLSSlope = olsSlope(xs, ys)
 	}
+	r.DeployedTiming = summarizeTiming(dep)
+	r.ControlTiming = summarizeTiming(ctrl)
 	return r
 }
 
@@ -503,7 +552,8 @@ type Coverage struct {
 	ControlEntries   int            `json:"control_entries"`
 	NonEntries       int            `json:"non_entries"`
 	NPeadEntries     int            `json:"n_pead_entries"`
-	TimingFill       map[string]int `json:"timing_fill"` // bmo|amc|"" → count
+	TimingFill      map[string]int `json:"timing_fill"` // bmo|amc → count (resolved)
+	TimingFallback  int            `json:"timing_fallback"`
 	PriceMin         float64        `json:"price_min"`
 	PriceMedian      float64        `json:"price_median"`
 	PriceMax         float64        `json:"price_max"`
@@ -544,7 +594,6 @@ func RunReplay(ctx context.Context, fetcher BarFetcher, earnings RangeReporterFe
 			continue
 		}
 		cov.InUniverse++
-		cov.TimingFill[r.Timing]++
 		bySym[sym] = append(bySym[sym], ev{r.Date, r.Timing})
 	}
 
@@ -583,7 +632,12 @@ func RunReplay(ctx context.Context, fetcher BarFetcher, earnings RangeReporterFe
 				cov.Dropped["earnings_not_in_bars"]++
 				continue
 			}
-			dep, ctrl := findEntries(sym, bars, edate, e.timing, driftReplayWindowCalDays)
+			res := resolveDriftTiming(bars, edate, e.timing, true) // always infer offline
+			cov.TimingFill[res.Timing]++
+			if res.Source == "inferred_fallback" {
+				cov.TimingFallback++
+			}
+			dep, ctrl := findEntries(sym, bars, edate, res.Timing, driftReplayWindowCalDays)
 			if !dep.Found && !ctrl.Found {
 				cov.NonEntries++
 				continue
@@ -607,6 +661,7 @@ func RunReplay(ctx context.Context, fetcher BarFetcher, earnings RangeReporterFe
 					DaysAfterGap: c.er.DaysAfterGap, CompositeScore: c.er.CompositeScore,
 					Grade: c.er.Grade, ExitReason: ex.Reason, HoldingDays: ex.HoldingDays,
 					GrossReturnPct: gross, FrictionReturnPct: fric,
+					Timing: res.Timing, TimingSource: res.Source, TimingInferRatio: res.Ratio,
 				})
 				if c.cohort == "deployed" {
 					cov.DeployedEntries++

@@ -122,6 +122,89 @@ func computeDriftGap(bars []*interfaces.Bar, earningsDate, timing string) DriftG
 	return g
 }
 
+// driftTimingRatioCap is the finite ceiling for the confidence ratio when the
+// losing-side gap is exactly flat (ratio would be +Inf). A finite cap keeps the
+// value JSON-serializable — encoding/json rejects Inf/NaN, and the ratio rides on
+// both DriftSignal (API/logs) and TradeOutcome (replay JSON sidecar).
+const driftTimingRatioCap = 999.0
+
+// driftTimingInference is the result of price-action timing inference.
+//   Regime   — "bmo" | "amc" (best effort even when not fully measured)
+//   Ratio    — winning/losing overnight-gap magnitude (>= 1); driftTimingRatioCap
+//              when the losing side is exactly flat; 0 when not two-sided-measured
+//   Measured — true ONLY when BOTH candidate gaps were computable from positive
+//              prices and at least one is non-zero.
+type driftTimingInference struct {
+	Regime   string
+	Ratio    float64
+	Measured bool
+}
+
+// inferDriftTiming infers BMO vs AMC from price action. Earnings release outside
+// market hours, so the reaction is an overnight gap: BMO => close[E-1]→open[E];
+// AMC => close[E]→open[E+1]. The larger-magnitude gap wins; an exact tie keeps AMC
+// (the historical default) and shows Ratio==1. All FOUR prices in the two ratios
+// must be positive (numerators too) — a zero open would yield |0/close-1|=1.0, a
+// spurious 100% gap that would wrongly win. Bars are oldest-first. Never panics.
+func inferDriftTiming(bars []*interfaces.Bar, earningsDate string) driftTimingInference {
+	idx := findBarIndexByDate(bars, earningsDate)
+	if idx < 0 {
+		return driftTimingInference{Regime: "amc"}
+	}
+	haveBMO := idx >= 1 && bars[idx-1].Close > 0 && bars[idx].Open > 0
+	haveAMC := idx+1 < len(bars) && bars[idx].Close > 0 && bars[idx+1].Open > 0
+	switch {
+	case haveBMO && haveAMC:
+		gBMO := math.Abs(bars[idx].Open/bars[idx-1].Close - 1.0)
+		gAMC := math.Abs(bars[idx+1].Open/bars[idx].Close - 1.0)
+		regime, hi, lo := "amc", gAMC, gBMO
+		if gBMO > gAMC { // strict: exact tie resolves AMC
+			regime, hi, lo = "bmo", gBMO, gAMC
+		}
+		switch {
+		case lo > 0:
+			return driftTimingInference{Regime: regime, Ratio: hi / lo, Measured: true}
+		case hi > 0:
+			return driftTimingInference{Regime: regime, Ratio: driftTimingRatioCap, Measured: true}
+		default: // both gaps exactly flat — no reaction either side
+			return driftTimingInference{Regime: "amc"}
+		}
+	case haveBMO:
+		return driftTimingInference{Regime: "bmo"} // one-sided, not measured
+	default:
+		return driftTimingInference{Regime: "amc"}
+	}
+}
+
+// DriftTimingResolution is the resolved regime plus provenance and confidence.
+// Source ∈ {"vendor","inferred","inferred_fallback","unknown"}. "inferred_fallback"
+// means inference ran but could not measure both gaps (edge/degenerate/one-sided),
+// so the regime is a best-effort fallback — NOT a positive determination.
+type DriftTimingResolution struct {
+	Timing string
+	Source string
+	Ratio  float64
+}
+
+// resolveDriftTiming maps a (possibly empty) vendor timing to a concrete regime
+// plus provenance. When inference is disabled and timing is unknown it returns
+// ("", "unknown", 0) — preserving the legacy AMC-default behavior downstream.
+func resolveDriftTiming(bars []*interfaces.Bar, earningsDate, vendorTiming string, inferEnabled bool) DriftTimingResolution {
+	t := strings.ToLower(strings.TrimSpace(vendorTiming))
+	if t == "bmo" || t == "amc" {
+		return DriftTimingResolution{Timing: t, Source: "vendor"}
+	}
+	if !inferEnabled {
+		return DriftTimingResolution{Timing: t, Source: "unknown"}
+	}
+	inf := inferDriftTiming(bars, earningsDate)
+	src := "inferred"
+	if !inf.Measured {
+		src = "inferred_fallback"
+	}
+	return DriftTimingResolution{Timing: inf.Regime, Source: src, Ratio: inf.Ratio}
+}
+
 // roundTo2 rounds to 2 decimal places using math.Round (banker-safe).
 func roundTo2(v float64) float64 {
 	return math.Round(v*100) / 100
@@ -639,32 +722,43 @@ func analyzeDriftPEAD(weeklies []DriftWeeklyCandle, earningsDate string, watchWe
 
 // DriftSignal is the full per-ticker drift signal payload.
 type DriftSignal struct {
-	Ticker         string            `json:"ticker"`
-	AsOf           string            `json:"as_of"`
-	BarsCount      int               `json:"bars_count"`
-	LastClose      float64           `json:"last_close"`
-	EarningsDate   string            `json:"earnings_date"`
-	EarningsTiming string            `json:"earnings_timing"`
-	Gap            DriftGap          `json:"gap"`
-	Trend          DriftTrend        `json:"pre_earnings_trend"`
-	VolRatio       DriftVolRatio     `json:"volume_trend"`
-	MA200          DriftMAPosition   `json:"ma200_position"`
-	MA50           DriftMAPosition   `json:"ma50_position"`
-	Composite      DriftComposite    `json:"composite"`
-	PEAD           DriftPEAD         `json:"pead"`
-	Continuation   DriftContinuation `json:"continuation"`
-	SignalVersion  string            `json:"signal_version"`
+	Ticker           string            `json:"ticker"`
+	AsOf             string            `json:"as_of"`
+	BarsCount        int               `json:"bars_count"`
+	LastClose        float64           `json:"last_close"`
+	EarningsDate     string            `json:"earnings_date"`
+	EarningsTiming   string            `json:"earnings_timing"`
+	TimingSource     string            `json:"timing_source,omitempty"`
+	TimingInferRatio float64           `json:"timing_infer_ratio,omitempty"`
+	Gap              DriftGap          `json:"gap"`
+	Trend            DriftTrend        `json:"pre_earnings_trend"`
+	VolRatio         DriftVolRatio     `json:"volume_trend"`
+	MA200            DriftMAPosition   `json:"ma200_position"`
+	MA50             DriftMAPosition   `json:"ma50_position"`
+	Composite        DriftComposite    `json:"composite"`
+	PEAD             DriftPEAD         `json:"pead"`
+	Continuation     DriftContinuation `json:"continuation"`
+	SignalVersion    string            `json:"signal_version"`
 }
 
 // DriftSignalService is the per-ticker compute service.
 type DriftSignalService struct {
-	dataSvc BarFetcher
+	dataSvc            BarFetcher
+	inferTimingEnabled bool
 }
 
 // NewDriftSignalService creates a DriftSignalService backed by the given
-// bar-fetching data source. AlpacaDataService implements BarFetcher.
+// bar-fetching data source. Timing inference defaults ON (DRIFT_INFER_TIMING);
+// cmd/bot overrides it from config.
 func NewDriftSignalService(dataSvc BarFetcher) *DriftSignalService {
-	return &DriftSignalService{dataSvc: dataSvc}
+	return &DriftSignalService{dataSvc: dataSvc, inferTimingEnabled: true}
+}
+
+// SetInferTimingEnabled toggles vendor-free BMO/AMC inference for unknown timing.
+// Default true. When false, unknown timing flows through as "" (legacy AMC-default
+// downstream) — a clean kill switch.
+func (s *DriftSignalService) SetInferTimingEnabled(enabled bool) {
+	s.inferTimingEnabled = enabled
 }
 
 // GetSignal fetches bars for symbol and computes the full signal.
@@ -680,7 +774,11 @@ func (s *DriftSignalService) GetSignal(ctx context.Context, symbol, earningsDate
 	if len(bars) < driftMinBars {
 		return nil, ErrInsufficientDriftHistory
 	}
-	return ComputeDriftSignal(symbol, bars, earningsDate, timing), nil
+	res := resolveDriftTiming(bars, earningsDate, timing, s.inferTimingEnabled)
+	sig := ComputeDriftSignal(symbol, bars, earningsDate, res.Timing)
+	sig.TimingSource = res.Source
+	sig.TimingInferRatio = res.Ratio
+	return sig, nil
 }
 
 // ComputeDriftSignal is the pure-function form. Bars are oldest-first.
@@ -738,14 +836,14 @@ type DriftCandidatesResponse struct {
 // DriftCandidatesService aggregates recent reports, computes per-ticker
 // signals, filters by entry criteria, and ranks by composite descending.
 type DriftCandidatesService struct {
-	signalSvc       *DriftSignalService
-	earnings        RecentReporterFetcher
-	universe        map[string]bool
-	logger          *logrus.Logger
-	mu              sync.RWMutex
-	cached          *DriftCandidatesResponse
-	cachedAt        time.Time
-	refreshInterval time.Duration
+	signalSvc           *DriftSignalService
+	earnings            RecentReporterFetcher
+	universe            map[string]bool
+	logger              *logrus.Logger
+	mu                  sync.RWMutex
+	cached              *DriftCandidatesResponse
+	cachedAt            time.Time
+	refreshInterval     time.Duration
 	continuationEnabled bool
 }
 
@@ -847,6 +945,7 @@ func (s *DriftCandidatesService) compute(ctx context.Context, now time.Time) *Dr
 
 	var latestAsOf string
 	var inUniverse, fetchErrors, scoredOK, droppedGap, droppedMA, droppedGrade, droppedNotActionable, actionable int
+	var inferredBMO, inferredAMC, inferredFallback int
 
 	for _, r := range reports {
 		if !s.universe[strings.ToUpper(r.Ticker)] {
@@ -865,6 +964,16 @@ func (s *DriftCandidatesService) compute(ctx context.Context, now time.Time) *Dr
 			continue
 		}
 		scoredOK++
+		switch sig.TimingSource {
+		case "inferred":
+			if sig.EarningsTiming == "bmo" {
+				inferredBMO++
+			} else {
+				inferredAMC++
+			}
+		case "inferred_fallback":
+			inferredFallback++
+		}
 
 		// Base entry gates (always applied; mirror TRADING_RULES_DRIFT.md).
 		if sig.Gap.GapPct < 3.0 {
@@ -888,17 +997,19 @@ func (s *DriftCandidatesService) compute(ctx context.Context, now time.Time) *Dr
 		// outcomes offline.
 		if cont {
 			s.logger.WithFields(logrus.Fields{
-				"ticker":          sig.Ticker,
-				"earnings_date":   sig.EarningsDate,
-				"timing":          sig.EarningsTiming,
-				"last_close":      sig.LastClose,
-				"gap_pct":         sig.Gap.GapPct,
-				"extension_pct":   sig.Continuation.ExtensionPct,
-				"days_after_gap":  sig.Continuation.DaysAfterGap,
-				"composite_score": sig.Composite.CompositeScore,
-				"grade":           sig.Composite.Grade,
-				"pead_stage":      sig.PEAD.Stage,
-				"mode":            continuationMode(enforce),
+				"ticker":             sig.Ticker,
+				"earnings_date":      sig.EarningsDate,
+				"timing":             sig.EarningsTiming,
+				"timing_source":      sig.TimingSource,
+				"timing_infer_ratio": sig.TimingInferRatio,
+				"last_close":         sig.LastClose,
+				"gap_pct":            sig.Gap.GapPct,
+				"extension_pct":      sig.Continuation.ExtensionPct,
+				"days_after_gap":     sig.Continuation.DaysAfterGap,
+				"composite_score":    sig.Composite.CompositeScore,
+				"grade":              sig.Composite.Grade,
+				"pead_stage":         sig.PEAD.Stage,
+				"mode":               continuationMode(enforce),
 			}).Info("drift: would-be continuation entry")
 		}
 
@@ -945,6 +1056,9 @@ func (s *DriftCandidatesService) compute(ctx context.Context, now time.Time) *Dr
 		"dropped_not_actionable": droppedNotActionable,
 		"fetch_errors":           fetchErrors,
 		"actionable_count":       actionable,
+		"inferred_bmo":           inferredBMO,
+		"inferred_amc":           inferredAMC,
+		"inferred_fallback":      inferredFallback,
 		"candidate_count":        resp.Count,
 	}).Info("drift: candidate scan summary")
 

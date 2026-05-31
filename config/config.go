@@ -59,6 +59,7 @@ type Config struct {
 	// logs would-be continuation entries but the agent does not act). See the
 	// 2026-05-29 spec.
 	EnableDriftContinuation bool
+	EnableDriftInferTiming  bool
 
 	// Prophet tradable-universe gate + options spread gate. Both flag-gated,
 	// default OFF (observe-first). See the 2026-05-24 spec.
@@ -130,6 +131,7 @@ func Load() error {
 
 		EnableAgentUniverseGate: getEnvOrDefault("ENABLE_AGENT_UNIVERSE_GATE", "false") == "true",
 		EnableDriftContinuation: getEnvOrDefault("ENABLE_DRIFT_CONTINUATION", "false") == "true",
+		EnableDriftInferTiming:  getEnvOrDefault("DRIFT_INFER_TIMING", "true") != "false",
 
 		EnableUniverseGate:         getEnvOrDefault("ENABLE_PROPHET_UNIVERSE_GATE", "false") == "true",
 		TradableUniversePath:       getEnvOrDefault("PROPHET_TRADABLE_UNIVERSE_PATH", "./config/prophet_tradable_universe.txt"),

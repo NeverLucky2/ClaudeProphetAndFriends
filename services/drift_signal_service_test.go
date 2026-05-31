@@ -901,3 +901,229 @@ func TestDriftCandidates_ShadowMode_PreservesFilterZeroesField(t *testing.T) {
 		}
 	}
 }
+
+// timingBars builds a tiny oldest-first series with earnings at index `eIdx`.
+// Each row is one Mon–Fri bar via makeMonFriBars.
+func timingBars(rows []driftBarRow) []*interfaces.Bar { return makeMonFriBars(rows) }
+
+func TestInferDriftTiming_BMODominant(t *testing.T) {
+	// E at idx 3. close[2]=100 → open[3]=106 (gBMO=6%). close[3]=106 → open[4]=106.2 (gAMC≈0.19%).
+	bars := timingBars([]driftBarRow{
+		{Open: 99, High: 100, Low: 98, Close: 100, Vol: 1},   // 0
+		{Open: 100, High: 101, Low: 99, Close: 100, Vol: 1},  // 1
+		{Open: 100, High: 101, Low: 99, Close: 100, Vol: 1},  // 2  (E-1 close=100)
+		{Open: 106, High: 107, Low: 105, Close: 106, Vol: 1}, // 3  (E: open 106)
+		{Open: 106.2, High: 107, Low: 106, Close: 106.5, Vol: 1}, // 4 (E+1)
+		{Open: 106.5, High: 107, Low: 106, Close: 106.5, Vol: 1}, // 5
+	})
+	edate := bars[3].Timestamp.UTC().Format("2006-01-02")
+	got := inferDriftTiming(bars, edate)
+	if got.Regime != "bmo" || !got.Measured {
+		t.Fatalf("got %+v, want bmo/measured", got)
+	}
+	if got.Ratio < 5 {
+		t.Errorf("ratio = %v, want >> 1 (6%% vs ~0.19%%)", got.Ratio)
+	}
+}
+
+func TestInferDriftTiming_AMCDominant(t *testing.T) {
+	// Flat into E, big gap AFTER E: close[3]=100 → open[4]=106 (gAMC=6%).
+	bars := timingBars([]driftBarRow{
+		{Open: 99, High: 100, Low: 98, Close: 100, Vol: 1},
+		{Open: 100, High: 101, Low: 99, Close: 100, Vol: 1},
+		{Open: 100, High: 101, Low: 99, Close: 100, Vol: 1},  // E-1
+		{Open: 100, High: 101, Low: 99, Close: 100, Vol: 1},  // E (no morning gap)
+		{Open: 106, High: 107, Low: 105, Close: 106, Vol: 1}, // E+1 (gap up)
+		{Open: 106, High: 107, Low: 105, Close: 106, Vol: 1},
+	})
+	edate := bars[3].Timestamp.UTC().Format("2006-01-02")
+	got := inferDriftTiming(bars, edate)
+	if got.Regime != "amc" || !got.Measured {
+		t.Fatalf("got %+v, want amc/measured", got)
+	}
+}
+
+func TestInferDriftTiming_BothLargeFollowThroughExceeds_MislabelsAMC(t *testing.T) {
+	// True BMO reaction +4% (close[2]=100→open[3]=104) but day-after +5%
+	// (close[3]=104→open[4]=109.2). gAMC > gBMO → picks amc; documents risk #1.
+	bars := timingBars([]driftBarRow{
+		{Open: 99, High: 100, Low: 98, Close: 100, Vol: 1},
+		{Open: 100, High: 101, Low: 99, Close: 100, Vol: 1},
+		{Open: 100, High: 101, Low: 99, Close: 100, Vol: 1},   // E-1 close=100
+		{Open: 104, High: 105, Low: 103, Close: 104, Vol: 1},  // E open=104 (gBMO=4%)
+		{Open: 109.2, High: 110, Low: 108, Close: 109, Vol: 1},// E+1 open=109.2 (gAMC=5%)
+		{Open: 109, High: 110, Low: 108, Close: 109, Vol: 1},
+	})
+	edate := bars[3].Timestamp.UTC().Format("2006-01-02")
+	got := inferDriftTiming(bars, edate)
+	if got.Regime != "amc" {
+		t.Fatalf("got %+v, want amc (follow-through exceeded reaction)", got)
+	}
+	if got.Ratio > 2 {
+		t.Errorf("ratio = %v, want near 1 (close call surfaces the exposure)", got.Ratio)
+	}
+}
+
+func TestInferDriftTiming_ExactTieResolvesAMC(t *testing.T) {
+	// gBMO == gAMC == 5%. Strict ">" keeps amc; ratio == 1.
+	bars := timingBars([]driftBarRow{
+		{Open: 100, High: 101, Low: 99, Close: 100, Vol: 1},
+		{Open: 100, High: 101, Low: 99, Close: 100, Vol: 1},
+		{Open: 100, High: 101, Low: 99, Close: 100, Vol: 1},  // E-1 close=100
+		{Open: 105, High: 106, Low: 104, Close: 100, Vol: 1}, // E open=105 (gBMO=5%), close back to 100
+		{Open: 105, High: 106, Low: 104, Close: 105, Vol: 1}, // E+1 open=105 (gAMC=5%)
+		{Open: 105, High: 106, Low: 104, Close: 105, Vol: 1},
+	})
+	edate := bars[3].Timestamp.UTC().Format("2006-01-02")
+	got := inferDriftTiming(bars, edate)
+	if got.Regime != "amc" || !got.Measured {
+		t.Fatalf("got %+v, want amc/measured", got)
+	}
+	if math.Abs(got.Ratio-1.0) > 1e-9 {
+		t.Errorf("ratio = %v, want 1.0 (exact tie)", got.Ratio)
+	}
+}
+
+func TestInferDriftTiming_ZeroOpenNumeratorGuard(t *testing.T) {
+	// open[E]==0 must NOT yield a spurious |0/100-1|=1.0 (100%) BMO gap. BMO side
+	// is unmeasurable → fall back (amc here, since gAMC is measurable).
+	bars := timingBars([]driftBarRow{
+		{Open: 100, High: 101, Low: 99, Close: 100, Vol: 1},
+		{Open: 100, High: 101, Low: 99, Close: 100, Vol: 1},
+		{Open: 100, High: 101, Low: 99, Close: 100, Vol: 1},  // E-1
+		{Open: 0, High: 101, Low: 0, Close: 100, Vol: 1},     // E open==0 (degenerate)
+		{Open: 103, High: 104, Low: 102, Close: 103, Vol: 1}, // E+1
+		{Open: 103, High: 104, Low: 102, Close: 103, Vol: 1},
+	})
+	edate := bars[3].Timestamp.UTC().Format("2006-01-02")
+	got := inferDriftTiming(bars, edate)
+	if got.Regime != "amc" {
+		t.Fatalf("got %+v, want amc (BMO side unmeasurable, not a spurious 100%% gap)", got)
+	}
+}
+
+func TestInferDriftTiming_EdgeFallbacks(t *testing.T) {
+	bars := timingBars([]driftBarRow{
+		{Open: 100, High: 101, Low: 99, Close: 100, Vol: 1}, // 0 (E at idx 0: no E-1)
+		{Open: 100, High: 101, Low: 99, Close: 100, Vol: 1},
+		{Open: 100, High: 101, Low: 99, Close: 100, Vol: 1},
+	})
+	if got := inferDriftTiming(bars, bars[0].Timestamp.UTC().Format("2006-01-02")); got.Regime != "amc" || got.Measured {
+		t.Errorf("idx==0: got %+v, want amc/!measured", got)
+	}
+	// E at last index: no E+1 → only BMO measurable → bmo/!measured.
+	last := len(bars) - 1
+	if got := inferDriftTiming(bars, bars[last].Timestamp.UTC().Format("2006-01-02")); got.Regime != "bmo" || got.Measured {
+		t.Errorf("idx==last: got %+v, want bmo/!measured", got)
+	}
+	// earnings date not in bars.
+	if got := inferDriftTiming(bars, "1990-01-01"); got.Regime != "amc" || got.Measured {
+		t.Errorf("not-in-bars: got %+v, want amc/!measured", got)
+	}
+}
+
+func TestResolveDriftTiming_Provenance(t *testing.T) {
+	bars := timingBars([]driftBarRow{
+		{Open: 100, High: 101, Low: 99, Close: 100, Vol: 1},
+		{Open: 100, High: 101, Low: 99, Close: 100, Vol: 1},
+		{Open: 100, High: 101, Low: 99, Close: 100, Vol: 1},  // E-1
+		{Open: 106, High: 107, Low: 105, Close: 106, Vol: 1}, // E (gBMO=6%)
+		{Open: 106.2, High: 107, Low: 106, Close: 106.5, Vol: 1},
+		{Open: 106.5, High: 107, Low: 106, Close: 106.5, Vol: 1},
+	})
+	edate := bars[3].Timestamp.UTC().Format("2006-01-02")
+
+	if r := resolveDriftTiming(bars, edate, "BMO", true); r.Timing != "bmo" || r.Source != "vendor" {
+		t.Errorf("vendor: got %+v, want bmo/vendor", r)
+	}
+	if r := resolveDriftTiming(bars, edate, "", true); r.Timing != "bmo" || r.Source != "inferred" || r.Ratio <= 1 {
+		t.Errorf("inferred: got %+v, want bmo/inferred/ratio>1", r)
+	}
+	if r := resolveDriftTiming(bars, edate, "", false); r.Timing != "" || r.Source != "unknown" {
+		t.Errorf("disabled: got %+v, want \"\"/unknown", r)
+	}
+	// Fallback: earnings on last bar (no E+1) → inferred_fallback.
+	last := bars[len(bars)-1].Timestamp.UTC().Format("2006-01-02")
+	if r := resolveDriftTiming(bars, last, "", true); r.Source != "inferred_fallback" {
+		t.Errorf("fallback: got %+v, want inferred_fallback", r)
+	}
+}
+
+// buildBMOGapBars builds a 220-bar grade-A/B series with a BMO +6% gap at idx 215
+// (the morning open gaps; the day-after overnight is small), so inference resolves
+// "bmo". Mirrors TestDriftSignalService_ComputeSignal_FullPipeline's construction.
+func buildBMOGapBars() ([]*interfaces.Bar, int) {
+	rows := make([]driftBarRow, 220)
+	for i := 0; i < 200; i++ {
+		rows[i] = driftBarRow{Open: 100, High: 100.5, Low: 99.5, Close: 100, Vol: 100_000}
+	}
+	for i := 200; i < 215; i++ {
+		c := 100 + 0.4*float64(i-199)
+		rows[i] = driftBarRow{Open: c - 0.2, High: c + 0.2, Low: c - 0.3, Close: c, Vol: 100_000}
+	}
+	eIdx := 215
+	prev := rows[eIdx-1].Close
+	rows[eIdx] = driftBarRow{Open: prev * 1.06, High: prev*1.06 + 1, Low: prev * 1.05, Close: prev*1.06 + 0.5, Vol: 200_000}
+	for i := eIdx + 1; i < 220; i++ {
+		c := rows[i-1].Close + 0.3
+		rows[i] = driftBarRow{Open: c - 0.1, High: c + 0.5, Low: c - 0.2, Close: c, Vol: 200_000}
+	}
+	return makeMonFriBars(rows), eIdx
+}
+
+func TestGetSignal_InfersUnknownTimingWhenEnabled(t *testing.T) {
+	bars, eIdx := buildBMOGapBars()
+	svc := NewDriftSignalService(&stubDriftBarFetcherSvc{bars: map[string][]*interfaces.Bar{"TEST": bars}})
+	svc.SetInferTimingEnabled(true) // default ON; explicit for the test
+	edate := bars[eIdx].Timestamp.Format("2006-01-02")
+
+	sig, err := svc.GetSignal(context.Background(), "TEST", edate, "") // unknown timing
+	if err != nil {
+		t.Fatalf("GetSignal err = %v", err)
+	}
+	if sig.TimingSource != "inferred" {
+		t.Errorf("TimingSource = %q, want inferred", sig.TimingSource)
+	}
+	if sig.EarningsTiming != "bmo" {
+		t.Errorf("EarningsTiming = %q, want bmo (resolved)", sig.EarningsTiming)
+	}
+	if sig.TimingInferRatio <= 1 {
+		t.Errorf("TimingInferRatio = %v, want > 1", sig.TimingInferRatio)
+	}
+	if sig.Gap.Score < 70 {
+		t.Errorf("gap score = %v, want ≥70 (6%% BMO gap seen)", sig.Gap.Score)
+	}
+}
+
+func TestGetSignal_DisabledKeepsLegacyAMCDefault(t *testing.T) {
+	bars, eIdx := buildBMOGapBars()
+	svc := NewDriftSignalService(&stubDriftBarFetcherSvc{bars: map[string][]*interfaces.Bar{"TEST": bars}})
+	svc.SetInferTimingEnabled(false)
+	edate := bars[eIdx].Timestamp.Format("2006-01-02")
+
+	sig, err := svc.GetSignal(context.Background(), "TEST", edate, "")
+	if err != nil {
+		t.Fatalf("GetSignal err = %v", err)
+	}
+	if sig.TimingSource != "unknown" {
+		t.Errorf("TimingSource = %q, want unknown (inference off)", sig.TimingSource)
+	}
+	if sig.EarningsTiming != "" {
+		t.Errorf("EarningsTiming = %q, want \"\" (legacy AMC-default downstream)", sig.EarningsTiming)
+	}
+	if sig.Gap.Score >= 70 {
+		t.Errorf("gap score = %v, want < 70 (AMC-default misses the BMO gap)", sig.Gap.Score)
+	}
+}
+
+func TestGetSignal_VendorTimingRespected(t *testing.T) {
+	bars, eIdx := buildBMOGapBars()
+	svc := NewDriftSignalService(&stubDriftBarFetcherSvc{bars: map[string][]*interfaces.Bar{"TEST": bars}})
+	sig, err := svc.GetSignal(context.Background(), "TEST", bars[eIdx].Timestamp.Format("2006-01-02"), "bmo")
+	if err != nil {
+		t.Fatalf("GetSignal err = %v", err)
+	}
+	if sig.TimingSource != "vendor" || sig.EarningsTiming != "bmo" {
+		t.Errorf("got source=%q timing=%q, want vendor/bmo", sig.TimingSource, sig.EarningsTiming)
+	}
+}

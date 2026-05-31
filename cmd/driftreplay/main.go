@@ -102,7 +102,8 @@ func renderMarkdown(from, to time.Time, fr services.StockFriction, cov services.
 	fmt.Fprintf(&b, "- events enumerated: %d | in-universe: %d | bars OK: %d\n", cov.EventsEnumerated, cov.InUniverse, cov.BarsOK)
 	fmt.Fprintf(&b, "- deployed entries: %d | control entries: %d | non-entries: %d | pead entries: %d\n",
 		cov.DeployedEntries, cov.ControlEntries, cov.NonEntries, cov.NPeadEntries)
-	fmt.Fprintf(&b, "- timing fill: bmo=%d amc=%d unknown=%d\n", cov.TimingFill["bmo"], cov.TimingFill["amc"], cov.TimingFill[""])
+	fmt.Fprintf(&b, "- timing (inferred): bmo=%d amc=%d | fallback=%d unknown=%d\n",
+		cov.TimingFill["bmo"], cov.TimingFill["amc"], cov.TimingFallback, cov.TimingFill[""])
 	fmt.Fprintf(&b, "- entry price min/median/max: %.2f / %.2f / %.2f\n", cov.PriceMin, cov.PriceMedian, cov.PriceMax)
 	fmt.Fprintf(&b, "- dropped: %v\n\n", cov.Dropped)
 
@@ -125,6 +126,20 @@ func renderMarkdown(from, to time.Time, fr services.StockFriction, cov services.
 	writeCohort("Control (base gates only)", s.Control)
 	fmt.Fprintf(&b, "**Marginal edge (deployed − control):** gross %.2f%% | friction %.2f%%\n\n",
 		s.MarginalEdgeGrossPct, s.MarginalEdgeFricPct)
+
+	tline := func(name string, n int, tb services.TimingBreakdown) {
+		fmt.Fprintf(&b, "| %s | %d | %d | %d | %d | %d | %.2f / %.2f / %.2f |\n",
+			name, n, tb.BMO, tb.AMC, tb.Fallback, tb.NearTies, tb.RatioMin, tb.RatioMedian, tb.RatioMax)
+	}
+	fmt.Fprintf(&b, "## Timing composition (clean read — read BEFORE expectancy)\n\n")
+	fmt.Fprintf(&b, "Inferred BMO/AMC split per cohort + inference confidence. A large change in `n` or\n")
+	fmt.Fprintf(&b, "in the inferred-BMO count vs the prior AMC-default run is itself a headline finding.\n\n")
+	fmt.Fprintf(&b, "| cohort | n | bmo | amc | fallback | near-ties (<1.5) | ratio min/med/max |\n")
+	fmt.Fprintf(&b, "|---|---|---|---|---|---|---|\n")
+	tline("deployed", s.Deployed.Friction.N, s.DeployedTiming)
+	tline("control", s.Control.Friction.N, s.ControlTiming)
+	fmt.Fprintf(&b, "\n_Inferred-AMC entries sitting on a large BMO-side gap (low ratio) are the suspicious\n")
+	fmt.Fprintf(&b, "BMO→AMC mislabels (risk #1); fallback entries kept the legacy AMC-default (risk #4)._\n\n")
 
 	fmt.Fprintf(&b, "## Anti-chase (extension_pct vs friction-adjusted return, deployed cohort)\n\n")
 	fmt.Fprintf(&b, "- Spearman ρ = %.2f | OLS slope = %.2f (n=%d)\n", s.ExtSpearman, s.ExtOLSSlope, s.Deployed.Friction.N)
