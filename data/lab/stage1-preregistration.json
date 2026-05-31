@@ -1,0 +1,70 @@
+{
+  "preregistration_version": "1.1",
+  "created_utc": "2026-05-31T23:38:12.065Z",
+  "horizon_sessions": 3,
+  "entry": "open[d+1]",
+  "exit": "close[d+3]",
+  "universe_file": "config/prophet_tradable_universe.txt",
+  "universe_hash": "fc0474c3",
+  "signal": {
+    "trigger": "classify_catalyst_strict (stage1_catalyst_trigger.py)",
+    "data_source": "alpaca_v1beta1_news",
+    "sentiment_source": "keyword_polarity_v1",
+    "price_state": "close>SMA20 & ret5d>0 => bull; mirror => bear; else no-fire",
+    "fire_rule": "sentiment_sign == price_state_sign != 0; s = that sign"
+  },
+  "null": {
+    "HR0_floor": 0.55,
+    "HR0_rule": "max(0.55, derived_breakeven_train)",
+    "derived_breakeven": "MC stylized 3d ATM call, TRAIN-only, upward-only",
+    "HR0_final": 0.55
+  },
+  "power": {
+    "alpha": 0.05,
+    "sided": "one",
+    "HR1_rule": "HR0+0.08",
+    "HR1_at_floor": 0.63,
+    "power": 0.8,
+    "required_independent_n_per_split": 235
+  },
+  "variants": {
+    "k": 1,
+    "declared": [
+      "keyword_polarity_v1"
+    ],
+    "rule_abandon": "peeking-then-abandoning does NOT reduce k",
+    "rule_model_variant": "must verify no training exposure to holdout period"
+  },
+  "split": {
+    "scheme": "chronological_50_50",
+    "train_pct": 0.5,
+    "holdout_pct": 0.5,
+    "split_date": "2024-09-25"
+  },
+  "thinning": "per-ticker, keep firings >= 3 sessions apart (greedy earliest-first)",
+  "bootstrap": {
+    "method": "date_block",
+    "block_sessions": 10,
+    "iterations": 10000,
+    "seed": 1234,
+    "require": "p5 HR > HR0_final",
+    "residual_note": "long-horizon clustering uncaptured; p slightly optimistic"
+  },
+  "verdict": {
+    "PASS": "binom p<alpha/k AND bootstrap_p5>HR0_final AND n>=required",
+    "FAIL": "binom not rejected at power",
+    "UNDERPOWERED": "achievable n < required n"
+  },
+  "friction_config_hash": "57954e8c",
+  "pipeline": {
+    "data_source": "alpaca_v1beta1_news",
+    "trigger_name": "classify_catalyst_strict (stage1_catalyst_trigger.py)",
+    "trigger_code_hash": "41de42ce",
+    "catalyst_table": "data/lab/catalysts-2022-2026.json#a08610ba",
+    "firings_file": "data/lab/firings.json#26970728",
+    "window": "2022-01-01..2026-05-31",
+    "derived_breakeven_applied": false,
+    "hr0_final_note": "floor 0.55 used; derived_breakeven_train bump NOT computed (no tooling). It only raises HR0, so a FAIL is robust; revisit only if the holdout is a borderline PASS near the floor."
+  },
+  "artifact_hash": "555fe72b"
+}

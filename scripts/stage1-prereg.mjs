@@ -22,25 +22,26 @@ function stableStringify(value) {
   return JSON.stringify(value);
 }
 
-export function buildPreregArtifact({ universeText, frictionText, splitDate, createdUtc }) {
+export function buildPreregArtifact({ universeText, frictionText, splitDate, createdUtc, pipeline = null, hr0Final = null }) {
   const HR0_floor = 0.55;
   const HR1 = HR0_floor + 0.08;
   const requiredN = binomialPowerN(HR0_floor, HR1, 0.05, 0.80); // 235 at the floor
   const artifact = {
-    preregistration_version: '1.0',
+    preregistration_version: '1.1',
     created_utc: createdUtc ?? new Date().toISOString(),
     horizon_sessions: 3,
     entry: 'open[d+1]', exit: 'close[d+3]',
     universe_file: 'config/prophet_tradable_universe.txt',
     universe_hash: sha256short(universeText),
     signal: {
-      trigger: 'catalyst flag (ma|earnings) on (ticker,d), news <= d close',
+      trigger: pipeline?.trigger_name ?? 'catalyst flag (ma|earnings) on (ticker,d), news <= d close',
+      data_source: pipeline?.data_source ?? 'unspecified',
       sentiment_source: 'keyword_polarity_v1',
       price_state: 'close>SMA20 & ret5d>0 => bull; mirror => bear; else no-fire',
       fire_rule: 'sentiment_sign == price_state_sign != 0; s = that sign',
     },
     null: { HR0_floor, HR0_rule: 'max(0.55, derived_breakeven_train)',
-      derived_breakeven: 'MC stylized 3d ATM call, TRAIN-only, upward-only', HR0_final: null },
+      derived_breakeven: 'MC stylized 3d ATM call, TRAIN-only, upward-only', HR0_final: hr0Final },
     power: { alpha: 0.05, sided: 'one', HR1_rule: 'HR0+0.08', HR1_at_floor: HR1, power: 0.80,
       required_independent_n_per_split: requiredN },
     variants: { k: 1, declared: ['keyword_polarity_v1'],
@@ -53,6 +54,7 @@ export function buildPreregArtifact({ universeText, frictionText, splitDate, cre
     verdict: { PASS: 'binom p<alpha/k AND bootstrap_p5>HR0_final AND n>=required',
       FAIL: 'binom not rejected at power', UNDERPOWERED: 'achievable n < required n' },
     friction_config_hash: sha256short(frictionText),
+    pipeline,
   };
   artifact.artifact_hash = sha256short(stableStringify(artifact));
   return artifact;
@@ -79,7 +81,7 @@ export function writePrereg(artifact, outPath) {
     const args = process.argv.slice(2);
     const flag = (n) => { const i = args.indexOf(n); return i === -1 ? undefined : args[i + 1]; };
     const splitDate = flag('--split-date');
-    if (!splitDate) { process.stderr.write('Usage: --split-date YYYY-MM-DD [--out <path>]\n'); process.exit(2); }
+    if (!splitDate) { process.stderr.write('Usage: --split-date YYYY-MM-DD [--catalysts <path>] [--firings <path>] [--hr0-final <num>] [--out <path>]\n'); process.exit(2); }
     const root = process.cwd();
     const out = flag('--out') ?? join(root, 'data', 'lab', 'stage1-preregistration.json');
     const universePath = join(root, 'config', 'prophet_tradable_universe.txt');
@@ -87,8 +89,23 @@ export function writePrereg(artifact, outPath) {
     const universeText = existsSync(universePath) ? readFileSync(universePath, 'utf8') : '';
     const frictionText = existsSync(frictionPath) ? readFileSync(frictionPath, 'utf8') : '';
     if (!universeText) process.stderr.write(`warn: universe file missing at ${universePath}\n`);
-    const artifact = buildPreregArtifact({ universeText, frictionText, splitDate });
+    const hashFile = (p) => (p && existsSync(p) ? sha256short(readFileSync(p, 'utf8')) : null);
+    const catalystsPath = flag('--catalysts');
+    const firingsPath = flag('--firings');
+    const triggerPath = join(root, 'scripts', 'stage1_catalyst_trigger.py');
+    const hr0Final = flag('--hr0-final') ? Number(flag('--hr0-final')) : 0.55;
+    const pipeline = {
+      data_source: 'alpaca_v1beta1_news',
+      trigger_name: 'classify_catalyst_strict (stage1_catalyst_trigger.py)',
+      trigger_code_hash: hashFile(triggerPath),
+      catalyst_table: catalystsPath ? `${catalystsPath}#${hashFile(catalystsPath)}` : null,
+      firings_file: firingsPath ? `${firingsPath}#${hashFile(firingsPath)}` : null,
+      window: '2022-01-01..2026-05-31',
+      derived_breakeven_applied: false,
+      hr0_final_note: 'floor 0.55 used; derived_breakeven_train bump NOT computed (no tooling). It only raises HR0, so a FAIL is robust; revisit only if the holdout is a borderline PASS near the floor.',
+    };
+    const artifact = buildPreregArtifact({ universeText, frictionText, splitDate, pipeline, hr0Final });
     writePrereg(artifact, out);
-    process.stdout.write(`wrote ${out} (hash ${artifact.artifact_hash}, required n ${artifact.power.required_independent_n_per_split})\n`);
+    process.stdout.write(`wrote ${out} (hash ${artifact.artifact_hash}, required n ${artifact.power.required_independent_n_per_split}, HR0_final ${hr0Final})\n`);
   }
 }
