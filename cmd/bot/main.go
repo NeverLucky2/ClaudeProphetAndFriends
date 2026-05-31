@@ -230,14 +230,14 @@ func main() {
 	guardController := controllers.NewGuardController(tradeGuard)
 
 	logger.WithFields(logrus.Fields{
-		"penny_max_capital_pct":      cfg.PennyMaxCapitalPct,
-		"penny_max_position_dollars": cfg.PennyMaxPositionDollars,
-		"max_daily_loss_pct":         cfg.MaxDailyLossPct,
-		"sector_aggregation_enabled": cfg.EnableSectorAggregation,
-		"sector_default_max_pct":     cfg.SectorDefaultMaxPct,
-		"position_caps_enabled":      cfg.EnablePositionCaps,
-		"max_position_pct":           cfg.MaxPositionPct,
-		"max_deployed_pct":           cfg.MaxDeployedPct,
+		"penny_max_capital_pct":       cfg.PennyMaxCapitalPct,
+		"penny_max_position_dollars":  cfg.PennyMaxPositionDollars,
+		"max_daily_loss_pct":          cfg.MaxDailyLossPct,
+		"sector_aggregation_enabled":  cfg.EnableSectorAggregation,
+		"sector_default_max_pct":      cfg.SectorDefaultMaxPct,
+		"position_caps_enabled":       cfg.EnablePositionCaps,
+		"max_position_pct":            cfg.MaxPositionPct,
+		"max_deployed_pct":            cfg.MaxDeployedPct,
 		"universe_gate_enabled":       cfg.EnableUniverseGate,
 		"tradable_universe_count":     len(tradableUniverse),
 		"agent_universe_gate_enabled": cfg.EnableAgentUniverseGate,
@@ -457,6 +457,10 @@ func main() {
 	segmentPnLSvc := services.NewSegmentPnLService(storageService, tradingService)
 	segmentPnLController := controllers.NewSegmentPnLController(segmentPnLSvc)
 	logger.Debug("Segment P&L service initialized")
+
+	// Wire the EOD daily-mark writer into the position monitor: once per trading
+	// day after close it persists a DBSegmentPnL row per strategy (Foundation B).
+	positionManager.SetSegmentWriter(services.NewSegmentPnLWriter(storageService, segmentPnLSvc, logger))
 
 	// Turtle Go scheduler (TURTLE_SCHEDULER_ENABLED=false by default).
 	// When enabled, the daily 17:00 ET TRADING_RULES_TREND.md heartbeat

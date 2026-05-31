@@ -126,6 +126,12 @@ type PositionManager struct {
 	// reflecting it. Guarded by mu.
 	reconcileMissCount map[string]int
 
+	// segmentWriter, when set, writes the daily mark-to-market DBSegmentPnL row
+	// once per trading day after close from inside MonitorPositions. nil-safe:
+	// if never installed, no daily marks are written.
+	segmentWriter       *SegmentPnLWriter
+	lastSegmentWriteDay string
+
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -160,6 +166,13 @@ func NewPositionManager(
 	}
 
 	return pm
+}
+
+// SetSegmentWriter installs the EOD daily-mark writer (wired at startup once
+// the SegmentPnLService exists). Optional: if never set, MonitorPositions
+// simply does not write daily marks.
+func (pm *PositionManager) SetSegmentWriter(w *SegmentPnLWriter) {
+	pm.segmentWriter = w
 }
 
 // PlaceManagedPosition opens a new managed position with automated risk management
@@ -357,6 +370,16 @@ func (pm *PositionManager) MonitorPositions(ctx context.Context) {
 					pm.logger.WithError(err).Debug("periodic broker reconcile skipped (broker read failed)")
 				}
 			}
+			if pm.segmentWriter != nil {
+				now := time.Now()
+				if shouldWriteSegmentMarks(now, pm.lastSegmentWriteDay) {
+					if err := pm.segmentWriter.WriteDailyMarks(ctx, now); err != nil {
+						pm.logger.WithError(err).Warn("segment-pnl: daily mark write failed")
+					} else {
+						pm.lastSegmentWriteDay = etDayKey(now)
+					}
+				}
+			}
 		}
 	}
 }
@@ -541,10 +564,10 @@ func (pm *PositionManager) checkEntryOrder(ctx context.Context, position *Manage
 			return
 		}
 		pm.logger.WithFields(logrus.Fields{
-			"position_id":  position.ID,
-			"symbol":       position.Symbol,
-			"ordered_qty":  position.Quantity,
-			"filled_qty":   order.FilledQty,
+			"position_id": position.ID,
+			"symbol":      position.Symbol,
+			"ordered_qty": position.Quantity,
+			"filled_qty":  order.FilledQty,
 		}).Info("Entry partially filled — accepted partial, cancelled remainder")
 		pm.activateFilledEntry(ctx, position, order, order.FilledQty)
 
