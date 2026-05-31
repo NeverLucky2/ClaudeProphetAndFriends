@@ -95,6 +95,7 @@ MonitorPositions loop                    Component 2: measurement & graduation
 - **D-B5 — convex sleeves gated structurally.** Options/hedge sleeves are classified by construction (put-spreads ⇒ defensive); measured downside-beta is confirmation-when-available, never the gate, because crash-payoff samples are too sparse over a quarter. Equity agents gate on measured deployed-beta.
 - **D-B6 — SPY from Alpaca, not FMP.** Benchmark data comes from the broker feed retained regardless; measurement infra must not depend on FMP, which is slated for cancellation with Drift.
 - **D-B7 — gap-aware differencing.** The daily-return series never differences across a missing day; non-consecutive observations are dropped/flagged.
+- **D-B8 — Component 2 consumes *derived* exit reasons.** Every exit-reason-dependent number in Component 2 keys off `deriveExitReason` (Component 3), never off the stored `status`. This is the condition that makes Component 3's display-only, no-write-back repair safe — one source of truth, no persisted-vs-recomputed drift. (For eligible/post-fix rows derived ≈ stored, since post-fix code labels via bracket-fill detection; the repair chiefly serves quarantined display.) See `2026-05-31-foundation-b-component3-historical-repair-design.md`.
 
 ## 9. Testing
 
