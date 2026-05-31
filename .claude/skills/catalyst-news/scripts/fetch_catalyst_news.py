@@ -31,7 +31,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 from fmp_client import FMPClient, _load_dotenv_from_ancestors  # noqa: E402
-from universe_builder import DEFAULT_STATIC_PATH, build_universe  # noqa: E402
+from universe_builder import DEFAULT_STATIC_PATH, build_universe, load_static_universe  # noqa: E402
 
 
 # Word-boundary matching to avoid e.g. "deal" matching "dealing".
@@ -88,6 +88,39 @@ def _classify(text: str) -> tuple[Optional[str], float]:
         if pattern.search(text):
             return "earnings", weight
     return None, 0.0
+
+
+def build_historical_table(tickers, frm, to, fetch):
+    """Flatten ticker news over [frm,to] into per-(ticker,date) catalyst rows.
+
+    `fetch(ticker, frm, to)` returns a list of FMP news items. Network-free here:
+    the caller injects the fetcher (the real one wraps FMPClient.get_stock_news_range).
+    Reuses the existing _classify() so the keyword lists stay single-source.
+    """
+    rows = []
+    for ticker in tickers:
+        for item in fetch(ticker, frm, to):
+            title = item.get("title") or item.get("text") or ""
+            text = item.get("text") or item.get("snippet") or ""
+            event_type, _weight = _classify(f"{title} {text}")
+            if event_type is None:
+                continue
+            published = item.get("publishedDate") or item.get("date") or ""
+            date = published.split(" ")[0].split("T")[0]  # YYYY-MM-DD
+            if not date:
+                continue
+            rows.append({
+                "ticker": ticker.upper(), "date": date, "event_type": event_type,
+                "headline": title.strip(), "snippet": text, "published": published,
+            })
+    return rows
+
+
+def _real_historical_fetch(client):
+    """Wrap the live client into a fetch(ticker, frm, to) callable (network)."""
+    def fetch(ticker, frm, to):
+        return client.get_stock_news_range([ticker], frm, to) or []
+    return fetch
 
 
 def normalize_news_item(row: dict) -> Optional[dict]:
@@ -185,7 +218,22 @@ def main() -> int:
     parser.add_argument("--lookback-hours", type=int, default=24)
     parser.add_argument("--limit", type=int, default=3)
     parser.add_argument("--raw-news-limit", type=int, default=100)
+    parser.add_argument("--from", dest="frm", default=None, help="historical start YYYY-MM-DD (enables historical mode)")
+    parser.add_argument("--to", dest="to", default=None, help="historical end YYYY-MM-DD")
     args = parser.parse_args()
+
+    if args.frm and args.to:
+        if not (os.getenv("FMP_API_KEY") or _load_dotenv_from_ancestors("FMP_API_KEY")):
+            print("WARNING: FMP_API_KEY not set; cannot fetch historical news", file=sys.stderr)
+            return 0
+        client = FMPClient()
+        tickers = load_static_universe(args.static_path)  # static floor only, frozen + hashable
+        rows = build_historical_table(tickers, args.frm, args.to, _real_historical_fetch(client))
+        out = Path("data/lab") / f"catalysts-{args.frm}-{args.to}.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(rows, indent=2), encoding="utf-8")
+        print(f"INFO: wrote {len(rows)} catalyst rows to {out}", file=sys.stderr)
+        return 0
 
     if not (os.getenv("FMP_API_KEY") or _load_dotenv_from_ancestors("FMP_API_KEY")):
         print("WARNING: FMP_API_KEY not set; emitting empty list", file=sys.stderr)

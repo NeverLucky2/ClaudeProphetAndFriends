@@ -134,6 +134,15 @@ class FMPClient:
             return data
         return None
 
+    def get_stock_news_range(self, symbols: list[str], frm: str, to: str, limit: int = 1000) -> Optional[list[dict]]:
+        """Date-ranged ticker news for historical backtests. /stable/news/stock with from/to.
+        NOTE: historical depth depends on FMP tier — verify before relying on multi-year output."""
+        params = {"symbols": ",".join(symbols), "from": frm, "to": to, "limit": limit}
+        data = self._try_stable_then_v3("news/stock", "stock_news", params)
+        if isinstance(data, list):
+            return data
+        return None
+
     def get_api_stats(self) -> dict:
         return {
             "api_calls_made": self.api_calls_made,
