@@ -55,8 +55,8 @@ type DBBar struct {
 // session closing values without recomputing from raw positions/trades.
 type DBSegmentPnL struct {
 	gorm.Model
-	Strategy        string    `gorm:"index:idx_strategy_date"`
-	Date            time.Time `gorm:"index:idx_strategy_date"`
+	Strategy        string    `gorm:"uniqueIndex:idx_strategy_date"`
+	Date            time.Time `gorm:"uniqueIndex:idx_strategy_date"`
 	RealizedPnL     float64
 	UnrealizedPnL   float64
 	DeployedDollars float64

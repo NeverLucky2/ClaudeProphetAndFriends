@@ -483,6 +483,68 @@ func (s *LocalStorage) GetHarvestClosedPnL(start, end time.Time) (float64, error
 	return total, err
 }
 
+// ── Segment P&L storage ────────────────────────────────────────────
+
+// SaveSegmentPnL upserts a daily segment-P&L row on the (strategy, date)
+// unique index, so a re-run for the same day updates rather than duplicates.
+func (s *LocalStorage) SaveSegmentPnL(row *models.DBSegmentPnL) error {
+	result := s.db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "strategy"}, {Name: "date"}},
+		UpdateAll: true,
+	}).Create(row)
+	if result.Error != nil {
+		return fmt.Errorf("failed to save segment pnl: %w", result.Error)
+	}
+	return nil
+}
+
+// GetSegmentPnLForDate returns the row for (strategy, date) or (nil, nil) if none.
+func (s *LocalStorage) GetSegmentPnLForDate(strategy string, date time.Time) (*models.DBSegmentPnL, error) {
+	var row models.DBSegmentPnL
+	err := s.db.Where("strategy = ? AND date = ?", strategy, date).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get segment pnl: %w", err)
+	}
+	return &row, nil
+}
+
+// GetManagedClosedPnL sums frozen realized P&L (UnrealizedPL, stamped at exit)
+// and counts this strategy's managed positions that reached a terminal state
+// with closed_at in [start, end).
+func (s *LocalStorage) GetManagedClosedPnL(strategy string, start, end time.Time) (float64, int, error) {
+	type agg struct {
+		Total float64
+		N     int64
+	}
+	var a agg
+	err := s.db.Model(&models.DBManagedPosition{}).
+		Where("agent_strategy = ? AND status IN ? AND closed_at >= ? AND closed_at < ?",
+			strategy, []string{"CLOSED", "STOPPED_OUT"}, start, end).
+		Select("COALESCE(SUM(unrealized_pl),0) AS total, COUNT(*) AS n").
+		Scan(&a).Error
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to sum managed closed pnl: %w", err)
+	}
+	return a.Total, int(a.N), nil
+}
+
+// ListManagedStrategies returns the distinct non-empty AgentStrategy values
+// ever recorded — the set of strategies to write daily rows for.
+func (s *LocalStorage) ListManagedStrategies() ([]string, error) {
+	var out []string
+	err := s.db.Model(&models.DBManagedPosition{}).
+		Distinct().
+		Where("agent_strategy <> ''").
+		Pluck("agent_strategy", &out).Error
+	if err != nil {
+		return nil, fmt.Errorf("failed to list managed strategies: %w", err)
+	}
+	return out, nil
+}
+
 // ── Harvest IV snapshot storage ────────────────────────────────────
 
 func (s *LocalStorage) SaveHarvestIVSnapshot(snap *models.DBHarvestIVSnapshot) error {
