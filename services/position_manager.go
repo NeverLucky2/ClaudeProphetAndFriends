@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"os"
 	"prophet-trader/database"
 	"prophet-trader/interfaces"
 	"prophet-trader/models"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -135,6 +137,13 @@ type PositionManager struct {
 	// installed, detection still logs but writes no file.
 	orphanReporter *OrphanReporter
 
+	// pendingTimeout bounds how long a managed entry may sit PENDING before it
+	// is force-terminalized (cancel + flatten any stray fill). Without it a
+	// broker order stuck "new"/"accepted" with no fill hangs forever — the
+	// reconciler deliberately skips PENDING and there is otherwise no timeout.
+	// Default 300s (env MANAGED_PENDING_TIMEOUT_SEC).
+	pendingTimeout time.Duration
+
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -159,6 +168,7 @@ func NewPositionManager(
 		positions:          make(map[string]*ManagedPosition),
 		reconcileMissCount: make(map[string]int),
 		orphanAlerted:      make(map[string]bool),
+		pendingTimeout:     pendingEntryTimeout(),
 		logger:             logger,
 		ctx:                ctx,
 		cancel:             cancel,
@@ -183,6 +193,19 @@ func (pm *PositionManager) SetSegmentWriter(w *SegmentPnLWriter) {
 // Optional: if never set, detectOrphans still logs but writes no report file.
 func (pm *PositionManager) SetOrphanReporter(r *OrphanReporter) {
 	pm.orphanReporter = r
+}
+
+// pendingEntryTimeout resolves the PENDING-entry timeout from the environment,
+// defaulting to 300s. Market/marketable managed entries fill in seconds, so
+// this only ever trips on a genuinely stuck order.
+func pendingEntryTimeout() time.Duration {
+	const def = 300 * time.Second
+	if v := os.Getenv("MANAGED_PENDING_TIMEOUT_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return def
 }
 
 // PlaceManagedPosition opens a new managed position with automated risk management
@@ -563,13 +586,23 @@ func (pm *PositionManager) checkEntryOrder(ctx context.Context, position *Manage
 			}).Warn("Partial fill: could not cancel entry remainder — leaving PENDING, will retry")
 			return
 		}
+		// Re-read terminal truth: shares may have filled in the window between
+		// the status read above and the cancel landing. Bracket to the FINAL
+		// filled qty (and its avg price), never the stale pre-cancel value, or
+		// the extra shares are held unprotected — a smaller copy of the bug.
+		fillOrder := order
+		filledQty := order.FilledQty
+		if term, termErr := pm.tradingService.GetOrder(ctx, position.EntryOrderID); termErr == nil && term != nil && term.FilledQty >= filledQty {
+			fillOrder = term
+			filledQty = term.FilledQty
+		}
 		pm.logger.WithFields(logrus.Fields{
 			"position_id": position.ID,
 			"symbol":      position.Symbol,
 			"ordered_qty": position.Quantity,
-			"filled_qty":  order.FilledQty,
+			"filled_qty":  filledQty,
 		}).Info("Entry partially filled — accepted partial, cancelled remainder")
-		pm.activateFilledEntry(ctx, position, order, order.FilledQty)
+		pm.activateFilledEntry(ctx, position, fillOrder, filledQty)
 
 	case "canceled", "rejected", "expired":
 		// Broker-terminal with no more fills coming. Previously these left the
@@ -589,9 +622,52 @@ func (pm *PositionManager) checkEntryOrder(ctx context.Context, position *Manage
 		pm.markEntryFailed(position, "entry_"+order.Status)
 
 	default:
-		// "new", "accepted", "pending_new", etc.: the entry is still working
-		// (a GTC limit entry can legitimately rest here). Wait for the next tick.
+		// "new", "accepted", "pending_new", etc.: the entry is still working.
+		// A market/marketable entry that has not progressed past pendingTimeout
+		// is treated as stuck → bound it and terminalize so it can never hang
+		// forever (the reconciler deliberately skips PENDING).
+		if pm.pendingTimeout > 0 && time.Since(position.CreatedAt) > pm.pendingTimeout {
+			pm.timeoutPendingEntry(ctx, position)
+		}
 	}
+}
+
+// timeoutPendingEntry force-terminalizes an entry that has sat PENDING past
+// pendingTimeout. It cancels the working order so nothing more can fill, then
+// reads terminal broker truth: any stray fill is flattened (FAILED + market
+// exit of exactly the filled qty — never the ordered qty), otherwise the
+// position is marked FAILED with no shares acquired. A cancel error leaves the
+// row PENDING to retry next tick rather than abandoning a possibly-live order.
+func (pm *PositionManager) timeoutPendingEntry(ctx context.Context, position *ManagedPosition) {
+	if position.EntryOrderID != "" {
+		if err := pm.tradingService.CancelOrder(ctx, position.EntryOrderID); err != nil {
+			pm.logger.WithError(err).WithFields(logrus.Fields{
+				"position_id":              position.ID,
+				"symbol":                   position.Symbol,
+				"operator_review_required": true,
+			}).Warn("Pending-timeout: could not cancel stuck entry — leaving PENDING, will retry")
+			return
+		}
+	}
+
+	if order, err := pm.tradingService.GetOrder(ctx, position.EntryOrderID); err == nil && order != nil && order.FilledQty > 0 {
+		// A sliver filled before the cancel bounded the order. Flatten exactly
+		// what is held — the setup is stale after the timeout, so we do not keep it.
+		position.Quantity = order.FilledQty
+		position.RemainingQty = order.FilledQty
+		if order.FilledAvgPrice != nil {
+			position.EntryPrice = *order.FilledAvgPrice
+		}
+		pm.logger.WithFields(logrus.Fields{
+			"position_id": position.ID,
+			"symbol":      position.Symbol,
+			"stray_qty":   order.FilledQty,
+		}).Warn("Pending-timeout: stray fill detected — flattening held shares")
+		pm.flattenUnprotected(ctx, position, "pending_timeout_stray_fill")
+		return
+	}
+
+	pm.markEntryFailed(position, "pending_timeout")
 }
 
 // activateFilledEntry transitions a PENDING position to ACTIVE on the quantity

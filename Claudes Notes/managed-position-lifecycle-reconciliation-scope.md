@@ -146,3 +146,21 @@ A single broker-truth reconciliation routine that, per managed position each bea
 - All six agents share account dir `6e4f26af`; filter Spark's records by `strategyId: penny-momentum`, not by sandbox dir.
 - Related memory: [[close-managed-position-fail-open-orphan]] (the exit-side sibling — fix together), [[architectural-patterns]] (dual-layer fail policy; reconciliation should fail-closed), [[feedback-verification]] (mock the executor).
 - Environment caveat that paused this: 2026-05-29 the Opus classifier was intermittently unavailable and Read/Grep output was garbled — do NOT trust any code detail not re-read cleanly.
+
+---
+
+## 8. Pre-registered decisions — CONFIRMED 2026-05-31 (operator sign-off)
+
+Part A is root-caused; these were the embedded choices "just execute" would have made by default. Pinned and operator-approved before coding (part of the Foundation sub-project of the uncorrelated-ballast pivot).
+
+**D1 — Partial-fill race.** On `partially_filled` in `checkEntryOrder`: issue `CancelOrder` on the entry, **WAIT for the order to reach a terminal state, read the FINAL `FilledQty` from the terminal order, THEN `placeRiskOrders` sized to that final qty.** Never size brackets off a mid-flight read — eliminates the "N more fill during the cancel window → unbracketed sliver" race. Set `Quantity`/`RemainingQty` = final FilledQty, `EntryPrice` = `*FilledAvgPrice`, status ACTIVE.
+
+**D2 — PENDING timeout.** 300s wall-clock (env `MANAGED_PENDING_TIMEOUT_SEC`, default 300). On expiry: PENDING → terminal FAILED + flatten any stray fill. Wall-clock (not pass-count) because heartbeat cadence varies 60s→daily across agents.
+
+**D3 — Close-side retry exhaustion.** On exit-order failure: retry up to 3 times (next-beat backoff). If all fail → terminal **`CLOSE_FAILED`** (NOT CLOSED): does not free the segment lane, keeps existing stops in place if present, raises a hard operator alert, HALTs the agent. Never mark CLOSED without broker-confirmed flat.
+
+**Boundary / measurement-window decisions (A↔B):**
+- **Quarantine:** all closed records written before the A-fix landing date are NOT graduation-eligible (pre-fix data is poisoned).
+- **Retroactive repair:** Fix 3's exit-reason derivation runs once over existing closed positions so historical records display honestly (cheap — tiny dataset). Fix 3 is the A/B boundary tool, not a peer state-machine fix.
+- **Paper clock:** the ≥3-month graduation clock counts PAPER time; graduation requires clearing the 2× friction gate (friction is what makes paper-based graduation honest). Foundation delivers the machinery + starts the clock, NOT verdicts — nothing graduates for ≥1 quarter after A lands.
+- **Options friction:** `apply-friction.mjs` does NOT model options (it skips them as "unrecognized asset class" — confirmed empirically 2026-05-31). Equity/ETF agents (Coil, Turtle) reuse the friction machinery as-is; instrument-aware options friction is a NAMED OPEN ITEM in B's spec, deferred to the defensive-Prophet build.
