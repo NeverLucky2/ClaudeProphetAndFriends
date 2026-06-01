@@ -1212,3 +1212,17 @@ test('prophetPreflight holding: econ fetch REJECTS (throws) → skip:false (fail
   assert.equal(r.skip, false, 'econ fetch throw must fail toward run, not skip');
   delete process.env.PROPHET_HOLDING_SKIP_ENABLED;
 });
+
+test('defensive-prophet: always skips (fully mechanical Go scheduler, no LLM beat)', async () => {
+  // Makes no HTTP calls; an empty-route runtime proves it never touches the bot.
+  const rt = makeRuntime([]);
+  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('prophet-defensive', rt, {}));
+  assert.equal(r.skip, true);
+  assert.match(r.reason, /mechanical/i);
+});
+
+test('defensive-prophet: skips even at a closed-market time (no time/window dependence)', async () => {
+  const rt = makeRuntime([]);
+  const r = await withFrozenTime(ET_CLOSED, () => resolvePreflight('prophet-defensive', rt, {}));
+  assert.equal(r.skip, true);
+});

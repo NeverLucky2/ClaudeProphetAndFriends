@@ -176,6 +176,12 @@ export class AgentOrchestrator extends EventEmitter {
     // shared paper account and 17:00 ET fires duplicate orders.
     const turtleSchedulerEnabled = resolvedAgent?.strategyId === 'trend'
       && process.env.TURTLE_SCHEDULER_ENABLED === 'true';
+    // defensive-Prophet hedge scheduler: same per-sandbox gating as Turtle. Only
+    // the defensive-prophet sandbox's bot gets the flag true, and it's set
+    // explicitly false elsewhere so non-hedge bots don't inherit a shared-.env
+    // "true" and fire duplicate hedge orders against the shared paper account.
+    const defensiveProphetEnabled = resolvedAgent?.strategyId === 'prophet-defensive'
+      && process.env.ENABLE_PROPHET_DEFENSIVE === 'true';
 
     const env = {
       ...process.env,
@@ -191,6 +197,7 @@ export class AgentOrchestrator extends EventEmitter {
       ...(Number.isFinite(maxDailyLossPct) && maxDailyLossPct > 0 ? { MAX_DAILY_LOSS_PCT: String(maxDailyLossPct) } : {}),
       ...(pennyPipelineEnabled ? { ENABLE_PENNY_PIPELINE: 'true' } : {}),
       TURTLE_SCHEDULER_ENABLED: turtleSchedulerEnabled ? 'true' : 'false',
+      ENABLE_PROPHET_DEFENSIVE: defensiveProphetEnabled ? 'true' : 'false',
       ...candidateWarmerFlags(resolvedAgent?.strategyId),
     };
 

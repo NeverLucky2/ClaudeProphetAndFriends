@@ -407,6 +407,39 @@ Use get_trend_signal({ symbol }) to read the daily-bar Donchian-100 high, Donchi
       },
       createdAt: new Date().toISOString(),
     },
+    {
+      id: 'defensive-prophet',
+      name: 'DefensiveProphet',
+      description: 'Mechanical triggered QQQ put-spread hedge (uncorrelated ballast). Defined-risk; a Go scheduler (ENABLE_PROPHET_DEFENSIVE) executes the entire strategy — the LLM never beats. Default OFF.',
+      systemPromptTemplate: 'custom',
+      customSystemPrompt: `You are DefensiveProphet, a fully mechanical, defined-risk hedge agent. You are NOT a reasoning agent — a deterministic Go scheduler (enabled via ENABLE_PROPHET_DEFENSIVE) executes the entire strategy: arming on regime, structuring/placing QQQ put-debit-spreads, harvesting, rolling, and expiring them.
+
+You take NO trading actions. The Go scheduler owns execution end-to-end. If you are ever invoked, do nothing except log that the Go scheduler owns this strategy. Your preflight skips every beat, so this should not happen.`,
+      strategyId: 'prophet-defensive',
+      // Fully mechanical (Go scheduler) — the LLM never acts. Exempt from
+      // emergency-alert wakes; preflight skips every beat.
+      respondsToEmergencyWakes: false,
+      model: 'anthropic/claude-haiku-4-5-20251001',
+      heartbeatOverrides: {
+        pre_market: 86400,
+        market_open: 86400,
+        midday: 86400,
+        market_close: 86400,
+        after_hours: 86400,
+        closed: 86400,
+      },
+      // A single daily scheduled beat that the preflight always skips (the Go
+      // scheduler fires the real 17:00 ET beat). Kept only so the agent has a
+      // defined cadence; it costs ~nothing because defensiveProphetPreflight
+      // returns skip with no I/O before any LLM call.
+      scheduledBeats: {
+        times: ['17:05'],
+        weekdaysOnly: true,
+        exclusive: true,
+        windowMinutes: 5,
+      },
+      createdAt: new Date().toISOString(),
+    },
   ];
 }
 
@@ -417,6 +450,14 @@ function defaultStrategies() {
       name: 'Harvest — Iron Condor Premium Seller',
       description: 'Mechanical 16-delta iron condors on SPY/QQQ/IWM/GLD/TLT. Defined-risk, no discretion.',
       rulesFile: 'TRADING_RULES_HARVEST.md',
+      customRules: null,
+      createdAt: new Date().toISOString(),
+    },
+    {
+      id: 'prophet-defensive',
+      name: 'Defensive Prophet — Triggered QQQ Put-Spread Hedge',
+      description: 'Mechanical, defined-risk QQQ put-debit-spread hedge (uncorrelated ballast). Arms on a weak regime score, harvests/rolls/expires automatically. Executed entirely by the Go scheduler (ENABLE_PROPHET_DEFENSIVE); the LLM takes no actions.',
+      rulesFile: 'TRADING_RULES_DEFENSIVE_PROPHET.md',
       customRules: null,
       createdAt: new Date().toISOString(),
     },

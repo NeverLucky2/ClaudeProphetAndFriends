@@ -228,3 +228,14 @@ test('non-Prophet/Harvest agents do NOT have the new pre-market scheduled-wake f
   assert.equal(coil.scheduledBeats?.exclusive, true, 'Coil must remain exclusive-mode');
   assert.equal(coil.suppressPhaseSnaps, undefined, 'Coil should not suppress any phase snaps');
 });
+
+test('defaults include the defensive-prophet agent + prophet-defensive strategy', async () => {
+  await cfgStore.loadConfig();
+  const cfg = cfgStore.getConfig();
+  const agent = cfg.agents.find(a => a.id === 'defensive-prophet');
+  assert.ok(agent, 'defensive-prophet agent must be present');
+  assert.equal(agent.strategyId, 'prophet-defensive');
+  const strat = cfg.strategies.find(s => s.id === 'prophet-defensive');
+  assert.ok(strat, 'prophet-defensive strategy must be present');
+  assert.equal(strat.rulesFile, 'TRADING_RULES_DEFENSIVE_PROPHET.md');
+});

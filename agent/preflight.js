@@ -694,13 +694,24 @@ async function candidatesAndPositionsPreflight(runtime, { candidatesUrl, positio
   return { skip: false, reason: `${candidateCount} entry candidate(s) available` };
 }
 
+// defensiveProphetPreflight always skips the LLM beat. defensive-Prophet is
+// 100% mechanical: the Go scheduler (ENABLE_PROPHET_DEFENSIVE) executes the
+// entire strategy and there is no quarterly review, so the LLM has nothing to
+// do on any beat. The agent shell exists only to host the sandbox/bot. Returns
+// immediately with no I/O (cheaper than Turtle's status-endpoint check, which
+// is unnecessary here since there's no LLM fallback behavior to gate).
+async function defensiveProphetPreflight(_runtime, _agentConfig) {
+  return { skip: true, reason: 'defensive-Prophet is fully mechanical (Go scheduler) — LLM beat unnecessary' };
+}
+
 export const PREFLIGHT_REGISTRY = {
-  'penny-momentum': pennyPreflight,
-  'trend':          trendPreflight,
-  'harvest':        harvestPreflight,
-  'v2-options':     prophetPreflight,
-  'mean-rev-rsi2':  meanRevPreflight,
-  'earnings-drift': driftPreflight,
+  'penny-momentum':   pennyPreflight,
+  'trend':            trendPreflight,
+  'harvest':          harvestPreflight,
+  'v2-options':       prophetPreflight,
+  'mean-rev-rsi2':    meanRevPreflight,
+  'earnings-drift':   driftPreflight,
+  'prophet-defensive': defensiveProphetPreflight,
 };
 
 const PREFLIGHT_TIMEOUT_MS = 2000;
