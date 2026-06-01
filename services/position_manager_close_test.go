@@ -13,7 +13,8 @@ import (
 // rest of the TradingService surface.
 type closeStubTrading struct {
 	*stubTrading
-	placeErr     error // if set, PlaceOrder returns this error (simulates a failed exit)
+	placeErr     error   // if set, PlaceOrder returns this error on every call (simulates a persistently failing exit)
+	placeErrSeq  []error // optional per-call outcomes: index = (call number - 1); nil slot = success; takes precedence over placeErr when non-nil. Out-of-range calls fall back to placeErr.
 	placeCalls   int
 	placedOrders []*interfaces.Order
 	cancelErr    error // if set, CancelOrder returns this error
@@ -22,7 +23,11 @@ type closeStubTrading struct {
 
 func (s *closeStubTrading) PlaceOrder(_ context.Context, o *interfaces.Order) (*interfaces.OrderResult, error) {
 	s.placeCalls++
-	if s.placeErr != nil {
+	if s.placeErrSeq != nil && s.placeCalls-1 < len(s.placeErrSeq) {
+		if e := s.placeErrSeq[s.placeCalls-1]; e != nil {
+			return nil, e
+		}
+	} else if s.placeErr != nil {
 		return nil, s.placeErr
 	}
 	s.placedOrders = append(s.placedOrders, o)
@@ -64,6 +69,9 @@ func TestClose_ExitOrderFails_StaysActiveAndErrors(t *testing.T) {
 	}
 	if trading.contains("stop-1") {
 		t.Error("stop-loss was cancelled on a failed close — position left unprotected")
+	}
+	if trading.placeCalls != 1 {
+		t.Errorf("placeCalls = %d, want 1 (a transient failure must NOT trigger the cancel-bracket-and-retry path)", trading.placeCalls)
 	}
 	saved, err := pm.storageService.GetManagedPosition(pos.ID)
 	if err != nil {
@@ -137,5 +145,60 @@ func TestClose_Pending_CancelFails_StaysPending(t *testing.T) {
 	}
 	if pos.Status != "PENDING" {
 		t.Errorf("status = %q, want PENDING (failed entry-cancel must not mark CLOSED)", pos.Status)
+	}
+}
+
+// The regression that stranded Coil's WMT on 2026-06-01: the resting GTC stop
+// reserves the shares (Alpaca held_for_orders), so the exit market-sell for the
+// full quantity is rejected for "insufficient qty available". A close MUST detect
+// this specific rejection, cancel the protective bracket to free the shares,
+// retry the exit, and — on success — close cleanly.
+func TestClose_ExitBlockedByRestingStop_CancelsBracketRetriesAndCloses(t *testing.T) {
+	qtyErr := errors.New("insufficient qty available for order (requested: 42, available: 0)")
+	// Call 1 (exit): blocked by the resting stop. Call 2 (retry exit): succeeds.
+	trading := &closeStubTrading{stubTrading: &stubTrading{}, placeErrSeq: []error{qtyErr, nil}}
+	pm := newReconcilePM(t, trading)
+	pos := &ManagedPosition{Symbol: "WMT", Side: "buy", Status: "ACTIVE", Quantity: 42, RemainingQty: 42, StopLossOrderID: "stop-1", AgentStrategy: "mean-rev-rsi2"}
+	injectPosition(pm, pos)
+
+	if err := pm.CloseManagedPosition(context.Background(), pos.ID); err != nil {
+		t.Fatalf("expected nil error after a successful retry, got %v", err)
+	}
+	if pos.Status != "CLOSED" {
+		t.Errorf("status = %q, want CLOSED after the retried exit succeeded", pos.Status)
+	}
+	if !trading.contains("stop-1") {
+		t.Error("stop-loss must be cancelled to free the reserved shares before the retry")
+	}
+	if trading.placeCalls != 2 {
+		t.Errorf("placeCalls = %d, want 2 (exit, then retry after freeing shares)", trading.placeCalls)
+	}
+}
+
+// Worst case of the WMT path: the exit is blocked by the resting stop, the
+// bracket is cancelled to free the shares, but the retry STILL fails. The
+// position is now unprotected (its stop was just cancelled), so the close must
+// re-place the stop to restore protection, stay ACTIVE, and return an error —
+// never mark CLOSED while the broker still holds the shares.
+func TestClose_ExitBlockedThenRetryFails_ReplacesStopStaysActive(t *testing.T) {
+	qtyErr := errors.New("insufficient qty available for order (requested: 42, available: 0)")
+	// Call 1 (exit) + call 2 (retry exit) both blocked; call 3 (re-place stop) succeeds.
+	trading := &closeStubTrading{stubTrading: &stubTrading{}, placeErrSeq: []error{qtyErr, qtyErr}}
+	pm := newReconcilePM(t, trading)
+	pos := &ManagedPosition{Symbol: "WMT", Side: "buy", Status: "ACTIVE", Quantity: 42, RemainingQty: 42, StopLossPrice: 110.18, StopLossOrderID: "stop-1", AgentStrategy: "mean-rev-rsi2"}
+	injectPosition(pm, pos)
+
+	err := pm.CloseManagedPosition(context.Background(), pos.ID)
+	if err == nil {
+		t.Fatal("expected error when the retried exit also fails, got nil")
+	}
+	if pos.Status != "ACTIVE" {
+		t.Errorf("status = %q, want ACTIVE (a position the broker still holds must not be marked CLOSED)", pos.Status)
+	}
+	if pos.StopLossOrderID == "stop-1" {
+		t.Error("stop was not re-placed — position left unprotected after the bracket was cancelled")
+	}
+	if trading.placeCalls != 3 {
+		t.Errorf("placeCalls = %d, want 3 (exit, retry exit, re-place stop)", trading.placeCalls)
 	}
 }

@@ -1091,52 +1091,63 @@ func (pm *PositionManager) CloseManagedPosition(ctx context.Context, positionID 
 
 	switch position.Status {
 	case "ACTIVE", "PARTIAL":
-		// Exit FIRST, before touching the protective bracket. If it can't be
-		// placed, bail with the bracket untouched — position stays ACTIVE and
-		// protected, caller retries.
+		// Exit FIRST, before touching the protective bracket, so a transient
+		// failure (429/outage) leaves the position ACTIVE and still protected.
+		//
+		// The one exception is the resting protective stop itself: it is a sell
+		// order for the full quantity, so the broker reserves those shares
+		// (Alpaca held_for_orders) and a full-quantity exit is rejected for
+		// "insufficient qty available" — the exit can NEVER be placed while the
+		// stop rests. When (and only when) we see that specific rejection, cancel
+		// the bracket to free the shares and retry the exit once. If the retry
+		// still fails the stop is now gone, so re-place it to restore protection
+		// before bailing. This was the regression that stranded Coil's WMT on
+		// 2026-06-01 (the stop reserved all 42 shares, so the time-stop exit
+		// could never be placed).
 		if position.RemainingQty > 0 {
-			exitSide := "sell"
-			if position.Side == "sell" {
-				exitSide = "buy"
-			}
-			exitOrder := &interfaces.Order{
-				Symbol:      position.Symbol,
-				Qty:         position.RemainingQty,
-				Side:        exitSide,
-				Type:        "market",
-				TimeInForce: "day",
-				Status:      "pending",
-				SubmittedAt: time.Now(),
-				// Tag with the owning agent's strategy so the resulting DBOrder
-				// is attributable (matches placeEntryOrder / flattenUnprotected).
-				Strategy: position.AgentStrategy,
-			}
-			result, err := pm.tradingService.PlaceOrder(ctx, exitOrder)
-			if err != nil {
-				pm.logger.WithError(err).WithFields(logrus.Fields{
-					"position_id":              position.ID,
-					"symbol":                   position.Symbol,
-					"operator_review_required": true,
-				}).Error("Close failed: exit order placement failed — position left open and protected (NOT marked CLOSED)")
-				return fmt.Errorf("close %s: exit order placement failed, position remains open: %w", position.Symbol, err)
-			}
-
-			// Exit accepted — persist it for attribution (best-effort), then
-			// tear down the now-redundant protective/partial orders.
-			exitOrder.ID = result.OrderID
-			exitOrder.Status = result.Status
-			if pm.storageService != nil {
-				if saveErr := pm.storageService.SaveOrder(exitOrder); saveErr != nil {
-					pm.logger.WithError(saveErr).WithField("order_id", result.OrderID).Warn("Failed to save exit order to database")
+			if err := pm.placeAndSaveExit(ctx, position); err != nil {
+				if !isInsufficientQtyErr(err) {
+					pm.logger.WithError(err).WithFields(logrus.Fields{
+						"position_id":              position.ID,
+						"symbol":                   position.Symbol,
+						"operator_review_required": true,
+					}).Error("Close failed: exit order placement failed — position left open and protected (NOT marked CLOSED)")
+					return fmt.Errorf("close %s: exit order placement failed, position remains open: %w", position.Symbol, err)
 				}
+
+				// Shares are reserved by the resting protective bracket. Free them
+				// and retry the exit once.
+				pm.logger.WithFields(logrus.Fields{
+					"position_id": position.ID,
+					"symbol":      position.Symbol,
+				}).Warn("Exit rejected for insufficient available qty — cancelling protective bracket to free reserved shares, retrying exit")
+				pm.cancelBracketOrders(ctx, position)
+
+				if retryErr := pm.placeAndSaveExit(ctx, position); retryErr != nil {
+					// Retry still failed and the bracket is now cancelled, so the
+					// position is unprotected. Re-place the stop to restore
+					// protection; leave ACTIVE and return the error (NEVER CLOSED).
+					pm.logger.WithError(retryErr).WithFields(logrus.Fields{
+						"position_id":              position.ID,
+						"symbol":                   position.Symbol,
+						"operator_review_required": true,
+					}).Error("Close failed: exit retry failed after freeing reserved shares — re-placing stop to restore protection")
+					if reErr := pm.placeStopLossOrder(ctx, position); reErr != nil {
+						pm.logger.WithError(reErr).WithFields(logrus.Fields{
+							"position_id":              position.ID,
+							"symbol":                   position.Symbol,
+							"operator_review_required": true,
+						}).Error("Failed to re-place stop after a failed close — position is UNPROTECTED, manual intervention required")
+					}
+					return fmt.Errorf("close %s: exit rejected for reserved shares and retry failed, position remains open: %w", position.Symbol, retryErr)
+				}
+				// Retry succeeded; bracket already cancelled — fall through to CLOSED.
+			} else {
+				// Exit accepted on the first try — tear down the now-redundant
+				// protective/partial orders.
+				pm.cancelBracketOrders(ctx, position)
 			}
-			pm.logger.WithFields(logrus.Fields{
-				"position_id": position.ID,
-				"order_id":    result.OrderID,
-				"quantity":    position.RemainingQty,
-			}).Info("Placed market exit order")
 		}
-		pm.cancelBracketOrders(ctx, position)
 
 	case "PENDING":
 		// Entry never filled — cancel the entry order. Fail-closed: if the
@@ -1202,6 +1213,61 @@ func (pm *PositionManager) cancelBracketOrders(ctx context.Context, position *Ma
 			pm.logger.WithError(err).WithField("order_id", orderID).Warn("Failed to cancel partial exit order (may already be cancelled)")
 		}
 	}
+}
+
+// placeAndSaveExit places a market order that flattens the position's remaining
+// quantity and best-effort persists the resulting DBOrder for attribution. It
+// returns the broker error verbatim so callers can classify it (see
+// isInsufficientQtyErr) and does NOT mutate position status.
+func (pm *PositionManager) placeAndSaveExit(ctx context.Context, position *ManagedPosition) error {
+	exitSide := "sell"
+	if position.Side == "sell" {
+		exitSide = "buy"
+	}
+	exitOrder := &interfaces.Order{
+		Symbol:      position.Symbol,
+		Qty:         position.RemainingQty,
+		Side:        exitSide,
+		Type:        "market",
+		TimeInForce: "day",
+		Status:      "pending",
+		SubmittedAt: time.Now(),
+		// Tag with the owning agent's strategy so the resulting DBOrder is
+		// attributable (matches placeEntryOrder / flattenUnprotected).
+		Strategy: position.AgentStrategy,
+	}
+	result, err := pm.tradingService.PlaceOrder(ctx, exitOrder)
+	if err != nil {
+		return err
+	}
+	exitOrder.ID = result.OrderID
+	exitOrder.Status = result.Status
+	if pm.storageService != nil {
+		if saveErr := pm.storageService.SaveOrder(exitOrder); saveErr != nil {
+			pm.logger.WithError(saveErr).WithField("order_id", result.OrderID).Warn("Failed to save exit order to database")
+		}
+	}
+	pm.logger.WithFields(logrus.Fields{
+		"position_id": position.ID,
+		"order_id":    result.OrderID,
+		"quantity":    position.RemainingQty,
+	}).Info("Placed market exit order")
+	return nil
+}
+
+// isInsufficientQtyErr reports whether a broker PlaceOrder error indicates the
+// order was rejected because the position's shares are already reserved by an
+// open order (Alpaca: "insufficient qty available for order ... available: 0").
+// That is the signal that a resting protective stop is blocking the exit — the
+// only case in which cancelling the bracket and retrying is correct. It
+// deliberately does NOT match transient failures (429, timeouts), for which the
+// protective bracket must be left intact.
+func isInsufficientQtyErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "insufficient qty") || strings.Contains(s, "insufficient quantity")
 }
 
 // Helper functions
