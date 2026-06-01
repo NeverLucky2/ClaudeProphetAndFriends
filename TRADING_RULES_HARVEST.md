@@ -143,8 +143,8 @@ Verify: adding this position keeps total deployed ≤ 10.0%.
   if (deployed_buying_power_pct + new_bp_pct) > 10.0 → skip.
 
 > **Capital lane (reconciled 2026-05-25):** Harvest's 10% buying-power cap is its
-> lane in the 100% capital model — V2 (34%), COIL (18%), TREND (14%), DRIFT (12%),
-> PENNY (12%), HARVEST (10%). Defined-risk condors use little capital, so 10% is
+> lane in the 100% capital model — V2 (34%), COIL (24%), TREND (20%), DRIFT (12%),
+> HARVEST (10%). Defined-risk condors use little capital, so 10% is
 > ample for the 5-underlying book.
 
 Call `open_iron_condor` with the full condor specification.

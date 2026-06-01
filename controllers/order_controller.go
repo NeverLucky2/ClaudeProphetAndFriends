@@ -55,9 +55,9 @@ type BuyRequest struct {
 	TimeInForce string              `json:"time_in_force"` // "day", "gtc", "ioc", "fok"
 	LimitPrice  *float64            `json:"limit_price,omitempty"`
 	StopPrice   *float64            `json:"stop_price,omitempty"`
-	AgentSource services.AgentSource `json:"agent_source,omitempty"` // "main" or "penny"; defaults to "main"
+	AgentSource services.AgentSource `json:"agent_source,omitempty"` // e.g. "main"/"harvest"/"trend"; defaults to "main"
 	// Strategy is the per-agent attribution tag (e.g. "trend", "harvest",
-	// "penny-momentum"). Encoded into the broker's client_order_id so the
+	// "v2-options"). Encoded into the broker's client_order_id so the
 	// tag survives fills and reconciliation. Empty for untagged orders.
 	Strategy    string              `json:"strategy,omitempty"`
 }
@@ -70,7 +70,7 @@ type SellRequest struct {
 	TimeInForce string              `json:"time_in_force"` // "day", "gtc", "ioc", "fok"
 	LimitPrice  *float64            `json:"limit_price,omitempty"`
 	StopPrice   *float64            `json:"stop_price,omitempty"`
-	AgentSource services.AgentSource `json:"agent_source,omitempty"` // "main" or "penny"; defaults to "main"
+	AgentSource services.AgentSource `json:"agent_source,omitempty"` // e.g. "main"/"harvest"/"trend"; defaults to "main"
 	// Strategy attribution; see BuyRequest.Strategy.
 	Strategy    string              `json:"strategy,omitempty"`
 }
@@ -354,11 +354,10 @@ func (oc *OrderController) HandleCancelOrder(c *gin.Context) {
 //
 // Without ?strategy: returns all broker positions (legacy behavior).
 // With ?strategy: filters to positions whose most recent buy order was
-// tagged with the requested strategy. Managed-position entries placed via
-// PennyProphet now flow through the same DBOrder tagging path
-// (services.PositionManager.placeEntryOrder forwards AgentStrategy onto
-// the entry order), so they are attributable here as long as the entry
-// order's DBOrder row has a non-empty StrategyName.
+// tagged with the requested strategy. All managed-position entries now flow through
+// the same DBOrder tagging path (services.PositionManager.placeEntryOrder forwards
+// AgentStrategy onto the entry order), so they are attributable here as long as the
+// entry order's DBOrder row has a non-empty StrategyName.
 func (oc *OrderController) HandleGetPositions(c *gin.Context) {
 	strategyFilter := c.Query("strategy")
 	positions, err := oc.GetPositionsByStrategy(strategyFilter)

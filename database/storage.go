@@ -211,7 +211,7 @@ func (s *LocalStorage) GetOrder(orderID string) (*interfaces.Order, error) {
 //  3. DBManagedPosition.AgentStrategy — defense-in-depth fallback for symbols
 //     held via PlaceManagedPosition where the entry order's DBOrder row was
 //     lost or never persisted. The dedicated AgentStrategy column carries
-//     agent IDs (penny-momentum, trend, v2-options) cleanly; do NOT confuse
+//     agent IDs (trend, v2-options) cleanly; do NOT confuse
 //     it with DBManagedPosition.Strategy which is the trading-style label
 //     (DAY_TRADE / SWING_TRADE / LONG_TERM). Rows with an empty AgentStrategy
 //     are ignored.

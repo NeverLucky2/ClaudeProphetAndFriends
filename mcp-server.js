@@ -416,11 +416,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                 type: 'string',
               },
             },
-            dominant_signal: {
-              type: 'string',
-              enum: ['social', 'regulatory', 'technical'],
-              description: 'For PennyProphet entries: dominant signal classification. Drives the 20-minute backend-managed time exit when set to "social". Pass through from get_penny_signal_detail.dominant_signal.',
-            },
           },
           required: ['symbol', 'side', 'allocation_dollars'],
         },
@@ -1319,23 +1314,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
-        name: 'get_penny_candidates',
-        description: 'Get penny stock candidates scored above a threshold by the real-time signal pipeline. Returns ticker, scores (composite, technical, regulatory, social), and dominant_signal type (technical/regulatory/social). Per-candidate context strings are omitted by default to keep the list compact — call get_penny_signal_detail for full context on the specific tickers you intend to trade. Use min_score=60 for tradeable signals.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            min_score: {
-              type: 'number',
-              description: 'Minimum composite score (0–100). Default: 60. Scores 60–79 → 2–3% position size; 80–100 → 5–7% position size.',
-            },
-            detail: {
-              type: 'boolean',
-              description: 'When true, includes full context strings (technical_context, regulatory_event, social_context) inline for every candidate. Default false — prefer fetching context per-ticker via get_penny_signal_detail to save tokens.',
-            },
-          },
-        },
-      },
-      {
         name: 'get_harvest_state',
         description: 'Get current Harvest agent state: open condors, circuit breaker status, trailing 30-day P&L, and deployed buying power. Check this at the start of every heartbeat before evaluating entries or exits.',
         inputSchema: { type: 'object', properties: {} },
@@ -1491,20 +1469,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
-        name: 'get_penny_signal_detail',
-        description: 'Get the full signal breakdown for a specific ticker: technical score, regulatory score, social score, dominant signal type, event descriptions, and last update time.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            ticker: {
-              type: 'string',
-              description: 'Stock ticker symbol (e.g. ACMR, MFIN)',
-            },
-          },
-          required: ['ticker'],
-        },
-      },
-      {
         name: 'get_tradable_universe',
         description: "Get Prophet's tradable floor — the curated set of liquid optionable underlyings (mega-caps + ETFs) eligible for options OPENS (config/prophet_tradable_universe.txt). The catalyst feeds (run_analyst_actions, run_catalyst_news) surface a WIDER surveillance set and tag each event with in_floor; this tool is the authoritative membership check. Optionally pass `symbol` to test one underlying → {symbol, in_floor, count}. With no args → {count, tickers}.",
         inputSchema: {
@@ -1512,22 +1476,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             symbol: { type: 'string', description: 'Optional single underlying to check for floor membership (case-insensitive).' },
           },
-        },
-      },
-      {
-        name: 'get_penny_universe',
-        description: 'Get the current monitored penny stock universe: all symbols passing the $2–$10 price, $50M–$500M market cap, $300K+ ADV, exchange-listed filter.',
-        inputSchema: {
-          type: 'object',
-          properties: {},
-        },
-      },
-      {
-        name: 'scan_penny_universe_now',
-        description: 'Trigger an out-of-cycle universe refresh. Use after market open to ensure the latest symbols are loaded. Returns {status: "refreshing"}.',
-        inputSchema: {
-          type: 'object',
-          properties: {},
         },
       },
       ...regimeAndGuardTools,
@@ -3038,21 +2986,6 @@ Worst Trade: ${stats.worst_result_pct.toFixed(1)}% ($${stats.worst_result_dollar
         return { content: [{ type: 'text', text: `Report: ${files[0]}\n\n${truncated}` }] };
       }
 
-      case 'get_penny_candidates': {
-        const min_score = args?.min_score ?? 60;
-        const detail = args?.detail === true ? '&detail=true' : '';
-        const data = await callTradingBot(`/penny/candidates?min_score=${min_score}${detail}`);
-        return {
-          content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
-        };
-      }
-
-      case 'get_penny_signal_detail': {
-        const data = await callTradingBot(`/penny/signal/${encodeURIComponent(args.ticker)}`);
-        return {
-          content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
-        };
-      }
 
       case 'get_harvest_state': {
         const data = await callTradingBot('/harvest/state');
@@ -3164,19 +3097,6 @@ Worst Trade: ${stats.worst_result_pct.toFixed(1)}% ($${stats.worst_result_dollar
         };
       }
 
-      case 'get_penny_universe': {
-        const data = await callTradingBot('/penny/universe');
-        return {
-          content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
-        };
-      }
-
-      case 'scan_penny_universe_now': {
-        const data = await callTradingBot('/penny/scan', 'POST');
-        return {
-          content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
-        };
-      }
 
       default:
         throw new Error(`Unknown tool: ${name}`);

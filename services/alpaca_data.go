@@ -23,7 +23,7 @@ type AlpacaDataService struct {
 // marketdata/rest.go) let a single rate-limited GetBars block for ~60s while
 // ignoring the caller's context. This clamps that to a worst case of ~4
 // attempts × 5s + 3 × 250ms ≈ 21s — still generous enough for heavy batch
-// callers like penny_max_filter's 100-symbol GetMultiBars, but far below the
+// callers doing large multi-symbol GetMultiBars, but far below the
 // runaway default.
 func defaultAlpacaClientOpts(apiKey, secretKey string) marketdata.ClientOpts {
 	return marketdata.ClientOpts{

@@ -39,7 +39,7 @@ const STRESS_KEYS = [
   'per_share_slippage_usd', 'slippage_pct_of_price_floor', 'stop_gap_through_pct',
   'assumed_spread_pct_of_mid', 'assumed_spread_pct_of_credit',
 ];
-const FRICTION_PROFILES = ['stocks', 'penny_stocks', 'single_leg_options', 'iron_condor'];
+const FRICTION_PROFILES = ['stocks', 'single_leg_options', 'iron_condor'];
 
 export function buildStressConfig(baseline) {
   const out = structuredClone(baseline);

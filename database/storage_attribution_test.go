@@ -88,7 +88,7 @@ func TestGetSymbolStrategyAttribution(t *testing.T) {
 
 	// managed_positions fallback: a symbol with no DBOrder row at all but a
 	// managed_positions row carrying a non-empty AgentStrategy must still
-	// resolve. This is the defense-in-depth path for the III/Spark regression
+	// resolve. This is the defense-in-depth path for the MeanRev regression
 	// where the entry order failed to persist and the broker position became
 	// orphaned from its owning agent.
 	mp := &models.DBManagedPosition{
@@ -96,7 +96,7 @@ func TestGetSymbolStrategyAttribution(t *testing.T) {
 		Symbol:        "III",
 		Side:          "buy",
 		Strategy:      "SWING_TRADE",
-		AgentStrategy: "penny-momentum",
+		AgentStrategy: "mean-rev-rsi2",
 		Status:        "ACTIVE",
 	}
 	if err := s.SaveManagedPosition(mp); err != nil {
@@ -148,8 +148,8 @@ func TestGetSymbolStrategyAttribution(t *testing.T) {
 	if _, present := got["MSFT"]; present {
 		t.Errorf("MSFT should NOT be attributed from a sell-side order, got %q", got["MSFT"])
 	}
-	if got["III"] != "penny-momentum" {
-		t.Errorf("III attribution = %q, want penny-momentum (managed_positions fallback)", got["III"])
+	if got["III"] != "mean-rev-rsi2" {
+		t.Errorf("III attribution = %q, want mean-rev-rsi2 (managed_positions fallback)", got["III"])
 	}
 	if _, present := got["IBM"]; present {
 		t.Errorf("IBM should NOT be attributed from a managed_position with empty AgentStrategy, got %q", got["IBM"])

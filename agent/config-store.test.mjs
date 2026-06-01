@@ -164,7 +164,7 @@ test('loadConfig merges code-default agents/strategies missing from persisted co
     sandboxes: {},
     agents: [
       { id: 'default', name: 'Prophet', strategyId: 'v2-options' },
-      { id: 'penny-prophet', name: 'Spark', strategyId: 'penny-momentum' }, // user rename
+      { id: 'trend-prophet', name: 'Turtle', strategyId: 'trend' }, // user rename
       { id: 'mean-rev', name: 'Coil', strategyId: 'mean-rev-rsi2' },
     ],
     strategies: [
@@ -179,8 +179,8 @@ test('loadConfig merges code-default agents/strategies missing from persisted co
   // Missing code-default agent + strategy are merged in from defaults.
   assert.ok(cfg.agents.find(a => a.id === 'drift'), 'drift agent merged in from defaults');
   assert.ok(cfg.strategies.find(s => s.id === 'earnings-drift'), 'earnings-drift strategy merged in');
-  // User rename is preserved (NOT clobbered by the code default name 'PennyProphet').
-  assert.equal(cfg.agents.find(a => a.id === 'penny-prophet').name, 'Spark', 'user rename preserved');
+  // User rename is preserved (NOT clobbered by the code default name 'TrendProphet').
+  assert.equal(cfg.agents.find(a => a.id === 'trend-prophet').name, 'Turtle', 'user rename preserved');
   // Pre-existing agents stay; no duplicate ids introduced by the merge.
   assert.ok(cfg.agents.find(a => a.id === 'mean-rev'), 'existing coil agent preserved');
   const ids = cfg.agents.map(a => a.id);
@@ -215,12 +215,8 @@ test('non-Prophet/Harvest agents do NOT have the new pre-market scheduled-wake f
   const cfg = await cfgStore.loadConfig();
   const agents = cfg.agents;
 
-  // Penny: phase cadence only, no scheduledBeats, no suppressPhaseSnaps
-  const penny = agents.find(a => a.id === 'penny-prophet');
-  assert.ok(penny, 'PennyProphet should exist');
-  assert.equal(penny.scheduledBeats, undefined, 'Penny should have no scheduledBeats');
-  assert.equal(penny.suppressPhaseSnaps, undefined, 'Penny should not suppress any phase snaps');
-  assert.equal(penny.heartbeatOverrides?.pre_market, 900, 'Penny pre_market cadence unchanged');
+  // PennyProphet retired by v9 migration
+  assert.equal(agents.find(a => a.id === 'penny-prophet'), undefined, 'PennyProphet retired');
 
   // Coil: exclusive scheduledBeats (15:45) — must NOT flip to non-exclusive
   const coil = agents.find(a => a.id === 'mean-rev');

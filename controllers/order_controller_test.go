@@ -114,7 +114,7 @@ func TestHandleSell_LimitOrderRoundTrip(t *testing.T) {
 		"qty": 216,
 		"type": "limit",
 		"limit_price": 9.58,
-		"strategy": "penny-momentum"
+		"strategy": "v2-options"
 	}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/orders/sell", body)
 	req.Header.Set("Content-Type", "application/json")
@@ -141,8 +141,8 @@ func TestHandleSell_LimitOrderRoundTrip(t *testing.T) {
 	if *o.LimitPrice != 9.58 {
 		t.Errorf("LimitPrice=%v, want 9.58", *o.LimitPrice)
 	}
-	if o.Strategy != "penny-momentum" {
-		t.Errorf("Strategy=%q, want penny-momentum (attribution must propagate)", o.Strategy)
+	if o.Strategy != "v2-options" {
+		t.Errorf("Strategy=%q, want v2-options (attribution must propagate)", o.Strategy)
 	}
 }
 
@@ -201,7 +201,7 @@ func TestHandleBuy_LimitOrderRoundTrip(t *testing.T) {
 		"qty": 100,
 		"type": "limit",
 		"limit_price": 4.20,
-		"strategy": "penny-momentum"
+		"strategy": "v2-options"
 	}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/orders/buy", body)
 	req.Header.Set("Content-Type", "application/json")
@@ -229,31 +229,9 @@ func TestHandleBuy_LimitOrderRoundTrip(t *testing.T) {
 // TestBuy_AttributesByStrategyTagNotAgentSource asserts that the guard agent
 // is derived from the strategy tag when agent_source is absent — reproducing
 // the production attribution gap where every order defaulted to AgentMain.
-func TestBuy_AttributesByStrategyTagNotAgentSource(t *testing.T) {
-	// Production sends strategy="penny-momentum" and NO agent_source. The guard
-	// must see AgentPenny so the $500 penny per-position cap applies.
-	rec := &recordingTradingService{portfolio: 100000, cash: 100000}
-	guard := services.NewTradeGuard(&stubGuardLister{}, rec, services.TradeGuardConfig{
-		PennyMaxPositionDollars: 500, PennyMaxCapitalPct: 0.20,
-	})
-	oc := NewOrderController(rec, nil, noopStorage{})
-	oc.SetGuard(guard)
-	lp := 1.0
-	// $1 * 600 = $600 > $500 penny per-position cap — only blocks if attributed to penny.
-	_, err := oc.Buy(context.Background(), BuyRequest{
-		Symbol: "ABCD", Qty: 600, Type: "limit", LimitPrice: &lp, Strategy: "penny-momentum",
-	})
-	if err == nil {
-		t.Fatal("expected penny per-position cap to block a $600 buy attributed via strategy tag")
-	}
-	if !strings.Contains(err.Error(), "per-position cap") {
-		t.Fatalf("expected penny per-position cap error, got: %v", err)
-	}
-}
-
 // TestBuy_ComputesAllocationForAllAgents asserts that the per-position cap
-// fires on a non-penny (main) buy. Before the fix, allocationDollars was
-// always 0 for non-penny agents, so the cap could never trigger.
+// fires on a non-main agent buy. Before the fix, allocationDollars was
+// always 0 for non-main agents, so the cap could never trigger.
 func TestBuy_ComputesAllocationForAllAgents(t *testing.T) {
 	rec := &recordingTradingService{portfolio: 100000, cash: 100000}
 	guard := services.NewTradeGuard(&stubGuardLister{}, rec, services.TradeGuardConfig{
@@ -262,7 +240,7 @@ func TestBuy_ComputesAllocationForAllAgents(t *testing.T) {
 	oc := NewOrderController(rec, nil, noopStorage{})
 	oc.SetGuard(guard)
 	lp := 100.0
-	// 200 * $100 = $20k > 12% of $100k — must block a MAIN (non-penny) buy.
+	// 200 * $100 = $20k > 12% of $100k — must block a main buy.
 	_, err := oc.Buy(context.Background(), BuyRequest{
 		Symbol: "AAPL", Qty: 200, Type: "limit", LimitPrice: &lp, Strategy: "v2-options",
 	})
@@ -271,7 +249,7 @@ func TestBuy_ComputesAllocationForAllAgents(t *testing.T) {
 	}
 	// Discriminating assertion: the block must come from the real per-position
 	// cap (computed $20k notional), NOT the indeterminate-notional fail-closed
-	// path. The pre-fix penny-only code left allocationDollars=0 for main, which
+	// path. The pre-fix code left allocationDollars=0 for main, which
 	// would have blocked with "could not be determined" instead — so this keeps
 	// the test honest as a red→green regression guard.
 	if !strings.Contains(err.Error(), "per-position cap") {

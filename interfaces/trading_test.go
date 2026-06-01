@@ -12,7 +12,7 @@ func TestParseStrategyFromClientOrderID(t *testing.T) {
 		{"no colon", "deadbeef-1234", ""},
 		{"leading colon", ":no-strategy-prefix", ""},
 		{"trend tagged", "trend:8f3a1c-de4f-1234", "trend"},
-		{"penny tagged", "penny-momentum:abcd-efgh", "penny-momentum"},
+		{"v2 tagged", "v2-options:abcd-efgh", "v2-options"},
 		{"harvest tagged", "harvest:0001", "harvest"},
 		{"multi-colon (only first split counts)", "trend:abc:def", "trend"},
 	}

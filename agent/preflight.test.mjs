@@ -13,7 +13,6 @@ import {
   regimeGateBlockSkipIfNoPositions,
   resolvePreflight,
   positionCountFromResponse,
-  isPennyOwnedOrder,
 } from './preflight.js';
 
 // ── helpers ────────────────────────────────────────────────────────
@@ -33,11 +32,6 @@ function makeRuntime(routes) {
 }
 
 const candidates = (count) => ({ data: { count } });
-// Post-merge: penny preflight now reads /api/v1/positions?strategy=penny-momentum
-// (plain array) and /api/v1/orders?status=open (plain array). pennyPositions
-// returns an array of position objects directly; pennyOrders returns orders.
-const pennyPositions = (positions) => ({ data: positions });
-const pennyOrders = (orders) => ({ data: orders });
 const byStrategy = (count) => ({ data: { count } });
 const blackoutOn = (reason = 'CPI release at 2026-05-13 12:30 UTC') => ({
   data: { is_blackout: true, reason },
@@ -100,36 +94,6 @@ test('positionCountFromResponse: {count} object (old bug shape) → -1', () => {
 test('positionCountFromResponse: null/undefined → -1', () => {
   assert.equal(positionCountFromResponse(null), -1);
   assert.equal(positionCountFromResponse(undefined), -1);
-});
-
-// ── isPennyOwnedOrder ──────────────────────────────────────────────
-//
-// On the shared Alpaca account /api/v1/orders is not strategy-filtered, so
-// penny must recognize its own orders by the "penny-momentum" strategy tag the
-// MCP stamps onto the broker client_order_id. Field casing is normalized (live
-// Go feed = "Strategy", mocks/tests may use "strategy").
-
-test('isPennyOwnedOrder: tagged penny-momentum → owned', () => {
-  assert.equal(isPennyOwnedOrder({ Symbol: 'PENY', Strategy: 'penny-momentum' }), true);
-});
-
-test('isPennyOwnedOrder: different non-empty strategy tag → not owned', () => {
-  assert.equal(isPennyOwnedOrder({ Symbol: 'TLT', Strategy: 'trend' }), false);
-  assert.equal(isPennyOwnedOrder({ Symbol: 'SPY', Strategy: 'v2-options' }), false);
-});
-
-test('isPennyOwnedOrder: untagged foreign order (the UNH/ADI leak) → not owned', () => {
-  assert.equal(isPennyOwnedOrder({ Symbol: 'UNH', Strategy: '' }), false);
-  assert.equal(isPennyOwnedOrder({ Symbol: 'ADI' }), false); // Strategy field absent
-});
-
-test('isPennyOwnedOrder: lowercase strategy field tolerated', () => {
-  assert.equal(isPennyOwnedOrder({ symbol: 'PENY', strategy: 'penny-momentum' }), true);
-});
-
-test('isPennyOwnedOrder: null/whitespace → not owned', () => {
-  assert.equal(isPennyOwnedOrder(null), false);
-  assert.equal(isPennyOwnedOrder({ Strategy: '   ' }), false);
 });
 
 // ── isEconomicBlackout ─────────────────────────────────────────────
@@ -257,14 +221,7 @@ test('regimeGateBlockSkipIfNoPositions: returns null on endpoint error (fail-ope
   assert.equal(r, null);
 });
 
-// ── pennyPreflight integration ─────────────────────────────────────
-//
-// pennyPreflight gained a closed-phase guard (mirrors prophetPreflight): during
-// the overnight/weekend 'closed' window only open positions keep it awake.
-// These integration tests therefore freeze the wall clock so the phase is
-// deterministic regardless of when the suite runs. ET_OPEN = Thu 14:30 ET
-// (midday, open); ET_CLOSED = Thu 23:08 ET (post-8pm) — the exact instant from
-// the observed Spark beat that woke the LLM for 2 unfillable orders.
+// Helper constants for frozen-time tests (used by harvest/prophet tests).
 const ET_OPEN = Date.UTC(2026, 4, 21, 18, 30, 0);
 const ET_CLOSED = Date.UTC(2026, 4, 22, 3, 8, 0);
 
@@ -276,177 +233,6 @@ async function withFrozenTime(epoch, fn) {
     mock.timers.reset();
   }
 }
-
-test('penny: blackout + no positions + no orders + candidates exist → skip (was run before)', async () => {
-  const rt = makeRuntime([
-    ['/api/v1/penny/candidates?min_score=60', () => candidates(3)],
-    ['/api/v1/positions?strategy=penny-momentum', () => pennyPositions([])],
-    ['/api/v1/orders?status=open', () => pennyOrders([])],
-    ['/api/v1/econ/blackout', () => blackoutOn('NFP release')],
-  ]);
-  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('penny-momentum', rt, {}));
-  assert.equal(r.skip, true);
-  assert.match(r.reason, /econ blackout/);
-});
-
-test('penny: blackout + open position → run (exits must happen)', async () => {
-  const rt = makeRuntime([
-    ['/api/v1/penny/candidates?min_score=60', () => candidates(0)],
-    ['/api/v1/positions?strategy=penny-momentum', () => pennyPositions([{ symbol: 'ABCD', qty: 100 }])],
-    ['/api/v1/orders?status=open', () => pennyOrders([])],
-    ['/api/v1/econ/blackout', () => blackoutOn('CPI release')],
-  ]);
-  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('penny-momentum', rt, {}));
-  assert.equal(r.skip, false);
-});
-
-test('penny: regime RED + no positions + no orders + candidates exist → skip (regime fires before econ)', async () => {
-  // Regime gate is checked before econ blackout, so the reason should point
-  // to regime even if both gates would fire. Lets operators see the broader
-  // signal that's actually limiting the agent.
-  const rt = makeRuntime([
-    ['/api/v1/penny/candidates?min_score=60', () => candidates(3)],
-    ['/api/v1/positions?strategy=penny-momentum', () => pennyPositions([])],
-    ['/api/v1/orders?status=open', () => pennyOrders([])],
-    ['/api/v1/regime-gate/status', () => regimeBlock('RED', 12)],
-    ['/api/v1/econ/blackout', () => blackoutOff()],
-  ]);
-  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('penny-momentum', rt, {}));
-  assert.equal(r.skip, true);
-  assert.match(r.reason, /regime gate RED/);
-});
-
-test('penny: regime RED + open position → run (exits must happen even at RED tier)', async () => {
-  const rt = makeRuntime([
-    ['/api/v1/penny/candidates?min_score=60', () => candidates(0)],
-    ['/api/v1/positions?strategy=penny-momentum', () => pennyPositions([{ symbol: 'ABCD', qty: 100 }])],
-    ['/api/v1/orders?status=open', () => pennyOrders([])],
-    ['/api/v1/regime-gate/status', () => regimeBlock('RED', 8)],
-    ['/api/v1/econ/blackout', () => blackoutOff()],
-  ]);
-  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('penny-momentum', rt, {}));
-  assert.equal(r.skip, false);
-});
-
-test('penny: blackout + pending penny-tagged order → run (in-flight penny order needs evaluation)', async () => {
-  // A penny order in flight must keep penny awake even during a blackout — but
-  // the order has to be penny's own. Tagged via the broker client_order_id
-  // (Strategy "penny-momentum"), as the MCP tags every penny order.
-  const rt = makeRuntime([
-    ['/api/v1/penny/candidates?min_score=60', () => candidates(0)],
-    ['/api/v1/positions?strategy=penny-momentum', () => pennyPositions([])],
-    ['/api/v1/orders?status=open', () => pennyOrders([{ Symbol: 'XYZ', Strategy: 'penny-momentum', Status: 'new' }])],
-    ['/api/v1/econ/blackout', () => blackoutOn('CPI release')],
-  ]);
-  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('penny-momentum', rt, {}));
-  assert.equal(r.skip, false);
-  assert.match(r.reason, /open order/);
-});
-
-// ── pennyPreflight shared-account order leak ───────────────────────
-//
-// Spark trades on an Alpaca account shared with co-located agents (Prophet,
-// Turtle, …). /api/v1/orders?status=open is NOT strategy-filtered, so those
-// agents' resting orders show up in penny's feed. Observed bug: two untagged
-// protective stops (UNH sell-stop, ADI sell-stop) placed by another strategy
-// woke Spark's LLM every pre-market beat for "2 open order(s) pending fill",
-// even with zero penny positions/candidates. Penny must count only its own
-// orders: tagged "penny-momentum", or untagged on a symbol penny actually holds.
-
-test('penny: open phase + foreign untagged orders, no penny positions/candidates → skip (UNH/ADI leak fixed)', async () => {
-  const rt = makeRuntime([
-    ['/api/v1/penny/candidates?min_score=60', () => candidates(0)],
-    ['/api/v1/positions?strategy=penny-momentum', () => pennyPositions([])],
-    ['/api/v1/orders?status=open', () => pennyOrders([
-      { Symbol: 'UNH', Side: 'sell', Type: 'stop', Strategy: '', Status: 'new' },
-      { Symbol: 'ADI', Side: 'sell', Type: 'stop', Strategy: '', Status: 'new' },
-    ])],
-  ]);
-  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('penny-momentum', rt, {}));
-  assert.equal(r.skip, true);
-  assert.match(r.reason, /no open orders|no candidates/);
-});
-
-test('penny: open phase + order tagged for another strategy → skip (not penny\'s order)', async () => {
-  const rt = makeRuntime([
-    ['/api/v1/penny/candidates?min_score=60', () => candidates(0)],
-    ['/api/v1/positions?strategy=penny-momentum', () => pennyPositions([])],
-    ['/api/v1/orders?status=open', () => pennyOrders([{ Symbol: 'TLT', Strategy: 'trend', Status: 'new' }])],
-  ]);
-  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('penny-momentum', rt, {}));
-  assert.equal(r.skip, true);
-});
-
-test('penny: open phase + one penny order mixed with foreign orders → run, counts only penny\'s', async () => {
-  const rt = makeRuntime([
-    ['/api/v1/penny/candidates?min_score=60', () => candidates(0)],
-    ['/api/v1/positions?strategy=penny-momentum', () => pennyPositions([])],
-    ['/api/v1/orders?status=open', () => pennyOrders([
-      { Symbol: 'UNH', Strategy: '', Status: 'new' },
-      { Symbol: 'PENY', Strategy: 'penny-momentum', Status: 'new' },
-      { Symbol: 'TLT', Strategy: 'trend', Status: 'new' },
-    ])],
-  ]);
-  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('penny-momentum', rt, {}));
-  assert.equal(r.skip, false);
-  assert.match(r.reason, /1 open order/);
-});
-
-test('penny: blackout endpoint error + candidates + nothing in flight → run (fail open)', async () => {
-  const rt = makeRuntime([
-    ['/api/v1/penny/candidates?min_score=60', () => candidates(2)],
-    ['/api/v1/positions?strategy=penny-momentum', () => pennyPositions([])],
-    ['/api/v1/orders?status=open', () => pennyOrders([])],
-    ['/api/v1/econ/blackout', () => { throw new Error('boom'); }],
-  ]);
-  const r = await withFrozenTime(ET_OPEN, () => resolvePreflight('penny-momentum', rt, {}));
-  assert.equal(r.skip, false);
-});
-
-// ── pennyPreflight closed-phase guard (mirrors prophetPreflight) ────
-//
-// During the 'closed' window (overnight 8pm-4am ET + weekends) the broker is
-// shut: entry candidates can't be acted on and open orders can't fill (penny
-// place_buy_order defaults to day orders, auto-canceled by Alpaca at the
-// close). Only open positions warrant a wake. The 4am ET phase-boundary snap
-// (harness.js) re-checks any still-open orders when pre-market resumes.
-
-test('penny: closed phase + no positions → skip (candidates/orders endpoints not consulted)', async () => {
-  // Only the positions route is mocked. If the closed branch wrongly consulted
-  // /penny/candidates or /orders, makeRuntime throws (unmocked URL) and the
-  // result would be a fail-open "preflight error" — not the closed-phase skip
-  // asserted below. So this also proves the closed branch touches positions only.
-  const rt = makeRuntime([
-    ['/api/v1/positions?strategy=penny-momentum', () => pennyPositions([])],
-  ]);
-  const r = await withFrozenTime(ET_CLOSED, () => resolvePreflight('penny-momentum', rt, {}));
-  assert.equal(r.skip, true);
-  assert.match(r.reason, /closed phase/);
-});
-
-test('penny: closed phase + open orders + candidates but no positions → skip (reproduces unfillable-order wake)', async () => {
-  // The observed bug: at 23:08 ET Spark woke the LLM because 2 orders were
-  // pending fill, even though the market was shut and they could not fill.
-  // With the guard, open orders (and candidates) no longer keep it awake when
-  // closed — only positions do.
-  const rt = makeRuntime([
-    ['/api/v1/positions?strategy=penny-momentum', () => pennyPositions([])],
-    ['/api/v1/penny/candidates?min_score=60', () => candidates(3)],
-    ['/api/v1/orders?status=open', () => pennyOrders([{ symbol: 'XYZ', status: 'new' }, { symbol: 'ABC', status: 'new' }])],
-  ]);
-  const r = await withFrozenTime(ET_CLOSED, () => resolvePreflight('penny-momentum', rt, {}));
-  assert.equal(r.skip, true);
-  assert.match(r.reason, /closed phase/);
-});
-
-test('penny: closed phase + open position → run (overnight exit checks still evaluated)', async () => {
-  const rt = makeRuntime([
-    ['/api/v1/positions?strategy=penny-momentum', () => pennyPositions([{ symbol: 'ABCD', qty: 100 }])],
-  ]);
-  const r = await withFrozenTime(ET_CLOSED, () => resolvePreflight('penny-momentum', rt, {}));
-  assert.equal(r.skip, false);
-  assert.match(r.reason, /position/);
-});
 
 // ── harvestPreflight integration ───────────────────────────────────
 // Harvest has its own 24h pre-FOMC blackout that stays as a strategy-specific

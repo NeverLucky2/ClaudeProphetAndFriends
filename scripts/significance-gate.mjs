@@ -31,7 +31,7 @@ export function exposurePerTrade(trade) {
     return entry * size * 100 * 10;
   }
   if (profile === 'single_leg_options') return entry * size * 100;
-  if (profile === 'stocks' || profile === 'penny_stocks') return entry * size;
+  if (profile === 'stocks') return entry * size;
   return entry * size;
 }
 

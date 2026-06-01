@@ -101,7 +101,7 @@ func TestBeatContext_HappyPath(t *testing.T) {
 		Score: 55, Tier: "NORMAL", SizingMultiplier: 0.8, BlockNewEntries: false,
 	}}
 	seg := &fakeSegmentPnLFetcher{pnl: &services.SegmentPnL{
-		Strategy: "penny-momentum", UnrealizedPnLPct: 0.5, DeployedPercent: 12.0,
+		Strategy: "v2-options", UnrealizedPnLPct: 0.5, DeployedPercent: 12.0,
 	}}
 
 	ctrl := NewBeatContextController(acct, pos, black, regime, seg)
@@ -109,7 +109,7 @@ func TestBeatContext_HappyPath(t *testing.T) {
 	router := gin.New()
 	router.GET("/api/v1/beat-context", ctrl.HandleGet)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/beat-context?strategy=penny-momentum", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/beat-context?strategy=v2-options", nil)
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -192,11 +192,11 @@ func TestBeatContext_HappyPath(t *testing.T) {
 		t.Errorf("segment_pnl should NOT use camelCase 'deployedPct': %v", spRaw)
 	}
 
-	if pos.gotStrat != "penny-momentum" {
-		t.Errorf("positions: want strategy=%q, got %q", "penny-momentum", pos.gotStrat)
+	if pos.gotStrat != "v2-options" {
+		t.Errorf("positions: want strategy=%q, got %q", "v2-options", pos.gotStrat)
 	}
-	if seg.gotStrat != "penny-momentum" {
-		t.Errorf("segment_pnl: want strategy=%q, got %q", "penny-momentum", seg.gotStrat)
+	if seg.gotStrat != "v2-options" {
+		t.Errorf("segment_pnl: want strategy=%q, got %q", "v2-options", seg.gotStrat)
 	}
 }
 
@@ -279,7 +279,7 @@ func TestBeatContext_StampsProphetBeat(t *testing.T) {
 	})
 
 	t.Run("non-prophet strategy does not stamp", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/api/v1/beat-context?strategy=penny-momentum", nil)
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/beat-context?strategy=harvest", nil)
 		w := httptest.NewRecorder()
 		router.ServeHTTP(w, req)
 
@@ -303,14 +303,14 @@ func TestBeatContext_SoftFailsOnDownstreamErrors(t *testing.T) {
 		}}
 		black := &fakeBlackoutFetcher{isBlackout: false}
 		regime := &fakeRegimeFetcher{err: errors.New("boom")}
-		seg := &fakeSegmentPnLFetcher{pnl: &services.SegmentPnL{Strategy: "penny-momentum"}}
+		seg := &fakeSegmentPnLFetcher{pnl: &services.SegmentPnL{Strategy: "v2-options"}}
 
 		ctrl := NewBeatContextController(acct, pos, black, regime, seg)
 
 		router := gin.New()
 		router.GET("/api/v1/beat-context", ctrl.HandleGet)
 
-		req := httptest.NewRequest(http.MethodGet, "/api/v1/beat-context?strategy=penny-momentum", nil)
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/beat-context?strategy=v2-options", nil)
 		w := httptest.NewRecorder()
 		router.ServeHTTP(w, req)
 
@@ -370,14 +370,14 @@ func TestBeatContext_SoftFailsOnDownstreamErrors(t *testing.T) {
 		pos := &fakePositionsFetcher{err: errors.New("positions-down")}
 		black := &fakeBlackoutFetcher{isBlackout: false}
 		regime := &fakeRegimeFetcher{status: services.RegimeGateStatus{Tier: "NORMAL", SizingMultiplier: 1.0}}
-		seg := &fakeSegmentPnLFetcher{pnl: &services.SegmentPnL{Strategy: "penny-momentum"}}
+		seg := &fakeSegmentPnLFetcher{pnl: &services.SegmentPnL{Strategy: "v2-options"}}
 
 		ctrl := NewBeatContextController(acct, pos, black, regime, seg)
 
 		router := gin.New()
 		router.GET("/api/v1/beat-context", ctrl.HandleGet)
 
-		req := httptest.NewRequest(http.MethodGet, "/api/v1/beat-context?strategy=penny-momentum", nil)
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/beat-context?strategy=v2-options", nil)
 		w := httptest.NewRecorder()
 		router.ServeHTTP(w, req)
 

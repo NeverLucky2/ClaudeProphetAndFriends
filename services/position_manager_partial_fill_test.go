@@ -67,7 +67,7 @@ func TestCheckEntryOrder_PartialFill_AcceptsAndCancelsRemainder(t *testing.T) {
 		Symbol: "III", Side: "buy", Status: "PENDING",
 		Quantity: 98, RemainingQty: 98, EntryOrderID: "entry-1",
 		EntryPrice: 5.07, StopLossPrice: 4.56, TakeProfitPrice: 6.08,
-		AgentStrategy: "penny-momentum",
+
 	}
 	injectPosition(pm, pos)
 
@@ -111,7 +111,8 @@ func TestCheckEntryOrder_Rejected_MarksFailed(t *testing.T) {
 	pm := newReconcilePM(t, trading)
 	pos := &ManagedPosition{
 		Symbol: "III", Side: "buy", Status: "PENDING",
-		Quantity: 98, RemainingQty: 98, EntryOrderID: "entry-1", AgentStrategy: "penny-momentum",
+		Quantity: 98, RemainingQty: 98, EntryOrderID: "entry-1",
+
 	}
 	injectPosition(pm, pos)
 
@@ -137,7 +138,8 @@ func TestCheckEntryOrder_FullFill_StillActivates(t *testing.T) {
 	pos := &ManagedPosition{
 		Symbol: "III", Side: "buy", Status: "PENDING",
 		Quantity: 98, RemainingQty: 98, EntryOrderID: "entry-1",
-		StopLossPrice: 4.56, TakeProfitPrice: 6.08, AgentStrategy: "penny-momentum",
+		StopLossPrice: 4.56, TakeProfitPrice: 6.08,
+
 	}
 	injectPosition(pm, pos)
 

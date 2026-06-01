@@ -59,7 +59,7 @@ func TestReconcile_PhantomActive_ClosedWithoutOrderAfterTwoPasses(t *testing.T) 
 	trading := &reconcileStubTrading{stubTrading: &stubTrading{}, positions: []*interfaces.Position{}}
 	pm := newReconcilePM(t, trading)
 
-	pos := &ManagedPosition{Symbol: "III", Side: "buy", Status: "ACTIVE", Quantity: 490, RemainingQty: 490, AgentStrategy: "penny-momentum"}
+	pos := &ManagedPosition{Symbol: "III", Side: "buy", Status: "ACTIVE", Quantity: 490, RemainingQty: 490, AgentStrategy: "v2-options"}
 	injectPosition(pm, pos)
 
 	// Pass 1: absence seen once — not yet closed (could be propagation lag).

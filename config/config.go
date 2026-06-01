@@ -1,7 +1,6 @@
 package config
 
 import (
-	"fmt"
 	"os"
 	"strconv"
 	"time"
@@ -23,7 +22,6 @@ type Config struct {
 	EnableLogging     bool
 	LogLevel          string
 	DataRetentionDays int
-	OperatorEmail     string // SEC EDGAR User-Agent contact; set via OPERATOR_EMAIL env var
 
 	// AlpacaDataRatePerMin is the shared Alpaca data-API rate cap (requests/min)
 	// governing bar + options-chain fetches. Default 180 leaves headroom under
@@ -31,8 +29,6 @@ type Config struct {
 	AlpacaDataRatePerMin int
 
 	// Trade guard limits
-	PennyMaxCapitalPct      float64 // fraction of portfolio, e.g. 0.20
-	PennyMaxPositionDollars float64 // max dollars per single penny trade, e.g. 500
 	MaxDailyLossPct         float64 // daily loss circuit breaker as positive percent, e.g. 5.0; 0 disables
 
 	EnableSectorAggregation bool    // turn on cross-agent sector concentration cap
@@ -115,8 +111,6 @@ func Load() error {
 		LogLevel:          getEnvOrDefault("LOG_LEVEL", "info"),
 		DataRetentionDays: 90,
 
-		PennyMaxCapitalPct:      parseFloat(getEnvOrDefault("PENNY_MAX_CAPITAL_PCT", "0.20")),
-		PennyMaxPositionDollars: parseFloat(getEnvOrDefault("PENNY_MAX_POSITION_DOLLARS", "500")),
 		MaxDailyLossPct:         parseFloat(getEnvOrDefault("MAX_DAILY_LOSS_PCT", "5")),
 
 		// Flag-gated rollout: defaults to false. Set ENABLE_SECTOR_AGGREGATION=true
@@ -155,13 +149,8 @@ func Load() error {
 		BarCacheEnabled: getEnvOrDefault("BAR_CACHE_ENABLED", "true") == "true",
 		BarCacheDir:     getEnvOrDefault("BAR_CACHE_DIR", "./data/bar-cache"),
 		BarCacheTTL:     parseDurationOrDefault("BAR_CACHE_TTL", "5m"),
-
-		OperatorEmail: os.Getenv("OPERATOR_EMAIL"),
 	}
 
-	if AppConfig.OperatorEmail == "" {
-		return fmt.Errorf("OPERATOR_EMAIL must be set — SEC EDGAR policy requires a real contact address in the User-Agent header. Set OPERATOR_EMAIL=your@email.com in .env")
-	}
 	return nil
 }
 

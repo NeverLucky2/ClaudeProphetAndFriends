@@ -31,7 +31,6 @@ const STRATEGY_IDS = Object.keys(STRATEGY_TOOL_ALLOWLISTS);
 
 // Owner -> the signal/order endpoints that must appear on exactly that agent.
 const EXCLUSIVE = {
-  'penny-momentum': _internals.PENNY_SIGNALS,
   'harvest': _internals.HARVEST_TOOLS,
   'trend': _internals.TREND_SIGNALS,
   'mean-rev-rsi2': _internals.MEANREV_SIGNALS,
@@ -100,12 +99,6 @@ test('each exclusive signal endpoint appears on exactly its owning agent', () =>
   }
 });
 
-test('penny does not see mean-reversion tools (the reported bug)', () => {
-  const penny = new Set(STRATEGY_TOOL_ALLOWLISTS['penny-momentum']);
-  assert.ok(!penny.has('get_mean_reversion_signal'));
-  assert.ok(!penny.has('get_mean_reversion_candidates'));
-});
-
 test('Prophet (v2-options) is broad but excludes other strategies signals + manager tools', () => {
   const prophet = new Set(STRATEGY_TOOL_ALLOWLISTS['v2-options']);
   // Excludes every other strategy's exclusive endpoints.
@@ -130,14 +123,15 @@ test('Prophet (v2-options) is broad but excludes other strategies signals + mana
   for (const tool of _internals.PROPHET_TRIM) {
     assert.ok(!prophet.has(tool), `Prophet must not expose trimmed tool "${tool}"`);
   }
-  // Size sanity: catalog - 15 exclusive - 8 manager - PROPHET_TRIM. Computed off
+  // Size sanity: catalog - 11 exclusive - 8 manager - PROPHET_TRIM. Computed off
   // ALL_TOOLS.length so it tracks catalog growth (e.g. a new generic Prophet tool).
-  assert.equal(STRATEGY_TOOL_ALLOWLISTS['v2-options'].length, ALL_TOOLS.length - 15 - MANAGER_TOOLS.length - _internals.PROPHET_TRIM.length);
+  // (11 = harvest 6 + trend 1 + meanrev 2 + drift 2)
+  assert.equal(STRATEGY_TOOL_ALLOWLISTS['v2-options'].length, ALL_TOOLS.length - 11 - MANAGER_TOOLS.length - _internals.PROPHET_TRIM.length);
 });
 
 test('resolveAllowedTools: non-empty sandbox override wins', () => {
   const override = ['get_account', 'get_quote'];
-  assert.deepEqual(resolveAllowedTools(override, 'penny-momentum'), override);
+  assert.deepEqual(resolveAllowedTools(override, 'v2-options'), override);
 });
 
 test('resolveAllowedTools: empty sandbox list falls back to strategy default', () => {

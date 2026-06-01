@@ -84,10 +84,7 @@ func managedPos(symbol string, agent AgentSource, status string, allocation floa
 }
 
 func defaultConfig() TradeGuardConfig {
-	return TradeGuardConfig{
-		PennyMaxCapitalPct:      0.20,
-		PennyMaxPositionDollars: 500,
-	}
+	return TradeGuardConfig{}
 }
 
 func sectorConfig() TradeGuardConfig {
@@ -107,66 +104,6 @@ func sectorConfig() TradeGuardConfig {
 
 // --- tests ---
 
-func TestGuard_PennyCannotBuyMainSymbol(t *testing.T) {
-	lister := &stubLister{
-		positions: []*ManagedPosition{
-			managedPos("AAPL", AgentMain, "ACTIVE", 1000),
-		},
-	}
-	g := NewTradeGuard(lister, &stubTrading{portfolio: 10000}, defaultConfig())
-	err := g.CheckBuy(context.Background(), AgentPenny, "AAPL", 100)
-	if err == nil {
-		t.Fatal("expected error: penny buying main symbol")
-	}
-}
-
-func TestGuard_MainCannotBuyPennySymbol(t *testing.T) {
-	lister := &stubLister{
-		positions: []*ManagedPosition{
-			managedPos("MEME", AgentPenny, "ACTIVE", 200),
-		},
-	}
-	g := NewTradeGuard(lister, &stubTrading{portfolio: 10000}, defaultConfig())
-	err := g.CheckBuy(context.Background(), AgentMain, "MEME", 500)
-	if err == nil {
-		t.Fatal("expected error: main buying penny symbol")
-	}
-}
-
-func TestGuard_PennyExceedsPerPositionCap(t *testing.T) {
-	g := NewTradeGuard(&stubLister{}, &stubTrading{portfolio: 100000}, defaultConfig())
-	err := g.CheckBuy(context.Background(), AgentPenny, "XYZ", 600) // cap is 500
-	if err == nil {
-		t.Fatal("expected error: penny position exceeds per-position cap")
-	}
-}
-
-func TestGuard_PennyExceedsCapitalCap(t *testing.T) {
-	lister := &stubLister{
-		positions: []*ManagedPosition{
-			managedPos("AAA", AgentPenny, "ACTIVE", 1800), // already $1800 of $2000 cap
-		},
-	}
-	g := NewTradeGuard(lister, &stubTrading{portfolio: 10000}, defaultConfig()) // cap = 20% * 10000 = 2000
-	err := g.CheckBuy(context.Background(), AgentPenny, "BBB", 300)             // 1800+300 > 2000
-	if err == nil {
-		t.Fatal("expected error: penny capital cap exceeded")
-	}
-}
-
-func TestGuard_PennyBuyAllowed(t *testing.T) {
-	lister := &stubLister{
-		positions: []*ManagedPosition{
-			managedPos("AAA", AgentPenny, "ACTIVE", 500),
-		},
-	}
-	g := NewTradeGuard(lister, &stubTrading{portfolio: 10000}, defaultConfig()) // cap = 2000
-	err := g.CheckBuy(context.Background(), AgentPenny, "BBB", 400)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
 func TestGuard_ClosedPositionNotConflict(t *testing.T) {
 	lister := &stubLister{
 		positions: []*ManagedPosition{
@@ -174,22 +111,22 @@ func TestGuard_ClosedPositionNotConflict(t *testing.T) {
 		},
 	}
 	g := NewTradeGuard(lister, &stubTrading{portfolio: 10000}, defaultConfig())
-	err := g.CheckBuy(context.Background(), AgentPenny, "AAPL", 100)
+	err := g.CheckBuy(context.Background(), AgentMain, "AAPL", 100)
 	if err != nil {
 		t.Fatalf("closed position should not block: %v", err)
 	}
 }
 
-func TestGuard_SellBlockedByOpponent(t *testing.T) {
+func TestGuard_SellAllowedWhenOwned(t *testing.T) {
 	lister := &stubLister{
 		positions: []*ManagedPosition{
 			managedPos("TSLA", AgentMain, "ACTIVE", 1000),
 		},
 	}
 	g := NewTradeGuard(lister, nil, defaultConfig())
-	err := g.CheckSell(context.Background(), AgentPenny, "TSLA")
-	if err == nil {
-		t.Fatal("expected error: penny selling main-owned symbol")
+	err := g.CheckSell(context.Background(), AgentMain, "TSLA")
+	if err != nil {
+		t.Fatalf("expected no error when agent sells owned symbol: %v", err)
 	}
 }
 
@@ -197,15 +134,15 @@ func TestGuard_RawOrderTracking(t *testing.T) {
 	g := NewTradeGuard(&stubLister{}, nil, defaultConfig())
 	g.RecordRawBuy(AgentMain, "NVDA")
 
-	// Penny should not be able to buy NVDA now
-	err := g.CheckBuy(context.Background(), AgentPenny, "NVDA", 100)
+	// Drift should not be able to buy NVDA now (Main owns it)
+	err := g.CheckBuy(context.Background(), AgentDrift, "NVDA", 100)
 	if err == nil {
-		t.Fatal("expected error: penny buying raw-main symbol")
+		t.Fatal("expected error: drift cannot buy raw-main symbol")
 	}
 
-	// After main sells, penny should be able to buy
+	// After main sells, drift should be able to buy
 	g.RecordRawSell(AgentMain, "NVDA")
-	err = g.CheckBuy(context.Background(), AgentPenny, "NVDA", 100)
+	err = g.CheckBuy(context.Background(), AgentDrift, "NVDA", 100)
 	if err != nil {
 		t.Fatalf("expected no error after raw sell: %v", err)
 	}
@@ -219,23 +156,24 @@ func TestGuard_UntaggedPositionTreatedAsMain(t *testing.T) {
 		},
 	}
 	g := NewTradeGuard(lister, nil, defaultConfig())
-	err := g.CheckBuy(context.Background(), AgentPenny, "IBM", 100)
+	// Drift should not be able to buy IBM (Main owns it via untagged position)
+	err := g.CheckBuy(context.Background(), AgentDrift, "IBM", 100)
 	if err == nil {
-		t.Fatal("expected error: untagged position should block penny")
+		t.Fatal("expected error: untagged position should block drift")
 	}
 }
 
 func TestGuard_EmptyAgentSourceDefaultsToMain(t *testing.T) {
 	lister := &stubLister{
 		positions: []*ManagedPosition{
-			managedPos("GOOG", AgentPenny, "ACTIVE", 200),
+			managedPos("GOOG", AgentMain, "ACTIVE", 200),
 		},
 	}
 	g := NewTradeGuard(lister, nil, defaultConfig())
-	// Empty agent source = main; penny holds GOOG → should block
-	err := g.CheckBuy(context.Background(), "", "GOOG", 500)
+	// Empty agent source = main; drift holds GOOG → should block
+	err := g.CheckBuy(context.Background(), AgentDrift, "GOOG", 500)
 	if err == nil {
-		t.Fatal("expected error: empty agent treated as main, cannot buy penny symbol")
+		t.Fatal("expected error: empty agent treated as main, drift cannot buy main symbol")
 	}
 }
 
@@ -247,8 +185,8 @@ func TestGuard_DailyLossCircuitBreakerTriggers(t *testing.T) {
 	if err := g.CheckBuy(context.Background(), AgentMain, "AAPL", 500); err == nil {
 		t.Fatal("expected error: daily loss circuit breaker should block at -6% with 5% limit")
 	}
-	if err := g.CheckBuy(context.Background(), AgentPenny, "ABCD", 100); err == nil {
-		t.Fatal("expected error: circuit breaker also applies to penny agent")
+	if err := g.CheckBuy(context.Background(), AgentDrift, "ABCD", 100); err == nil {
+		t.Fatal("expected error: circuit breaker also applies to drift agent")
 	}
 }
 
@@ -291,15 +229,15 @@ func TestGuard_DailyLossSkippedWhenTradingServiceNil(t *testing.T) {
 	}
 }
 
-func TestGuard_PennyCheckBuyFetchesAccountAtMostOnce(t *testing.T) {
+func TestGuard_CheckBuyFetchesAccountAtMostOnce(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.MaxDailyLossPct = 5.0
 	stub := &stubTrading{portfolio: 100000, lastEquity: 100000}
 	g := NewTradeGuard(&stubLister{}, stub, cfg)
-	// Penny buy goes through both checkDailyLoss AND checkPennyCapCap — without
-	// the single-fetch refactor, this would call GetAccount twice.
-	if err := g.CheckBuy(context.Background(), AgentPenny, "ABCD", 100); err != nil {
-		t.Fatalf("unexpected error on healthy penny buy: %v", err)
+	// CheckBuy with sector cap enabled goes through both checkDailyLoss AND checkSectorCap —
+	// without the single-fetch refactor, this would call GetAccount twice.
+	if err := g.CheckBuy(context.Background(), AgentMain, "ABCD", 100); err != nil {
+		t.Fatalf("unexpected error on healthy buy: %v", err)
 	}
 	if stub.getAcctCalls != 1 {
 		t.Errorf("expected exactly 1 GetAccount call per CheckBuy, got %d", stub.getAcctCalls)
@@ -311,7 +249,7 @@ func TestGuard_MainCheckBuyFetchesAccountAtMostOnce(t *testing.T) {
 	cfg.MaxDailyLossPct = 5.0
 	stub := &stubTrading{portfolio: 100000, lastEquity: 100000}
 	g := NewTradeGuard(&stubLister{}, stub, cfg)
-	// Main buy only triggers checkDailyLoss — no penny-cap check, so 1 fetch.
+	// Main buy only triggers checkDailyLoss — no sector-cap check here, so 1 fetch.
 	if err := g.CheckBuy(context.Background(), AgentMain, "AAPL", 1000); err != nil {
 		t.Fatalf("unexpected error on healthy main buy: %v", err)
 	}
@@ -320,19 +258,6 @@ func TestGuard_MainCheckBuyFetchesAccountAtMostOnce(t *testing.T) {
 	}
 }
 
-func TestGuard_PennyCapCapFailsClosedOnFetchError(t *testing.T) {
-	// Preserve the pre-refactor semantics: when the trading service errors during
-	// the capital-cap check, the buy must be BLOCKED. Allowing it through would
-	// silently let a penny position bypass the cap on a flaky network.
-	cfg := defaultConfig()
-	cfg.MaxDailyLossPct = 0 // disable daily-loss check so we exercise capital-cap path alone
-	stub := &stubTrading{getAcctErr: errors.New("alpaca timeout")}
-	g := NewTradeGuard(&stubLister{}, stub, cfg)
-	err := g.CheckBuy(context.Background(), AgentPenny, "ABCD", 100)
-	if err == nil {
-		t.Fatal("expected error: penny capital-cap check must fail-closed on fetch error")
-	}
-}
 
 // ── Sector aggregation (Item 1: cross-agent sector & beta-bucket cap) ──
 
@@ -340,7 +265,7 @@ func TestGuard_BucketFor_CoversMegaCaps(t *testing.T) {
 	// The cross-agent sector cap is only useful if common underlyings actually
 	// resolve to their real bucket — leaving most equities in OTHER would make
 	// the OTHER cap bind on unrelated trades. Sample a representative slice of
-	// the universe Prophet, PennyProphet, and TrendProphet might touch.
+	// the universe that various agents might trade.
 	cases := []struct {
 		symbol string
 		want   SectorBucket
@@ -448,8 +373,8 @@ func TestGuard_SectorCap_DefaultBucketForUnmappedSymbol(t *testing.T) {
 }
 
 func TestGuard_SectorCap_FailsClosedOnFetchError(t *testing.T) {
-	// Mirrors the penny-cap fail-closed policy: a transient API failure must
-	// NOT silently let a buy bypass the concentration limit.
+	// Fail-closed policy: a transient API failure must NOT silently let a buy
+	// bypass the concentration limit.
 	cfg := sectorConfig()
 	cfg.MaxDailyLossPct = 0 // disable daily-loss path so it doesn't short-circuit
 	stub := &stubTrading{getAcctErr: errors.New("alpaca timeout")}
@@ -557,7 +482,7 @@ func TestGuard_RecordRaw_NewAgentsDoNotPanic(t *testing.T) {
 
 func TestGuard_NWayOverlap_BlocksAnyOtherAgent(t *testing.T) {
 	// A trend-tagged position on TLT must block a main buy of TLT — the old
-	// binary opponentOf (main<->penny only) would have allowed it.
+	// main-only logic would have allowed it.
 	lister := &stubLister{positions: []*ManagedPosition{
 		managedPos("TLT", AgentTrend, "ACTIVE", 1000),
 	}}
@@ -572,7 +497,7 @@ func TestGuard_NWayOverlap_BlocksAnyOtherAgent(t *testing.T) {
 
 func TestAgentForStrategy(t *testing.T) {
 	cases := map[string]AgentSource{
-		"v2-options": AgentMain, "penny-momentum": AgentPenny, "harvest": AgentHarvest,
+		"v2-options": AgentMain, "unknown-strategy": AgentMain, "harvest": AgentHarvest,
 		"trend": AgentTrend, "mean-rev-rsi2": AgentMeanRev, "earnings-drift": AgentDrift,
 		"": AgentMain, "unknown-xyz": AgentMain,
 	}
@@ -625,19 +550,6 @@ func TestGuard_PositionCaps_DisabledIsNoop(t *testing.T) {
 	}
 }
 
-func TestTradeGuard_HasRawSymbol(t *testing.T) {
-	g := NewTradeGuard(nil, nil, TradeGuardConfig{})
-	if g.HasRawSymbol(AgentMain, "NVDA_C") {
-		t.Fatal("expected no raw symbol initially")
-	}
-	g.RecordRawBuy(AgentMain, "NVDA_C")
-	if !g.HasRawSymbol(AgentMain, "NVDA_C") {
-		t.Fatal("expected NVDA_C after RecordRawBuy")
-	}
-	if g.HasRawSymbol(AgentPenny, "NVDA_C") {
-		t.Fatal("raw symbol must be per-agent")
-	}
-}
 
 func TestCheckOptionsOpen_SpreadGate(t *testing.T) {
 	now := time.Date(2026, 5, 24, 14, 30, 0, 0, time.UTC)
@@ -671,9 +583,6 @@ func TestCheckOptionsOpen_SpreadGate(t *testing.T) {
 	gOff := NewTradeGuard(nil, nil, TradeGuardConfig{EnableOptionsSpreadGate: false})
 	if err := gOff.CheckOptionsOpen(AgentMain, "NVDA", "NVDA251219C00400000", nil, now); err != nil {
 		t.Errorf("gate off must not block on nil quote, got %v", err)
-	}
-	if err := g.CheckOptionsOpen(AgentPenny, "NVDA", "NVDA251219C00400000", fresh(1.00, 1.30), now); err != nil {
-		t.Errorf("non-main agent must not be spread-gated, got %v", err)
 	}
 }
 
@@ -759,9 +668,6 @@ func TestCheckOptionsOpen_UniverseGate(t *testing.T) {
 	if err := g.CheckOptionsOpen(AgentMain, "", "PLUG251219C00010000", nil, time.Now()); err == nil {
 		t.Error("blank underlying with off-floor OCC root should be rejected")
 	}
-	if err := g.CheckOptionsOpen(AgentPenny, "PLUG", "PLUG251219C00010000", nil, time.Now()); err != nil {
-		t.Errorf("non-main agent must not be universe-gated, got %v", err)
-	}
 	gOff := NewTradeGuard(nil, nil, TradeGuardConfig{EnableUniverseGate: false, TradableUnderlyings: floor})
 	if err := gOff.CheckOptionsOpen(AgentMain, "PLUG", "PLUG251219C00010000", nil, time.Now()); err != nil {
 		t.Errorf("gate off must not block, got %v", err)
@@ -810,7 +716,7 @@ func TestCheckBuy_AgentUniverseGate_CaseInsensitive(t *testing.T) {
 
 func TestCheckBuy_AgentUniverseGate_UnconfiguredAgentFailsOpen(t *testing.T) {
 	g := NewTradeGuard(nil, &stubTrading{portfolio: 100000}, agentUniverseConfig())
-	// Trend, Penny, and Main have no configured universe in the map → fail open.
+	// Trend and Main have no configured universe in the map → fail open.
 	if err := g.CheckBuy(context.Background(), AgentTrend, "TSLA", 1000); err != nil {
 		t.Errorf("unconfigured Trend must not be universe-gated, got %v", err)
 	}

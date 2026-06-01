@@ -118,126 +118,7 @@ export function positionCountFromResponse(data) {
   return Array.isArray(data) ? data.length : -1;
 }
 
-// True when an open broker order belongs to PennyProphet. Spark trades on an
-// Alpaca account shared with co-located agents (Prophet, Turtle, …), and
-// /api/v1/orders?status=open is NOT strategy-filtered — every agent's resting
-// orders appear in penny's feed. Counting them woke Spark's LLM for positions
-// it never placed (observed: untagged UNH/ADI protective stops from another
-// strategy kept it beating every pre-market heartbeat).
-//
-// Ownership comes from the strategy tag the MCP stamps onto every penny order
-// (OPENPROPHET_STRATEGY → broker client_order_id "penny-momentum:{uuid}",
-// surfaced as the order's Strategy field). Untagged or differently-tagged
-// orders are not penny's. We do NOT also match untagged orders by held-symbol:
-// open orders only affect the skip decision when penny has zero positions AND
-// zero candidates, and with zero positions there is no held symbol to match —
-// so a symbol fallback is dead weight here. Field casing is normalized because
-// the live Go feed returns "Strategy" while tests/mocks may use "strategy".
-export function isPennyOwnedOrder(order) {
-  if (!order) return false;
-  const strategy = String(order.Strategy ?? order.strategy ?? '').trim();
-  return strategy === 'penny-momentum';
-}
 
-// PennyProphet predicate. Skips the LLM beat when there are no candidates
-// above the composite-score threshold AND no penny-tagged positions to manage
-// AND no penny-owned open broker orders pending fill.
-//
-// Closed-phase short-circuit (mirrors prophetPreflight): during the overnight
-// 8pm-4am ET window and full weekends the broker is shut — entry candidates
-// can't be acted on and open orders can't fill (penny place_buy_order defaults
-// to day orders, which Alpaca auto-cancels at the close). Only open positions
-// warrant a wake there. The 4am ET phase-boundary snap (harness.js) wakes the
-// agent at pre-market to re-check any still-open orders, so nothing is missed.
-//
-// Positions are filtered by strategy=penny-momentum so that other agents
-// sharing the same paper account (Prophet, Trend, Harvest) do not keep
-// PennyProphet awake on their positions. Attribution is by symbol-of-most-
-// recent-buy in storage.GetSymbolStrategyAttribution; positions placed via
-// PennyProphet's place_buy_order flow forward AgentStrategy onto the order
-// row so they attribute correctly.
-//
-// The open-orders check closes a gap: a buy submitted via place_buy_order
-// before the broker fills it does not yet appear in /positions, but the agent
-// may still need to react (cancel on price drift, follow up on partial fills).
-// Counting open orders ensures we don't skip the beat while one is in flight.
-// Note: /api/v1/orders does NOT yet support strategy filtering, so a pending
-// order from another agent on the shared account will still wake PennyProphet.
-// This is a small leak — pending orders are rare and short-lived on paper —
-// but if it becomes a problem, add ?strategy filtering to HandleGetOrders too.
-async function pennyPreflight(runtime, agentConfig) {
-  const { goAxios } = runtime;
-
-  // Closed phase: nothing fills and no entries are possible, so open orders and
-  // entry candidates are not reasons to wake. Only open positions are. Matches
-  // prophetPreflight's closed-phase branch exactly.
-  const phase = isClosedPhase(new Date());
-  if (phase.closed) {
-    const positionsResp = await goAxios.get('/api/v1/positions?strategy=penny-momentum');
-    const positionCount = positionCountFromResponse(positionsResp.data);
-    if (positionCount < 0) {
-      return { skip: false, reason: 'positions response shape unexpected' };
-    }
-    if (positionCount === 0) {
-      return { skip: true, reason: `closed phase (${phase.reason}), no penny positions` };
-    }
-    return { skip: false, reason: `${positionCount} open position(s) to evaluate (closed phase)` };
-  }
-
-  const [candidatesResp, positionsResp, ordersResp] = await Promise.all([
-    goAxios.get('/api/v1/penny/candidates?min_score=60'),
-    goAxios.get('/api/v1/positions?strategy=penny-momentum'),
-    goAxios.get('/api/v1/orders?status=open'),
-  ]);
-
-  // Validate response shapes before deciding. A malformed response (e.g., a
-  // 200 with a null body or an unexpected payload) is ambiguous — fail open
-  // and let the LLM evaluate, rather than treating "fields missing" as "0".
-  if (typeof candidatesResp.data?.count !== 'number') {
-    return { skip: false, reason: 'penny candidates response shape unexpected' };
-  }
-  if (!Array.isArray(positionsResp.data)) {
-    return { skip: false, reason: 'positions response shape unexpected' };
-  }
-  if (!Array.isArray(ordersResp.data)) {
-    return { skip: false, reason: 'orders response shape unexpected' };
-  }
-
-  const candidateCount = candidatesResp.data.count;
-  const positions = positionsResp.data;
-  // Scope the account-wide open-orders feed to penny's own orders so co-located
-  // agents' resting orders on the shared account don't keep penny awake.
-  const openOrders = ordersResp.data.filter(isPennyOwnedOrder);
-
-  if (candidateCount === 0 && positions.length === 0 && openOrders.length === 0) {
-    return {
-      skip: true,
-      reason: 'no candidates above min_score=60, no open positions, no open orders',
-    };
-  }
-
-  // Regime gate: tier=RED with enforcement on blocks new entries; with no
-  // open positions/orders, no exit logic to run either — skip the beat.
-  // Checked before econ so a RED tier reports correctly even if a blackout
-  // window overlaps.
-  const liveCount = positions.length + openOrders.length;
-  const regimeSkip = await regimeGateBlockSkipIfNoPositions(runtime, liveCount);
-  if (regimeSkip) return regimeSkip;
-
-  // Econ-blackout gate: if there's nothing to manage (no positions, no orders
-  // in flight) AND we're inside a US-release blackout window, skip the beat.
-  // The LLM can't open new entries anyway during blackout.
-  const econSkip = await econBlackoutSkipIfNoPositions(runtime, liveCount);
-  if (econSkip) return econSkip;
-
-  if (candidateCount > 0) {
-    return { skip: false, reason: `${candidateCount} candidate(s) above threshold` };
-  }
-  if (positions.length > 0) {
-    return { skip: false, reason: `${positions.length} open position(s) to manage` };
-  }
-  return { skip: false, reason: `${openOrders.length} open order(s) pending fill` };
-}
 
 // isClosedPhase returns { closed, reason } for a given Date. Mirrors the
 // 'closed' bucket from harness.js getCurrentPhase(): weekends, full-close
@@ -275,7 +156,7 @@ export function isClosedPhase(now) {
 // always run the LLM because Prophet's mandates depend on them.
 //
 // Uses /api/v1/positions?strategy=v2-options so co-located agents on a
-// shared Alpaca account (e.g., PennyProphet, TrendProphet) don't keep
+// shared Alpaca account (e.g., TrendProphet) don't keep
 // Prophet awake. Attribution is derived from each position's most recent
 // buy order's strategy tag (see HandleGetPositions). The open-orders check
 // from the prior implementation is dropped: during 'closed' phase the
@@ -533,7 +414,7 @@ async function harvestPreflight(runtime, agentConfig) {
     return { skip: true, reason: 'no open condors and FOMC blackout' };
   }
 
-  // Regime gate (RED tier blocks new condor entries). Mirrors the V2/penny/trend
+  // Regime gate (RED tier blocks new condor entries). Mirrors the V2/trend
   // pattern; only the block flag is honored here — Harvest does not consume the
   // sizing multiplier (its premium-collection sizing is already small per trade,
   // per the Item 2 plan revision).
@@ -705,7 +586,6 @@ async function defensiveProphetPreflight(_runtime, _agentConfig) {
 }
 
 export const PREFLIGHT_REGISTRY = {
-  'penny-momentum':   pennyPreflight,
   'trend':            trendPreflight,
   'harvest':          harvestPreflight,
   'v2-options':       prophetPreflight,

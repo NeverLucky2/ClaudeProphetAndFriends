@@ -6,9 +6,7 @@
  *   6:00 AM ET 1st of each month   → harvest_parameter_review (monthly)
  *   6:00 AM ET 1st of Jan/Apr/Jul/Oct → trend_parameter_review (quarterly)
  *   6:05 AM ET Mondays             → review_performance (if not done this week) → adapt_strategy
- *   6:10 AM ET Mondays             → review_performance_penny (if not done this week) → adapt_strategy_penny
  *   4:30 PM ET weekdays            → loss checks: Prophet (≥-4% latest) → postmortem + adapt_strategy
- *                                                  Penny (≥-3% latest)  → postmortem_penny + adapt_strategy_penny
  *   4:45 PM ET weekdays            → trade_reconciliation (after fills settle)
  *   4:50 PM ET weekdays            → daily_cost_report (data/reports/cost_{date}.md, if COST_TRACKING_ENABLED)
  *   6:00 PM ET Sundays             → weekly_screeners
@@ -17,9 +15,7 @@
  *   daily_briefing               → data/reports/daily_brief.json missing or stamped with a non-today as_of
  *   scenario_analysis            → no data/reports/scenario_*_YYYYMMDD.md today
  *   review_performance           → not run this ISO week  → then adapt_strategy
- *   review_performance_penny     → not run this ISO week  → then adapt_strategy_penny
  *   postmortem                   → last Prophet session had ≥-4% loss and not yet run → adapt_strategy
- *   postmortem_penny             → last Penny session had ≥-3% loss and not yet run → adapt_strategy_penny
  *   harvest_parameter_review     → not run this calendar month
  *   trend_parameter_review       → not run this calendar quarter
  *   adapt_strategy               → after review or postmortem, or 3 consecutive losing days
@@ -297,8 +293,6 @@ export class AnalysisScheduler extends EventEmitter {
     this._lastPostmortemDate = null;
     this._lastAdaptDate = null;
     this._lastLossCheckDate = null;
-    this._lastPennyReviewWeek = null;
-    this._lastPennyPostmortemDate = null;
     this._lastHarvestParamReviewMonth = null;   // YYYY-MM
     this._lastTrendParamReviewQuarter = null;   // YYYY-Q
     this._lastRegimeGateDate = null;            // YYYY-MM-DD (daily regime gate compute)
@@ -339,8 +333,6 @@ export class AnalysisScheduler extends EventEmitter {
       lastReviewWeek: this._lastReviewWeek,
       lastPostmortemDate: this._lastPostmortemDate,
       lastAdaptDate: this._lastAdaptDate,
-      lastPennyReviewWeek: this._lastPennyReviewWeek,
-      lastPennyPostmortemDate: this._lastPennyPostmortemDate,
       lastHarvestParamReviewMonth: this._lastHarvestParamReviewMonth,
       lastTrendParamReviewQuarter: this._lastTrendParamReviewQuarter,
       lastRegimeGateDate: this._lastRegimeGateDate,
@@ -356,7 +348,6 @@ export class AnalysisScheduler extends EventEmitter {
     const validJobs = [
       'daily_briefing', 'weekly_screeners', 'scenario_analysis',
       'review_performance', 'postmortem', 'adapt_strategy',
-      'review_performance_penny', 'postmortem_penny', 'adapt_strategy_penny',
       'harvest_parameter_review', 'trend_parameter_review',
       'regime_gate_compute',
       'macro_regime_skill', 'breadth_skill', 'market_top_skill', 'bubble_skill',
@@ -394,21 +385,6 @@ export class AnalysisScheduler extends EventEmitter {
       } else if (jobName === 'adapt_strategy') {
         this._lastAdaptDate = isoDate;
         await this._runAdaptStrategy(isoDate);
-        await this._saveState();
-      } else if (jobName === 'review_performance_penny') {
-        this._lastPennyReviewWeek = this._getISOWeek(isoDate);
-        await this._runSkill('review-performance-penny', isoDate, null, 10 * 60 * 1000);
-        await this._saveState();
-      } else if (jobName === 'postmortem_penny') {
-        this._lastPennyPostmortemDate = target || isoDate;
-        await this._runSkill('postmortem-penny', isoDate, target || isoDate, 10 * 60 * 1000);
-        await this._saveState();
-      } else if (jobName === 'adapt_strategy_penny') {
-        await this._runSkill('adapt-strategy-penny', isoDate, null, 15 * 60 * 1000, this._automatedRunAppendix({
-          confirmStep: 'Step 6 (user confirmation)',
-          targetFile: 'data/agent-config.json',
-          changeNoun: 'rule',
-        }));
         await this._saveState();
       } else if (jobName === 'harvest_parameter_review') {
         this._lastHarvestParamReviewMonth = this._getMonth(isoDate);
@@ -645,41 +621,7 @@ export class AnalysisScheduler extends EventEmitter {
       }
     }
 
-    // 6. Penny weekly performance review (state-based, separate state key)
-    let pennyAdaptNeeded = false;
-    if (this._lastPennyReviewWeek !== this._getISOWeek(isoDate)) {
-      if (await this._isLocked(this._getLockKey('review_performance_penny', isoDate))) {
-        this._log('Penny performance review already running in another process — skipping startup trigger.', 'info');
-      } else {
-        this._log('No Penny performance review this week — triggering now...', 'info');
-        await this.triggerJob('review_performance_penny').catch(() => {});
-        pennyAdaptNeeded = true;
-      }
-    }
-
-    // 7. Penny postmortem for significant loss (penny-scoped, -3% threshold)
-    const pennyLoss = await this._detectPennyLossConditions();
-    if (pennyLoss?.significantLoss && this._lastPennyPostmortemDate !== pennyLoss.lossDate) {
-      if (await this._isLocked(this._getLockKey('postmortem_penny', isoDate, pennyLoss.lossDate))) {
-        this._log('Penny postmortem already running in another process — skipping startup trigger.', 'info');
-      } else {
-        this._log(`Significant Penny loss on ${pennyLoss.lossDate} (${pennyLoss.lossPercent.toFixed(1)}%) — triggering postmortem-penny...`, 'warning');
-        await this.triggerJob('postmortem_penny', pennyLoss.lossDate, pennyLoss.lossDate).catch(() => {});
-        pennyAdaptNeeded = true;
-      }
-    }
-
-    // 8. Apply penny adapt-strategy if review or postmortem triggered it (separate from Prophet's adapt)
-    if (pennyAdaptNeeded) {
-      if (await this._isLocked(this._getLockKey('adapt_strategy_penny', isoDate))) {
-        this._log('Adapt-strategy-penny already running in another process — skipping startup trigger.', 'info');
-      } else {
-        this._log('Triggering adapt-strategy-penny...', 'info');
-        await this.triggerJob('adapt_strategy_penny').catch(() => {});
-      }
-    }
-
-    // 9. Monthly Harvest parameter review (state-based)
+    // 6. Monthly Harvest parameter review (state-based)
     if (this._lastHarvestParamReviewMonth !== this._getMonth(isoDate)) {
       if (await this._isLocked(this._getLockKey('harvest_parameter_review', isoDate))) {
         this._log('Harvest parameter review already running in another process — skipping startup trigger.', 'info');
@@ -689,7 +631,7 @@ export class AnalysisScheduler extends EventEmitter {
       }
     }
 
-    // 10. Quarterly Trend parameter review (state-based)
+    // 7. Quarterly Trend parameter review (state-based)
     if (this._lastTrendParamReviewQuarter !== this._getQuarter(isoDate)) {
       if (await this._isLocked(this._getLockKey('trend_parameter_review', isoDate))) {
         this._log('Trend parameter review already running in another process — skipping startup trigger.', 'info');
@@ -834,9 +776,6 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
       case 'review_performance': return `review_performance_${this._getISOWeek(date).replace(/[^a-z0-9]/gi, '_')}`;
       case 'postmortem':        return `postmortem_${(target || date || '').replace(/-/g, '')}`;
       case 'adapt_strategy':    return `adapt_strategy_${dateSlug}`;
-      case 'review_performance_penny': return `review_performance_penny_${this._getISOWeek(date).replace(/[^a-z0-9]/gi, '_')}`;
-      case 'postmortem_penny':  return `postmortem_penny_${(target || date || '').replace(/-/g, '')}`;
-      case 'adapt_strategy_penny': return `adapt_strategy_penny_${dateSlug}`;
       case 'harvest_parameter_review': return `harvest_parameter_review_${this._getMonth(date).replace(/[^a-z0-9]/gi, '_')}`;
       case 'trend_parameter_review':   return `trend_parameter_review_${this._getQuarter(date).replace(/[^a-z0-9]/gi, '_')}`;
       case 'macro_regime_skill': return `macro_regime_skill_${dateSlug}`;
@@ -947,8 +886,6 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
       this._lastAdaptDate = s.lastAdaptDate || null;
       this._lastLossCheckDate = s.lastLossCheckDate || null;
       this._lastScenarioDate = s.lastScenarioDate || null;
-      this._lastPennyReviewWeek = s.lastPennyReviewWeek || null;
-      this._lastPennyPostmortemDate = s.lastPennyPostmortemDate || null;
       this._lastHarvestParamReviewMonth = s.lastHarvestParamReviewMonth || null;
       this._lastTrendParamReviewQuarter = s.lastTrendParamReviewQuarter || null;
       this._lastRegimeGateDate = s.lastRegimeGateDate || null;
@@ -978,8 +915,6 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
         lastAdaptDate: this._lastAdaptDate,
         lastLossCheckDate: this._lastLossCheckDate,
         lastScenarioDate: this._lastScenarioDate,
-        lastPennyReviewWeek: this._lastPennyReviewWeek,
-        lastPennyPostmortemDate: this._lastPennyPostmortemDate,
         lastHarvestParamReviewMonth: this._lastHarvestParamReviewMonth,
         lastTrendParamReviewQuarter: this._lastTrendParamReviewQuarter,
         lastRegimeGateDate: this._lastRegimeGateDate,
@@ -1043,53 +978,6 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
     } catch { return null; }
   }
 
-  // Resolves the on-disk directory name for the Penny sandbox by reading agent-config.json
-  // and picking the sandbox whose name matches /penny/i. Returns null if not found.
-  async _resolvePennySandboxDir() {
-    try {
-      const configPath = path.join(PROJECT_ROOT, 'data', 'agent-config.json');
-      const config = JSON.parse(await fs.readFile(configPath, 'utf-8'));
-      const sandboxes = config.sandboxes || {};
-      for (const sb of Object.values(sandboxes)) {
-        if (sb && typeof sb.name === 'string' && /penny/i.test(sb.name) && sb.accountId) {
-          return sb.accountId;
-        }
-      }
-      return null;
-    } catch { return null; }
-  }
-
-  // Penny-scoped detector: only reads the Penny sandbox's activity_logs/.
-  // Sandbox directory is resolved from agent-config.json (sandbox name matches /penny/i).
-  // Threshold is -3% per spec (Penny is more loss-sensitive than Prophet's -4%).
-  async _detectPennyLossConditions() {
-    try {
-      const pennyDir = await this._resolvePennySandboxDir();
-      if (!pennyDir) return null;
-      const logsDir = path.join(SANDBOXES_DIR, pennyDir, 'activity_logs');
-      let files;
-      try { files = (await fs.readdir(logsDir)).filter(f => f.startsWith('activity_') && f.endsWith('.json')).sort(); }
-      catch { return null; }
-      const logs = [];
-      for (const f of files.slice(-5)) {
-        try {
-          const log = JSON.parse(await fs.readFile(path.join(logsDir, f), 'utf-8'));
-          const s = log.summary || {};
-          const hasTrades = (s.winning_trades || 0) + (s.losing_trades || 0) > 0;
-          if (hasTrades) logs.push({ date: log.date, pnlPct: s.total_pnl_percent || 0 });
-        } catch {}
-      }
-      if (logs.length === 0) return null;
-      logs.sort((a, b) => a.date.localeCompare(b.date));
-      const latest = logs[logs.length - 1];
-      const significantLoss = latest.pnlPct <= -3.0;
-      return {
-        significantLoss,
-        lossDate: significantLoss ? latest.date : null,
-        lossPercent: latest.pnlPct,
-      };
-    } catch { return null; }
-  }
 
   async _checkAndRunLossJobs(isoDate) {
     // Prophet (aggregate-sandbox) loss flow — unchanged behavior.
@@ -1105,14 +993,6 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
       if (adaptNeeded && this._lastAdaptDate !== isoDate) {
         await this.triggerJob('adapt_strategy').catch(() => {});
       }
-    }
-
-    // Penny-scoped loss flow (separate state key, -3% threshold).
-    const pennyLoss = await this._detectPennyLossConditions();
-    if (pennyLoss?.significantLoss && this._lastPennyPostmortemDate !== pennyLoss.lossDate) {
-      this._log(`Significant Penny loss on ${pennyLoss.lossDate} (${pennyLoss.lossPercent.toFixed(1)}%) — triggering postmortem-penny...`, 'warning');
-      await this.triggerJob('postmortem_penny', pennyLoss.lossDate, pennyLoss.lossDate).catch(() => {});
-      await this.triggerJob('adapt_strategy_penny').catch(() => {});
     }
   }
 
@@ -1172,12 +1052,6 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
       if (this._lastAdaptDate !== isoDate) {
         await this.triggerJob('adapt_strategy').catch(() => {});
       }
-    }
-
-    // Penny weekly review — 5 minutes after Prophet's, so the two adapt jobs don't try to run concurrently.
-    if (isMonday && hour === 6 && minute === 10 && this._lastPennyReviewWeek !== currentWeek) {
-      await this.triggerJob('review_performance_penny').catch(() => {});
-      await this.triggerJob('adapt_strategy_penny').catch(() => {});
     }
 
     if (isWeekday && hour === 16 && minute === 30 && this._lastLossCheckDate !== isoDate) {

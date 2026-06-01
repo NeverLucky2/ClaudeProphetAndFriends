@@ -142,7 +142,7 @@ func TestPlaceRiskOrders_AutoFlattenOnPersistentStopFailure(t *testing.T) {
 		RemainingQty:  216,
 		EntryPrice:    9.49,
 		StopLossPrice: 8.54,
-		AgentStrategy: "penny-momentum",
+		AgentStrategy: "trend",
 		Status:        "ACTIVE",
 	}
 	pm.positions[pos.ID] = pos
@@ -172,8 +172,8 @@ func TestPlaceRiskOrders_AutoFlattenOnPersistentStopFailure(t *testing.T) {
 	if flat.Qty != 216 {
 		t.Errorf("flatten.Qty = %v, want 216 (full remaining)", flat.Qty)
 	}
-	if flat.Strategy != "penny-momentum" {
-		t.Errorf("flatten.Strategy = %q, want penny-momentum (attribution must propagate)", flat.Strategy)
+	if flat.Strategy != "trend" {
+		t.Errorf("flatten.Strategy = %q, want trend (attribution must propagate)", flat.Strategy)
 	}
 }
 
@@ -200,7 +200,7 @@ func TestPlaceRiskOrders_RetrySucceedsAfterTransientStopFailure(t *testing.T) {
 		EntryPrice:      4.18,
 		StopLossPrice:   3.76,
 		TakeProfitPrice: 5.02,
-		AgentStrategy:   "penny-momentum",
+
 		Status:          "ACTIVE",
 	}
 	pm.positions[pos.ID] = pos
@@ -244,7 +244,7 @@ func TestPlaceRiskOrders_TakeProfitFailureDoesNotFlatten(t *testing.T) {
 		EntryPrice:      5.00,
 		StopLossPrice:   4.50,
 		TakeProfitPrice: 6.00,
-		AgentStrategy:   "penny-momentum",
+
 		Status:          "ACTIVE",
 	}
 	pm.positions[pos.ID] = pos

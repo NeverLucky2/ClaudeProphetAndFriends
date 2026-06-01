@@ -26,6 +26,17 @@ const (
 	FirstRefreshWaitTimeout = 5 * time.Second
 )
 
+var nyLoc, _ = time.LoadLocation("America/New_York")
+
+// AlpacaCalendarEntry is a market calendar entry (holiday or special session time).
+type AlpacaCalendarEntry struct {
+	Date         string `json:"date"`          // "YYYY-MM-DD"
+	Open         string `json:"open"`          // "HH:MM" regular market open ET
+	Close        string `json:"close"`         // "HH:MM" regular market close ET
+	SessionOpen  string `json:"session_open"`  // "HHMM" extended-hours open ET
+	SessionClose string `json:"session_close"` // "HHMM" extended-hours close ET
+}
+
 type earningsEntry struct {
 	Ticker string
 	Date   time.Time
@@ -576,4 +587,30 @@ func (s *EarningsCalendarService) refresh(now time.Time) {
 		s.firstRefreshOnce.Do(func() { close(s.firstRefreshDone) })
 	}
 	s.logger.WithFields(fields).Info("EarningsCalendarService: refresh complete")
+}
+
+// StaticMarketPhase returns the current market phase: "pre", "open", "after", or "closed".
+// Used by Harvest and other services to determine if the market is currently open.
+func StaticMarketPhase(now time.Time, loc *time.Location) string {
+	return staticMarketPhase(now, loc)
+}
+
+func staticMarketPhase(now time.Time, loc *time.Location) string {
+	nowET := now.In(loc)
+	wd := nowET.Weekday()
+	if wd == time.Saturday || wd == time.Sunday {
+		return "closed"
+	}
+	h, m, _ := nowET.Clock()
+	total := h*60 + m
+	switch {
+	case total < 4*60 || total >= 20*60:
+		return "closed"
+	case total < 9*60+30:
+		return "pre"
+	case total >= 16*60:
+		return "after"
+	default:
+		return "open"
+	}
 }

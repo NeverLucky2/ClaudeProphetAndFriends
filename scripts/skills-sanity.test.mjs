@@ -4,7 +4,6 @@ import { readFileSync } from 'node:fs';
 
 const ADAPT_SKILLS = [
   '.claude/skills/adapt-strategy/SKILL.md',
-  '.claude/skills/adapt-strategy-penny/SKILL.md',
   '.claude/skills/harvest-parameter-review/SKILL.md',
   '.claude/skills/trend-parameter-review/SKILL.md',
 ];
@@ -34,7 +33,6 @@ for (const path of ADAPT_SKILLS) {
 
 const EPOCH_ADAPT_SKILLS = [
   '.claude/skills/adapt-strategy/SKILL.md',
-  '.claude/skills/adapt-strategy-penny/SKILL.md',
 ];
 for (const path of EPOCH_ADAPT_SKILLS) {
   test(`${path}: references segment-by-epoch.mjs`, () => {
@@ -56,7 +54,6 @@ for (const path of EPOCH_ADAPT_SKILLS) {
 
 const REVIEW_SKILLS = [
   '.claude/skills/review-performance/SKILL.md',
-  '.claude/skills/review-performance-penny/SKILL.md',
 ];
 
 for (const path of REVIEW_SKILLS) {
@@ -90,7 +87,6 @@ test('.claude/skills/stress-test-friction/SKILL.md: codifies flip-rate threshold
 
 const ADAPT_FOR_GATE = [
   '.claude/skills/adapt-strategy/SKILL.md',
-  '.claude/skills/adapt-strategy-penny/SKILL.md',
   '.claude/skills/harvest-parameter-review/SKILL.md',
   '.claude/skills/trend-parameter-review/SKILL.md',
 ];

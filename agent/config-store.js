@@ -110,11 +110,6 @@ export const HEARTBEAT_PROFILES = {
     description: 'Rapid-fire execution for day trading',
     phases: { pre_market: 60, market_open: 15, midday: 30, market_close: 15, after_hours: 120, closed: 600 },
   },
-  penny_stock: {
-    label: 'Penny Stock',
-    description: 'Active intraday monitoring for fast-moving penny stocks — closes all day-trades by market close',
-    phases: { pre_market: 180, market_open: 60, midday: 90, market_close: 60, after_hours: 1800, closed: 28800 },
-  },
   harvest: {
     label: 'Harvest (Theta)',
     description: 'Low-frequency check-ins for mechanical theta-harvesting — iron condor entries and exits do not require rapid response',
@@ -232,57 +227,6 @@ Read your Strategy Rules section carefully — it contains your complete heartbe
         exclusive: false,
       },
       suppressPhaseSnaps: ['pre_market'],
-      createdAt: new Date().toISOString(),
-    },
-    {
-      id: 'penny-prophet',
-      name: 'PennyProphet',
-      description: 'High-risk penny stock momentum trader. Exchange-listed $2–$10 stocks. Signal-gated entries via real-time technical, regulatory, and social scoring.',
-      systemPromptTemplate: 'custom',
-      strategyId: 'penny-momentum',
-      model: 'anthropic/claude-sonnet-4-6',
-      heartbeatOverrides: {
-        pre_market: 900,
-        market_open: 60,
-        midday: 180,
-        market_close: 60,
-        after_hours: 3600,
-        closed: 28800,
-      },
-      customSystemPrompt: `You are PennyProphet, an autonomous AI penny stock trading agent. You run on a heartbeat loop — each time you wake up, you assess penny stock signals, manage positions, and decide what to do.
-
-You trade exchange-listed penny stocks ($2–$10, $50M–$500M market cap) using a real-time signal pipeline. You are running autonomously — no human is approving your actions in real-time.
-
-## Core Rules
-
-Follow TRADING_RULES_PENNY.md exactly. Key rules:
-- Only enter on composite score ≥ 60 from get_penny_candidates
-- Score 80–100 → 5–7% position; Score 60–79 → 2–3% position; Hard cap 8%
-- ALL entries use place_managed_position with stop + target pre-set
-- Social signal: day-trade only, −8% stop, +15/20% target, close after 20 min
-- Regulatory signal: up to 3 days, −10% stop, +20% day 1 then trail
-- Technical signal: stop −7%, target +14%, trail to breakeven at +7%
-- Circuit breaker: if portfolio P&L ≤ −5%, close all penny positions, stop for session
-
-## Available Tools
-
-**Penny Signals**: get_penny_candidates, get_penny_signal_detail, get_penny_universe, scan_penny_universe_now
-**Trading**: get_account, get_positions, get_orders, place_buy_order, place_sell_order, place_managed_position, get_managed_positions, close_managed_position, cancel_order
-**Market Data**: get_quote, get_latest_bar, get_historical_bars
-**Logging**: log_decision, log_activity, get_activity_log
-**Utility**: get_datetime, wait
-
-## Heartbeat Behavior
-
-1. Call get_datetime — verify market status
-2. Call get_account — check daily P&L (stop at ≤ −5%)
-3. Call get_penny_candidates(min_score=60) — scan for opportunities
-4. Call get_positions — manage existing positions against exit rules
-5. Act: enter, manage, or exit per TRADING_RULES_PENNY.md
-6. Log via log_activity
-
-Be decisive. Never ask the user questions. Always log trade reasoning with log_decision. NEVER enter without a stop-loss via place_managed_position.`,
-      defaultHeartbeatProfile: 'penny_stock',
       createdAt: new Date().toISOString(),
     },
     {
@@ -466,14 +410,6 @@ function defaultStrategies() {
       name: 'Aggressive Options v2',
       description: 'Aggressive options with scalping overlay + loss-review circuit breakers',
       rulesFile: 'TRADING_RULES_V2.md',
-      customRules: null,
-      createdAt: new Date().toISOString(),
-    },
-    {
-      id: 'penny-momentum',
-      name: 'Penny Stock Momentum',
-      description: 'Multi-signal penny stock strategy: social (Reddit/StockTwits), regulatory (EDGAR/PR wires), technical (volume/gap). Signal-gated tiered sizing.',
-      rulesFile: 'TRADING_RULES_PENNY.md',
       customRules: null,
       createdAt: new Date().toISOString(),
     },
@@ -872,7 +808,24 @@ async function migrateLegacyConfig(config, rawSchemaVersion = 0) {
     }
   }
 
-  config.schemaVersion = 8;  // was 7
+  // v8 → v9: retire the penny-momentum agent (Spark / PennyProphet). The strategy
+  // was permanently discontinued — too volatile for paper or live. Because
+  // mergeMissingDefaults only appends, the persisted penny-prophet agent,
+  // penny-momentum strategy, and the Spark sandbox survive removal-from-defaults
+  // and must be scrubbed here. Idempotent: a no-op once they're already gone.
+  // The Spark sandbox's runtime data dir is intentionally left on disk as frozen
+  // audit trail — only its config entry is removed.
+  if (rawSchemaVersion < 9) {
+    config.agents = (config.agents || []).filter(a => a.id !== 'penny-prophet');
+    config.strategies = (config.strategies || []).filter(s => s.id !== 'penny-momentum');
+    for (const [sbxId, sbx] of Object.entries(config.sandboxes || {})) {
+      if (sbx?.agent?.activeAgentId === 'penny-prophet') {
+        delete config.sandboxes[sbxId];
+      }
+    }
+  }
+
+  config.schemaVersion = 9;  // was 8
   if (!config.sandboxes) config.sandboxes = {};
 
   // Only auto-create sbx_<accountId> sandboxes during the v4→v5 migration pass.

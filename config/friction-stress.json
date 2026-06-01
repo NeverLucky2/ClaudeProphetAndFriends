@@ -7,13 +7,6 @@
     "commission_per_share": 0.0,
     "regulatory_fee_per_share": 0.0001
   },
-  "penny_stocks": {
-    "per_share_slippage_usd": 0.02,
-    "slippage_pct_of_price_floor": 0.04,
-    "stop_gap_through_pct": 0.03,
-    "commission_per_share": 0.0,
-    "regulatory_fee_per_share": 0.0001
-  },
   "single_leg_options": {
     "spread_crossing_pct_open": 0.80,
     "spread_crossing_pct_close": 0.85,

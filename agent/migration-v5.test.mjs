@@ -57,7 +57,7 @@ test('v4→v5: 4 duplicate accounts dedup to 1 survivor, sandbox pointers rewrit
   await cfgStore.loadConfig();
   const cfg = cfgStore.getConfig();
 
-  assert.equal(cfg.schemaVersion, 8);
+  assert.equal(cfg.schemaVersion, 9);
   assert.equal(cfg.accounts.length, 1, 'deduped to one account');
   const survivorId = cfg.accounts[0].id;
   assert.equal(cfg.accounts[0].name, 'Paper (from .env)', 'env-seeded account is survivor by name match');
@@ -107,8 +107,8 @@ test('v4→v5: idempotent — re-running on v5 config is a no-op', async () => {
   await cfgStore.loadConfig();
   const afterSecond = await fs.readFile(configPath, 'utf-8');
 
-  assert.equal(JSON.parse(afterFirst).schemaVersion, 8);
-  assert.equal(JSON.parse(afterSecond).schemaVersion, 8);
+  assert.equal(JSON.parse(afterFirst).schemaVersion, 9);
+  assert.equal(JSON.parse(afterSecond).schemaVersion, 9);
 
   // No second backup file written on the no-op migration
   const backups = await fs.readdir(backupDir);
@@ -253,7 +253,7 @@ test('v5→v7: mechanical agents get respondsToEmergencyWakes=false, reactive ag
   const cfg = cfgStore.getConfig();
   const byId = Object.fromEntries(cfg.agents.map(a => [a.id, a]));
 
-  assert.equal(cfg.schemaVersion, 8, 'schemaVersion bumped to 8');
+  assert.equal(cfg.schemaVersion, 9, 'schemaVersion bumped to 9');
   assert.equal(byId['harvest'].respondsToEmergencyWakes, false);
   assert.equal(byId['mean-rev'].respondsToEmergencyWakes, false);
   assert.equal(byId['trend-prophet'].respondsToEmergencyWakes, false);
@@ -262,7 +262,7 @@ test('v5→v7: mechanical agents get respondsToEmergencyWakes=false, reactive ag
   assert.equal(byId['drift'].respondsToEmergencyWakes, false);
   // News-reactive agents are left untouched (flag absent => default reactive).
   assert.notEqual(byId['default'].respondsToEmergencyWakes, false);
-  assert.notEqual(byId['penny-prophet'].respondsToEmergencyWakes, false);
+  assert.equal(byId['penny-prophet'], undefined, 'penny-prophet retired by v9');
 });
 
 test('v5→v6: a user-set respondsToEmergencyWakes value is not clobbered', async () => {
@@ -303,12 +303,12 @@ test('v6→v7: Drift, omitted from the v6 exempt set, is backfilled to respondsT
   const cfg = cfgStore.getConfig();
   const byId = Object.fromEntries(cfg.agents.map(a => [a.id, a]));
 
-  assert.equal(cfg.schemaVersion, 8, 'schemaVersion bumped to 8');
+  assert.equal(cfg.schemaVersion, 9, 'schemaVersion bumped to 9');
   assert.equal(byId['drift'].respondsToEmergencyWakes, false, 'Drift backfilled exempt');
   // Already-exempt agents stay exempt; news-reactive agents stay reactive.
   assert.equal(byId['harvest'].respondsToEmergencyWakes, false);
   assert.notEqual(byId['default'].respondsToEmergencyWakes, false);
-  assert.notEqual(byId['penny-prophet'].respondsToEmergencyWakes, false);
+  assert.equal(byId['penny-prophet'], undefined, 'penny-prophet retired by v9');
 });
 
 test('v6→v7: a user-set Drift respondsToEmergencyWakes=true is not clobbered', async () => {
@@ -373,16 +373,14 @@ test('v7→v8 backfills pre-market scheduledBeats and suppressPhaseSnaps on Prop
   assert.deepEqual(harvest.scheduledBeats?.times, ['09:15'], 'Harvest scheduledBeats backfilled');
   assert.deepEqual(harvest.suppressPhaseSnaps, ['pre_market'], 'Harvest suppressPhaseSnaps backfilled');
 
-  // Non-target agents untouched
-  const penny = cfg.agents.find(a => a.id === 'penny-prophet');
-  assert.equal(penny.scheduledBeats, undefined, 'Penny not touched');
-  assert.equal(penny.suppressPhaseSnaps, undefined, 'Penny not touched');
+  // Penny agent retired by v9 migration
+  assert.equal(cfg.agents.find(a => a.id === 'penny-prophet'), undefined, 'penny-prophet retired by v9');
 
   const coil = cfg.agents.find(a => a.id === 'mean-rev');
   assert.equal(coil.scheduledBeats?.exclusive, true, 'Coil exclusive scheduledBeats preserved');
   assert.equal(coil.suppressPhaseSnaps, undefined, 'Coil not touched');
 
-  assert.equal(cfg.schemaVersion, 8, 'schemaVersion bumped to 8');
+  assert.equal(cfg.schemaVersion, 9, 'schemaVersion bumped to 9');
 });
 
 test('v7→v8 preserves user customizations on Prophet/Harvest pre_market fields', async () => {

@@ -13,7 +13,7 @@ import (
 // opts builders must clamp all three, but to different budgets:
 //
 //   - defaultAlpacaClientOpts: the shared client. Generous enough for heavy
-//     batch callers (e.g. penny_max_filter's 100-symbol GetMultiBars) while
+//     batch callers (large multi-symbol GetMultiBars) while
 //     still far below the SDK default.
 //   - intradayAlpacaClientOpts: a tight client for the latency-critical
 //     intraday-signals path, which is independently deadline-bounded and just

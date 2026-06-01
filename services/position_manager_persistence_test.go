@@ -25,10 +25,8 @@ func (s *stubTradingPersist) PlaceOrder(_ context.Context, order *interfaces.Ord
 // managed-position entry path persists a DBOrder row tagged with the owning
 // agent's strategy. Without persistence, GetSymbolStrategyAttribution cannot
 // attribute the broker position back to the agent, and the per-strategy
-// /positions filter (used by preflight) silently drops it. See III on Spark
-// in sandbox 449fedf6 (2026-05-14): managed_positions row had
-// agent_strategy="penny-momentum" but the orders table was empty, so the
-// preflight saw zero penny positions and skipped beats.
+// /positions filter (used by preflight) silently drops it if there are no
+// matching orders in the orders table.
 func TestPlaceEntryOrder_PersistsDBOrderWithStrategy(t *testing.T) {
 	storage, err := database.NewLocalStorage(":memory:")
 	if err != nil {
@@ -44,7 +42,7 @@ func TestPlaceEntryOrder_PersistsDBOrderWithStrategy(t *testing.T) {
 		Quantity:       100,
 		EntryPrice:     4.27,
 		EntryOrderType: "limit",
-		AgentStrategy:  "penny-momentum",
+		AgentStrategy:  "trend",
 	}
 
 	if err := pm.placeEntryOrder(context.Background(), pos); err != nil {
@@ -65,7 +63,7 @@ func TestPlaceEntryOrder_PersistsDBOrderWithStrategy(t *testing.T) {
 	if saved.Side != "buy" {
 		t.Errorf("saved.Side = %q, want buy", saved.Side)
 	}
-	if saved.Strategy != "penny-momentum" {
-		t.Errorf("saved.Strategy = %q, want penny-momentum", saved.Strategy)
+	if saved.Strategy != "trend" {
+		t.Errorf("saved.Strategy = %q, want trend", saved.Strategy)
 	}
 }

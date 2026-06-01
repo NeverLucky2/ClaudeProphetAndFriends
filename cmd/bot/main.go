@@ -196,7 +196,7 @@ func main() {
 	// order-time guard and the candidate/entry feed can never diverge:
 	// MeanRev/Drift from their scanner constants, Trend from the centralized
 	// models.TrendUniverse (the single source of truth the executor iterates).
-	// Agents absent here (Main/Penny) fail open — the gate never blocks them.
+	// Agents absent here (Main) fail open — the gate never blocks them.
 	agentUniverses := map[services.AgentSource]map[string]bool{
 		services.AgentMeanRev: services.SymbolSet(services.MeanRevUniverse),
 		services.AgentDrift:   services.SymbolSet(services.DriftUniverse),
@@ -208,8 +208,6 @@ func main() {
 		positionManager,
 		tradingService,
 		services.TradeGuardConfig{
-			PennyMaxCapitalPct:      cfg.PennyMaxCapitalPct,
-			PennyMaxPositionDollars: cfg.PennyMaxPositionDollars,
 			MaxDailyLossPct:         cfg.MaxDailyLossPct,
 			EnableSectorAggregation: cfg.EnableSectorAggregation,
 			SectorMaxExposurePct:    sectorCaps,
@@ -231,8 +229,6 @@ func main() {
 	guardController := controllers.NewGuardController(tradeGuard)
 
 	logger.WithFields(logrus.Fields{
-		"penny_max_capital_pct":       cfg.PennyMaxCapitalPct,
-		"penny_max_position_dollars":  cfg.PennyMaxPositionDollars,
 		"max_daily_loss_pct":          cfg.MaxDailyLossPct,
 		"sector_aggregation_enabled":  cfg.EnableSectorAggregation,
 		"sector_default_max_pct":      cfg.SectorDefaultMaxPct,
@@ -280,46 +276,10 @@ func main() {
 		logger.Debug("Activity logging session started")
 	}
 
-	// Initialize penny stock signal pipeline. Services are always constructed so
-	// the HTTP controller stays non-nil; background goroutines + the FMP earnings
-	// refresh are gated on ENABLE_PENNY_PIPELINE. Non-penny sandboxes (TrendProphet,
-	// Harvest, Prophet) leave it unset, which skips the 60s scan loop and the
-	// 40-day-bar warm-up that was generating the bulk of the IEX-fetch log noise.
-	pennyPipelineEnabled := os.Getenv("ENABLE_PENNY_PIPELINE") == "true"
-
 	earningsService := services.NewEarningsCalendarService(cfg.FMPAPIKey, cfg.AlpacaAPIKey, cfg.AlpacaSecretKey, cfg.AlpacaBaseURL, nil)
-	if pennyPipelineEnabled {
-		go earningsService.Start(ctx)
-		if !earningsService.WaitForFirstRefresh(services.FirstRefreshWaitTimeout) {
-			logger.Warn("earnings calendar first refresh did not complete within timeout — universe will start in fail-open mode")
-		}
-	}
-
-	pennyUniverseService := services.NewPennyUniverseService(cfg.FMPAPIKey, cfg.AlpacaAPIKey, cfg.AlpacaSecretKey, cfg.AlpacaBaseURL, earningsService, nil)
-	// Intraday context cache for the penny screener (ORB-15 capture + trailing
-	// 20-day avg volume per ticker). Bounded HTTP cost: cache is per-ticker
-	// per-session for ORB, per-ticker per-day for avg volume.
-	pennyIntradayCache := services.NewPennyIntradayCache(dataService)
-	pennyScreenerService := services.NewPennyScreenerService(cfg.AlpacaAPIKey, cfg.AlpacaSecretKey, pennyUniverseService, pennyIntradayCache)
-	secEdgarService := services.NewSECEdgarService(pennyUniverseService, nil, cfg.OperatorEmail, earningsService)
-	socialSignalService := services.NewSocialSignalService(pennyUniverseService, nil)
-	pennyMaxFilter := services.NewPennyMaxFilterService(pennyUniverseService, dataService)
-	pennyAggregator := services.NewPennySignalAggregator(pennyUniverseService, pennyScreenerService, secEdgarService, socialSignalService, pennyMaxFilter)
-	pennyController := controllers.NewPennyController(pennyAggregator)
-
-	// Wire dilution filter to operator-visible held-position logging.
-	secEdgarService.SetHeldTickersFn(positionManager.HeldPennyTickers)
-
-	if pennyPipelineEnabled {
-		go pennyUniverseService.Start(ctx)
-		go pennyScreenerService.Start(ctx)
-		go secEdgarService.Start(ctx)
-		go socialSignalService.Start(ctx)
-		go pennyMaxFilter.Start(ctx)
-		go pennyAggregator.Start(ctx)
-		logger.Debug("Penny stock signal pipeline started")
-	} else {
-		logger.Info("Penny pipeline disabled (ENABLE_PENNY_PIPELINE != true) — endpoints return empty")
+	go earningsService.Start(ctx)
+	if !earningsService.WaitForFirstRefresh(services.FirstRefreshWaitTimeout) {
+		logger.Warn("earnings calendar first refresh did not complete within timeout — universe will start in fail-open mode")
 	}
 
 	// Initialize Harvest services
@@ -591,7 +551,6 @@ func main() {
 		positionController,
 		activityController,
 		economicFeedsController,
-		pennyController,
 		guardController,
 		harvestController,
 		trendController,
@@ -661,7 +620,6 @@ func setupRouter(
 	positionController *controllers.PositionManagementController,
 	activityController *controllers.ActivityController,
 	economicFeedsController *controllers.EconomicFeedsController,
-	pennyController *controllers.PennyController,
 	guardController *controllers.GuardController,
 	harvestController *controllers.HarvestController,
 	trendController *controllers.TrendController,
@@ -768,14 +726,6 @@ func setupRouter(
 		api.POST("/activity/session/start", activityController.HandleStartSession)
 		api.POST("/activity/session/end", activityController.HandleEndSession)
 		api.POST("/activity/log", activityController.HandleLogActivity)
-
-		// Penny stock signal endpoints
-		api.GET("/penny/candidates", pennyController.HandleGetCandidates)
-		api.GET("/penny/signal/:ticker", pennyController.HandleGetSignalDetail)
-		api.GET("/penny/universe", pennyController.HandleGetUniverse)
-		api.POST("/penny/scan", pennyController.HandleScanNow)
-		api.DELETE("/penny/blacklist", pennyController.HandleClearBlacklist)
-		api.DELETE("/penny/blacklist/:ticker", pennyController.HandleRemoveFromBlacklist)
 
 		// Trade guard endpoint
 		api.GET("/guard/status", guardController.HandleGetStatus)

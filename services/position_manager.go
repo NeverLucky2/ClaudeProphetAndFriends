@@ -21,8 +21,8 @@ type ManagedPosition struct {
 	Symbol   string `json:"symbol"`
 	Side     string `json:"side"`     // "buy" or "sell"
 	Strategy string `json:"strategy"` // "SWING_TRADE", "LONG_TERM", "DAY_TRADE"
-	// AgentStrategy is the owning agent's strategyId (e.g. "penny-momentum",
-	// "trend"). Distinct from Strategy, which is the trading-style label.
+	// AgentStrategy is the owning agent's strategyId (e.g. "trend", "v2-options").
+	// Distinct from Strategy, which is the trading-style label.
 	// Populated from OPENPROPHET_STRATEGY at the MCP boundary.
 	AgentStrategy string `json:"agent_strategy,omitempty"`
 
@@ -62,10 +62,6 @@ type ManagedPosition struct {
 	ClosedAt  *time.Time `json:"closed_at,omitempty"`
 	Notes     string     `json:"notes,omitempty"`
 	Tags      []string   `json:"tags,omitempty"`
-	// DominantSignal classifies penny entries by signal type. Drives
-	// the social-signal 20-minute time exit in checkPositions. Empty
-	// for non-penny managed positions.
-	DominantSignal string `json:"dominant_signal,omitempty"`
 }
 
 // PartialExitConfig defines partial profit taking strategy
@@ -81,8 +77,8 @@ type PlaceManagedPositionRequest struct {
 	Symbol            string      `json:"symbol" binding:"required"`
 	Side              string      `json:"side" binding:"required"`  // "buy" or "sell"
 	Strategy          string      `json:"strategy"`                 // "SWING_TRADE", "LONG_TERM", "DAY_TRADE"
-	AgentStrategy     string      `json:"agent_strategy,omitempty"` // agent strategyId from OPENPROPHET_STRATEGY (e.g. "penny-momentum")
-	AgentSource       AgentSource `json:"agent_source,omitempty"`   // "main" or "penny"; defaults to "main"
+	AgentStrategy     string      `json:"agent_strategy,omitempty"` // agent strategyId from OPENPROPHET_STRATEGY (e.g. "trend", "v2-options")
+	AgentSource       AgentSource `json:"agent_source,omitempty"`   // "main"; defaults to "main"
 	AllocationDollars float64     `json:"allocation_dollars" binding:"required,gt=0"`
 
 	// Entry configuration
@@ -105,7 +101,6 @@ type PlaceManagedPositionRequest struct {
 	// Metadata
 	Notes          string   `json:"notes,omitempty"`
 	Tags           []string `json:"tags,omitempty"`
-	DominantSignal string   `json:"dominant_signal,omitempty"`
 }
 
 // PositionManager handles automated position management
@@ -271,7 +266,6 @@ func (pm *PositionManager) PlaceManagedPosition(ctx context.Context, req *PlaceM
 		UpdatedAt:         time.Now(),
 		Notes:             req.Notes,
 		Tags:              tags,
-		DominantSignal:    req.DominantSignal,
 	}
 
 	// Place entry order
@@ -516,17 +510,6 @@ func (pm *PositionManager) checkPositions(ctx context.Context) {
 			continue
 		}
 
-		// Social-signal time exit (penny only). Fires before bracket
-		// management so the cancel-and-sell flow takes precedence over
-		// any pending stop/target placement on the same tick.
-		now := time.Now().UTC()
-		marketClose := pm.todayMarketClose(now)
-		if shouldFireSocialTimeExit(position, now, marketClose) {
-			if err := pm.executeSocialTimeExit(ctx, position); err != nil {
-				pm.logger.WithError(err).WithField("position_id", position.ID).Warn("social time exit failed")
-			}
-			continue
-		}
 
 		// Check if we need to place/update risk orders
 		if position.Status == "ACTIVE" {
@@ -1064,29 +1047,6 @@ func (pm *PositionManager) ListManagedPositions(status string) []*ManagedPositio
 	return positions
 }
 
-// HeldPennyTickers returns a set of currently-open penny-strategy positions
-// keyed by ticker. Used by SECEdgarService to detect dilution events landing
-// on positions the agent holds. Returns an empty (non-nil) map if no penny
-// positions are open.
-//
-// "Active" matches the existing isActivePosition predicate (ACTIVE, PARTIAL,
-// PENDING). Penny ownership is determined via the AgentTag(AgentPenny) tag,
-// matching the convention used by TradeGuard.
-func (pm *PositionManager) HeldPennyTickers() map[string]bool {
-	pm.mu.RLock()
-	defer pm.mu.RUnlock()
-	held := make(map[string]bool)
-	for _, p := range pm.positions {
-		if !isActivePosition(p) {
-			continue
-		}
-		if positionBelongsTo(p, AgentPenny) {
-			held[p.Symbol] = true
-		}
-	}
-	return held
-}
-
 // CloseManagedPosition manually closes a managed position.
 //
 // Fail-closed: a position is marked CLOSED only after the broker action that
@@ -1583,7 +1543,6 @@ func (pm *PositionManager) managedPositionToDB(pos *ManagedPosition) *models.DBM
 		Tags:              string(tagsJSON),
 		PartialExitOrders: string(partialExitOrdersJSON),
 		ClosedAt:          pos.ClosedAt,
-		DominantSignal:    pos.DominantSignal,
 	}
 
 	if pos.PartialExit != nil {
@@ -1596,150 +1555,8 @@ func (pm *PositionManager) managedPositionToDB(pos *ManagedPosition) *models.DBM
 	return dbPos
 }
 
-// shouldFireSocialTimeExit returns true when pos is a social-signal penny
-// position that has either (a) been open >= 20 min OR (b) entered the
-// last-15-min-of-session window — whichever comes first. Mirrors the rule
-// in TRADING_RULES_PENNY.md lines 261-263.
-//
-// Returns false for positions whose Status is not ACTIVE or PARTIAL — the
-// bracket monitor has already taken care of STOPPED_OUT/CLOSED/FAILED, and
-// PENDING positions don't have a bracket to cancel yet.
-func shouldFireSocialTimeExit(pos *ManagedPosition, now, marketClose time.Time) bool {
-	if pos == nil || pos.DominantSignal != "social" {
-		return false
-	}
-	if pos.Status != "ACTIVE" && pos.Status != "PARTIAL" {
-		return false
-	}
-	if now.Sub(pos.CreatedAt) >= 20*time.Minute {
-		return true
-	}
-	if !marketClose.IsZero() && marketClose.Sub(now) <= 15*time.Minute {
-		return true
-	}
-	return false
-}
-
 // todayMarketClose returns regular-session close in UTC for the date of `now`.
-// Weekends return a zero time — the "15 min before close" branch then never
-// fires on a weekend, which is correct: penny social positions should be flat
-// by Friday close per the rules.
-func (pm *PositionManager) todayMarketClose(now time.Time) time.Time {
-	et, err := time.LoadLocation("America/New_York")
-	if err != nil {
-		return time.Time{}
-	}
-	local := now.In(et)
-	wd := local.Weekday()
-	if wd == time.Saturday || wd == time.Sunday {
-		return time.Time{}
-	}
-	close := time.Date(local.Year(), local.Month(), local.Day(), 16, 0, 0, 0, et)
-	return close.UTC()
-}
-
-// executeSocialTimeExit implements the cancel-bracket then market-sell flow
-// from TRADING_RULES_PENNY.md:261-282.
-//
-//  1. Cancel both stop-loss and take-profit orders if present. Failures here
-//     are non-fatal (the order may have already filled — the bracket monitor
-//     will detect it).
-//  2. Re-fetch position state to see if a bracket leg fired during cancellation;
-//     if so, skip the market order.
-//  3. Place a market sell for RemainingQty, tagged with the owning agent's
-//     strategy so /api/v1/positions?strategy=X attribution stays correct.
-func (pm *PositionManager) executeSocialTimeExit(ctx context.Context, pos *ManagedPosition) error {
-	pm.logger.WithFields(logrus.Fields{
-		"position_id": pos.ID,
-		"symbol":      pos.Symbol,
-		"age":         time.Since(pos.CreatedAt).String(),
-	}).Info("social-signal time exit firing")
-
-	// Cancel bracket legs; track whether either leg actually filled at the
-	// broker (cancel returns an error, but the order's terminal status will
-	// be "filled" not "canceled"). If a leg filled, the bracket closed the
-	// position for us — skip the market sell to avoid duplicating.
-	bracketFilled := false
-	for _, orderID := range []string{pos.StopLossOrderID, pos.TakeProfitOrderID} {
-		if orderID == "" {
-			continue
-		}
-		if err := pm.tradingService.CancelOrder(ctx, orderID); err != nil {
-			pm.logger.WithError(err).WithField("order_id", orderID).Debug("cancel returned error (checking final order status)")
-		}
-		// Always re-read the order's status — cancel result alone doesn't
-		// distinguish "canceled cleanly" from "filled while we were cancelling".
-		ord, err := pm.tradingService.GetOrder(ctx, orderID)
-		if err != nil {
-			pm.logger.WithError(err).WithField("order_id", orderID).Warn("could not fetch order status after cancel")
-			continue
-		}
-		if ord.Status == "filled" || ord.Status == "partially_filled" {
-			pm.logger.WithFields(logrus.Fields{
-				"order_id": orderID,
-				"status":   ord.Status,
-			}).Info("bracket leg filled during cancel; bracket closed the position")
-			bracketFilled = true
-		}
-	}
-
-	// Cancel any unfilled partial-exit limit orders so they don't compete
-	// with the market sell. Mirrors the cleanup pattern in closePosition.
-	// Errors are non-fatal (the orders may already be filled or cancelled);
-	// the re-fetch below picks up any quantity changes via live.RemainingQty.
-	for _, orderID := range pos.PartialExitOrders {
-		if orderID == "" {
-			continue
-		}
-		if err := pm.tradingService.CancelOrder(ctx, orderID); err != nil {
-			pm.logger.WithError(err).WithField("order_id", orderID).Debug("cancel of partial-exit order returned error")
-		}
-	}
-
-	if bracketFilled {
-		// The bracket monitor's next tick will reconcile the position to CLOSED
-		// when it sees the fill — we don't need to do anything else here.
-		return nil
-	}
-
-	pm.mu.RLock()
-	live, ok := pm.positions[pos.ID]
-	pm.mu.RUnlock()
-	if !ok || live == nil || live.Status == "CLOSED" || live.RemainingQty == 0 {
-		return nil
-	}
-
-	exitSide := "sell"
-	if live.Side == "sell" {
-		exitSide = "buy"
-	}
-	// Attribution: prefer the owning agent's strategy tag; fall back to
-	// "penny-momentum" if the position pre-dates the AgentStrategy column
-	// so /api/v1/positions?strategy=X and segment-PnL still see this order.
-	strategyTag := pos.AgentStrategy
-	if strategyTag == "" {
-		strategyTag = "penny-momentum"
-	}
-	_, err := pm.tradingService.PlaceOrder(ctx, &interfaces.Order{
-		Symbol:      pos.Symbol,
-		Qty:         live.RemainingQty,
-		Side:        exitSide,
-		Type:        "market",
-		TimeInForce: "day",
-		Strategy:    strategyTag,
-	})
-	if err != nil {
-		return fmt.Errorf("place social-exit market order: %w", err)
-	}
-
-	pm.mu.Lock()
-	live.Status = "CLOSED"
-	closedAt := time.Now()
-	live.ClosedAt = &closedAt
-	pm.mu.Unlock()
-	return nil
-}
-
+// Weekends return a zero time.
 // dbToManagedPosition converts DBManagedPosition to ManagedPosition
 func (pm *PositionManager) dbToManagedPosition(dbPos *models.DBManagedPosition) *ManagedPosition {
 	// Parse partial exit orders from JSON
@@ -1784,7 +1601,6 @@ func (pm *PositionManager) dbToManagedPosition(dbPos *models.DBManagedPosition) 
 		CreatedAt:         dbPos.CreatedAt,
 		UpdatedAt:         dbPos.UpdatedAt,
 		ClosedAt:          dbPos.ClosedAt,
-		DominantSignal:    dbPos.DominantSignal,
 	}
 
 	if dbPos.PartialExitEnabled {

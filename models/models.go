@@ -132,17 +132,12 @@ type DBManagedPosition struct {
 	// LONG_TERM) and is part of the place_managed_position public contract.
 	// Do NOT overload this with agent IDs — use AgentStrategy below.
 	Strategy          string
-	// AgentStrategy is the owning agent's strategyId (e.g. "penny-momentum",
-	// "trend"). Populated end-to-end from OPENPROPHET_STRATEGY at the MCP
+	// AgentStrategy is the owning agent's strategyId (e.g. "trend", "v2-options").
+	// Populated end-to-end from OPENPROPHET_STRATEGY at the MCP
 	// boundary so segment-scoped P&L and reconciliation can attribute managed
 	// positions to the right agent. Empty for rows written before this column
 	// existed; readers must fall back to DBOrder attribution in that case.
 	AgentStrategy     string `gorm:"index"`
-	// DominantSignal classifies penny entries by signal type so the
-	// PositionManager can fire the 20-minute social-exit timer.
-	// Empty for non-penny positions and for rows written before this
-	// column existed.
-	DominantSignal    string `gorm:"index"`
 
 	// Entry details
 	Quantity          float64

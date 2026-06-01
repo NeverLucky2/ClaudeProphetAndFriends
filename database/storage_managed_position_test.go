@@ -8,9 +8,8 @@ import (
 
 // TestManagedPosition_AgentStrategyRoundTrip verifies that the trade-style
 // Strategy field and the agent-attribution AgentStrategy field are stored
-// independently. This pins the namespace separation introduced when Penny's
-// "DAY_TRADE"/"SWING_TRADE"/"LONG_TERM" semantics collided with the agent
-// strategyId used for shared-account attribution.
+// independently. This pins the namespace separation introduced when multi-agent
+// attribution was added.
 func TestManagedPosition_AgentStrategyRoundTrip(t *testing.T) {
 	s := setupHarvestTestDB(t)
 
@@ -19,7 +18,7 @@ func TestManagedPosition_AgentStrategyRoundTrip(t *testing.T) {
 		Symbol:        "NVDA",
 		Side:          "buy",
 		Strategy:      "DAY_TRADE",
-		AgentStrategy: "penny-momentum",
+		AgentStrategy: "trend",
 		Quantity:      10,
 		EntryPrice:    100.0,
 		Status:        "ACTIVE",
@@ -35,8 +34,8 @@ func TestManagedPosition_AgentStrategyRoundTrip(t *testing.T) {
 	if got.Strategy != "DAY_TRADE" {
 		t.Errorf("Strategy = %q, want DAY_TRADE", got.Strategy)
 	}
-	if got.AgentStrategy != "penny-momentum" {
-		t.Errorf("AgentStrategy = %q, want penny-momentum", got.AgentStrategy)
+	if got.AgentStrategy != "trend" {
+		t.Errorf("AgentStrategy = %q, want trend", got.AgentStrategy)
 	}
 }
 
@@ -57,7 +56,7 @@ func TestManagedPosition_UpsertOnPositionID(t *testing.T) {
 		Symbol:        "LAND",
 		Side:          "buy",
 		Strategy:      "SWING_TRADE",
-		AgentStrategy: "penny-momentum",
+
 		Quantity:      216,
 		EntryPrice:    9.49,
 		StopLossPrice: 8.54,
@@ -75,7 +74,7 @@ func TestManagedPosition_UpsertOnPositionID(t *testing.T) {
 		Symbol:          "LAND",
 		Side:            "buy",
 		Strategy:        "SWING_TRADE",
-		AgentStrategy:   "penny-momentum",
+
 		Quantity:        216,
 		EntryPrice:      9.49,
 		StopLossPrice:   8.54,

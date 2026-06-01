@@ -1,7 +1,6 @@
 {
   "agents": [
     { "id": "default", "name": "Prophet", "strategyId": "prophet-v1" },
-    { "id": "penny-prophet", "name": "Spark", "strategyId": "penny-v1" },
     { "id": "harvest", "name": "Harvest", "strategyId": "harvest-v1" }
   ],
   "strategies": [
@@ -10,7 +9,6 @@
   "sandboxes": {
     "sb1": { "name": "sb1", "accountId": "aaa111", "agent": { "activeAgentId": "default" } },
     "sb2": { "name": "sb2", "accountId": "bbb222", "agent": { "activeAgentId": "default" } },
-    "sb3": { "name": "sb3", "accountId": "ccc333", "agent": { "activeAgentId": "penny-prophet" } },
     "sb4": { "name": "sb4", "accountId": "ddd444", "agent": { "activeAgentId": "harvest" } }
   }
 }

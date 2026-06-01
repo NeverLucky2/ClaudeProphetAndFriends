@@ -35,7 +35,7 @@ export function detectAssetClass(action, agentId) {
 
   // Plain ticker heuristic: 1-5 uppercase letters
   if (/^[A-Z]{1,5}$/.test(symbol)) {
-    return agentId === 'penny-prophet' ? 'penny_stocks' : 'stocks';
+    return 'stocks';
   }
 
   return null;
@@ -56,34 +56,6 @@ export function computeStockFriction(action, profile, stopOut) {
   }
 
   const slippage = profile.per_share_slippage_usd * size * 2;
-  const regulatory_fees = profile.regulatory_fee_per_share * size * 2;
-  const commissions = (profile.commission_per_share ?? 0) * size * 2;
-  const stop_gap_through = stopOut
-    ? profile.stop_gap_through_pct * entry_price * size
-    : 0;
-
-  const haircut_total_usd = +(slippage + regulatory_fees + commissions + stop_gap_through).toFixed(4);
-  return {
-    haircut_total_usd,
-    haircut_breakdown: { slippage, regulatory_fees, commissions, stop_gap_through },
-  };
-}
-
-export function computePennyFriction(action, profile, stopOut) {
-  const md = action?.market_data ?? {};
-  const { entry_price, size } = md;
-  if (typeof size !== 'number') {
-    throw new Error(`computePennyFriction: missing market_data.size on action ${action?.symbol}`);
-  }
-  if (typeof entry_price !== 'number') {
-    throw new Error(`computePennyFriction: missing market_data.entry_price on action ${action?.symbol}`);
-  }
-
-  const effectiveSlippagePerShare = Math.max(
-    profile.per_share_slippage_usd,
-    profile.slippage_pct_of_price_floor * entry_price,
-  );
-  const slippage = effectiveSlippagePerShare * size * 2;
   const regulatory_fees = profile.regulatory_fee_per_share * size * 2;
   const commissions = (profile.commission_per_share ?? 0) * size * 2;
   const stop_gap_through = stopOut
@@ -158,11 +130,6 @@ const CALCULATORS = {
     const r = computeStockFriction(action, profile, stopOut);
     return { ...r, close_was_losing: action.market_data.exit_price < action.market_data.entry_price };
   },
-  penny_stocks: (action, profile) => {
-    const stopOut = isStopOut(action);
-    const r = computePennyFriction(action, profile, stopOut);
-    return { ...r, close_was_losing: action.market_data.exit_price < action.market_data.entry_price };
-  },
   single_leg_options: (action, profile) => computeSingleLegOptionFriction(action, profile),
   iron_condor: (action, profile) => computeIronCondorFriction(action, profile),
 };
@@ -218,7 +185,7 @@ export function applyFriction(action, agentId, config) {
   return sign_flip_warning ? { action: augmented, sign_flip_warning: true } : { action: augmented };
 }
 
-const REQUIRED_PROFILES = ['stocks', 'penny_stocks', 'single_leg_options', 'iron_condor'];
+const REQUIRED_PROFILES = ['stocks', 'single_leg_options', 'iron_condor'];
 
 export function loadFrictionConfig(path) {
   if (!existsSync(path)) {

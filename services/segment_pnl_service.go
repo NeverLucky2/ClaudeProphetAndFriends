@@ -20,7 +20,7 @@ import (
 //
 // Managed-position attribution is now handled at the broker layer:
 // PositionManager.placeEntryOrder forwards AgentStrategy onto the entry
-// order, so GetSymbolStrategyAttribution picks up Penny/V2 managed
+// order, so GetSymbolStrategyAttribution picks up V2 managed
 // positions automatically through DBOrder.
 type SegmentPnL struct {
 	Strategy         string  `json:"strategy"`

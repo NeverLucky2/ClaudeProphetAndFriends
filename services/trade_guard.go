@@ -16,7 +16,6 @@ type AgentSource string
 
 const (
 	AgentMain            AgentSource = "main"
-	AgentPenny           AgentSource = "penny"
 	AgentHarvest         AgentSource = "harvest"
 	AgentTrend           AgentSource = "trend"
 	AgentMeanRev         AgentSource = "meanrev"
@@ -45,8 +44,6 @@ func AgentTag(agent AgentSource) string {
 // right agent. Unknown/empty → main (legacy default).
 func AgentForStrategy(strategyId string) AgentSource {
 	switch strategyId {
-	case "penny-momentum":
-		return AgentPenny
 	case "harvest":
 		return AgentHarvest
 	case "trend":
@@ -64,13 +61,6 @@ func AgentForStrategy(strategyId string) AgentSource {
 
 // TradeGuardConfig holds configurable limits for the guard.
 type TradeGuardConfig struct {
-	// PennyMaxCapitalPct is the maximum fraction of portfolio value the penny
-	// agent may hold in aggregate (e.g. 0.20 = 20%).
-	PennyMaxCapitalPct float64 `json:"penny_max_capital_pct"`
-
-	// PennyMaxPositionDollars is the maximum dollar size of a single penny trade.
-	PennyMaxPositionDollars float64 `json:"penny_max_position_dollars"`
-
 	// MaxDailyLossPct is the daily loss circuit breaker as a positive percentage
 	// of previous session equity (e.g. 5.0 = block new entries when intraday
 	// loss reaches -5%). Zero or negative disables the check.
@@ -241,8 +231,6 @@ type OptionsExposureProvider interface {
 // TradeGuard enforces cross-agent trade rules:
 //   - Symbol non-overlap: a symbol held by one agent cannot be traded by the other.
 //   - Daily-loss circuit: intraday equity drop ≥ MaxDailyLossPct blocks new buys.
-//   - Penny per-position cap: each penny buy is capped at PennyMaxPositionDollars.
-//   - Penny portfolio cap: total penny exposure ≤ PennyMaxCapitalPct × portfolio value.
 //   - Sector concentration cap (flag-gated): aggregate dollar exposure to each
 //     SectorBucket — summed across all agents' managed positions plus any
 //     registered OptionsExposureProvider — is capped per bucket.
@@ -276,7 +264,6 @@ func NewTradeGuard(positions positionLister, ts interfaces.TradingService, cfg T
 		cfg:            cfg,
 		rawSymbols: map[AgentSource]map[string]struct{}{
 			AgentMain:    {},
-			AgentPenny:   {},
 			AgentHarvest: {},
 			AgentTrend:   {},
 			AgentMeanRev: {},
@@ -291,8 +278,8 @@ func NewTradeGuard(positions positionLister, ts interfaces.TradingService, cfg T
 // (capital-cap check is skipped).
 //
 // At most one tradingService.GetAccount() call is made per invocation: the result
-// is fetched lazily (only when daily-loss or capital-cap checks need it) and shared
-// between the two checks for penny buys.
+// is fetched lazily (only when daily-loss or sector-cap checks need it) and shared
+// between checks that need account context.
 func (g *TradeGuard) CheckBuy(ctx context.Context, agent AgentSource, symbol string, allocationDollars float64) error {
 	if agent == "" {
 		agent = AgentMain
@@ -307,7 +294,7 @@ func (g *TradeGuard) CheckBuy(ctx context.Context, agent AgentSource, symbol str
 	// Lazily fetch account at most once per CheckBuy. Both the value and any
 	// fetch error are cached so each downstream helper can apply its own policy:
 	//   - checkDailyLoss treats fetch errors as "data missing, fail-open"
-	//   - checkPennyCapCap treats fetch errors as fail-closed (preserves prior behavior)
+	
 	var acct *interfaces.Account
 	var acctErr error
 	var acctFetched bool
@@ -344,18 +331,6 @@ func (g *TradeGuard) CheckBuy(ctx context.Context, agent AgentSource, symbol str
 		capAcct, capErr := getAcct()
 		if err := g.checkPositionCaps(capAcct, capErr, allocationDollars); err != nil {
 			return err
-		}
-	}
-
-	if agent == AgentPenny {
-		if allocationDollars > 0 && allocationDollars > g.cfg.PennyMaxPositionDollars {
-			return fmt.Errorf("guard: penny position $%.2f exceeds per-position cap of $%.2f", allocationDollars, g.cfg.PennyMaxPositionDollars)
-		}
-		if allocationDollars > 0 {
-			capAcct, capErr := getAcct()
-			if err := g.checkPennyCapCap(capAcct, capErr, allocationDollars); err != nil {
-				return err
-			}
 		}
 	}
 
@@ -497,11 +472,8 @@ func (g *TradeGuard) RecordRawSell(agent AgentSource, symbol string) {
 
 // GuardStatus is the payload returned by the status endpoint.
 type GuardStatus struct {
-	Config          TradeGuardConfig `json:"config"`
+	Config    TradeGuardConfig `json:"config"`
 	MainSymbols     []string         `json:"main_symbols"`
-	PennySymbols    []string         `json:"penny_symbols"`
-	PennyExposure   float64          `json:"penny_exposure_dollars"`
-	PennyCapitalMax float64          `json:"penny_capital_max_dollars"`
 
 	// SectorExposure reports per-bucket dollar exposure (managed positions +
 	// any registered OptionsExposureProvider). Useful for observation-mode
@@ -517,19 +489,15 @@ type GuardStatus struct {
 // Status returns a snapshot of current guard state.
 func (g *TradeGuard) Status(ctx context.Context) GuardStatus {
 	mainSet := g.symbolsFor(AgentMain)
-	pennySet := g.symbolsFor(AgentPenny)
 
 	mainList := setToSlice(mainSet)
-	pennyList := setToSlice(pennySet)
 
-	exposure := g.currentPennyExposure()
 	portfolioValue := 0.0
 	if g.tradingService != nil {
 		if acct, err := g.tradingService.GetAccount(ctx); err == nil {
 			portfolioValue = acct.PortfolioValue
 		}
 	}
-	maxDollars := portfolioValue * g.cfg.PennyMaxCapitalPct
 
 	sectorExposure := make(map[string]float64)
 	for bucket, dollars := range g.currentSectorExposure() {
@@ -540,9 +508,6 @@ func (g *TradeGuard) Status(ctx context.Context) GuardStatus {
 	return GuardStatus{
 		Config:            g.cfg,
 		MainSymbols:       mainList,
-		PennySymbols:      pennyList,
-		PennyExposure:     exposure,
-		PennyCapitalMax:   maxDollars,
 		SectorExposure:    sectorExposure,
 		SectorMaxByBucket: sectorMax,
 	}
@@ -573,10 +538,10 @@ func (g *TradeGuard) sectorMaxByBucket(portfolioValue float64, exposure map[stri
 // --- internal helpers ---
 
 // heldByAnyOtherAgent returns the first agent != self that owns the symbol, or
-// "" if none. Replaces binary opponentOf so all six strategies are checked.
+// "" if none. Replaces binary opponentOf so all five strategies are checked.
 // Exact-symbol-string match (OCC option symbols never collide with tickers).
 func (g *TradeGuard) heldByAnyOtherAgent(self AgentSource, symbol string) AgentSource {
-	for _, other := range []AgentSource{AgentMain, AgentPenny, AgentHarvest, AgentTrend, AgentMeanRev, AgentDrift} {
+	for _, other := range []AgentSource{AgentMain, AgentHarvest, AgentTrend, AgentMeanRev, AgentDrift} {
 		if other == self {
 			continue
 		}
@@ -645,7 +610,7 @@ func (g *TradeGuard) checkAgentUniverse(agent AgentSource, symbol string) error 
 //   - disabled when MaxDailyLossPct <= 0.
 //   - acctErr != nil → fail CLOSED (cannot read live equity; don't open new risk
 //     while blind to P&L). Per-CheckBuy, no latch — self-recovers when the API
-//     recovers. Mirrors checkPennyCapCap.
+//     recovers.
 //   - acct == nil with no error (nil trading service / tests) → fail open.
 //   - LastEquity/PortfolioValue <= 0 (new account) → fail open.
 func (g *TradeGuard) checkDailyLoss(acct *interfaces.Account, acctErr error) error {
@@ -675,39 +640,6 @@ func (g *TradeGuard) checkDailyLoss(acct *interfaces.Account, acctErr error) err
 	return nil
 }
 
-// checkPennyCapCap enforces the aggregate penny exposure cap.
-//   - acct == nil && acctErr == nil: trading service unavailable (e.g. tests) — skip check (no-op).
-//   - acct == nil && acctErr != nil: fetch failed — fail-closed, return wrapped error.
-//   - acct != nil: run the cap check normally.
-//
-// The fail-closed behavior on fetch errors is intentional and matches the original
-// pre-refactor semantics: a flaky API call should NOT silently let a penny buy
-// bypass the capital cap.
-func (g *TradeGuard) checkPennyCapCap(acct *interfaces.Account, acctErr error, additionalDollars float64) error {
-	if acctErr != nil {
-		return fmt.Errorf("guard: failed to fetch account for capital check: %w", acctErr)
-	}
-	if acct == nil {
-		return nil
-	}
-
-	exposure := g.currentPennyExposure()
-	maxDollars := acct.PortfolioValue * g.cfg.PennyMaxCapitalPct
-
-	if exposure+additionalDollars > maxDollars {
-		return fmt.Errorf(
-			"guard: penny capital cap — current $%.2f + new $%.2f exceeds %.0f%% cap ($%.2f of $%.2f portfolio)",
-			exposure, additionalDollars,
-			g.cfg.PennyMaxCapitalPct*100, maxDollars, acct.PortfolioValue,
-		)
-	}
-	return nil
-}
-
-// checkPositionCaps enforces the per-position and projected-deployed caps.
-// Fail policy: acctErr → fail closed; no account context (acct==nil /
-// PortfolioValue<=0) → fail open; caps enabled but notional<=0 (size
-// indeterminate, e.g. an unpriceable market options order) → fail closed.
 func (g *TradeGuard) checkPositionCaps(acct *interfaces.Account, acctErr error, notional float64) error {
 	if acctErr != nil {
 		return fmt.Errorf("guard: failed to fetch account for position cap check: %w", acctErr)
@@ -796,7 +728,7 @@ func (g *TradeGuard) sectorCapFor(bucket SectorBucket, portfolioValue float64) (
 }
 
 // checkSectorCap enforces the cross-agent sector concentration cap.
-//   - acctErr != nil  → fail-closed (matches penny-cap policy: a flaky API
+//   - acctErr != nil  → fail-closed (matches the fail-closed cap policy: a flaky API
 //     call must not silently bypass a concentration limit).
 //   - acct == nil     → no-op (trading service unavailable, e.g. tests).
 //   - PortfolioValue ≤ 0 → no-op (uninitialized/new account, fail-open).
@@ -822,19 +754,6 @@ func (g *TradeGuard) checkSectorCap(acct *interfaces.Account, acctErr error, sym
 	return nil
 }
 
-func (g *TradeGuard) currentPennyExposure() float64 {
-	if g.positions == nil {
-		return 0
-	}
-	total := 0.0
-	for _, p := range g.positions.ListManagedPositions("") {
-		if isActivePosition(p) && positionBelongsTo(p, AgentPenny) {
-			total += p.AllocationDollars
-		}
-	}
-	return total
-}
-
 func isActivePosition(p *ManagedPosition) bool {
 	return p.Status == "ACTIVE" || p.Status == "PARTIAL" || p.Status == "PENDING"
 }
@@ -843,7 +762,6 @@ func isActivePosition(p *ManagedPosition) bool {
 // Untagged positions default to main.
 func positionBelongsTo(p *ManagedPosition, agent AgentSource) bool {
 	tag := AgentTag(agent)
-	pennyTag := AgentTag(AgentPenny)
 
 	for _, t := range p.Tags {
 		if t == tag {
@@ -853,11 +771,6 @@ func positionBelongsTo(p *ManagedPosition, agent AgentSource) bool {
 
 	// Untagged = main
 	if agent == AgentMain {
-		for _, t := range p.Tags {
-			if t == pennyTag {
-				return false
-			}
-		}
 		return true
 	}
 

@@ -5,7 +5,6 @@ import { toFrictionAction } from './trade-ledger.mjs';
 export const TEST_CFG = {
   version: 'test',
   stocks: { per_share_slippage_usd: 0.01, regulatory_fee_per_share: 0.0001, commission_per_share: 0, stop_gap_through_pct: 0.003 },
-  penny_stocks: { per_share_slippage_usd: 0.01, slippage_pct_of_price_floor: 0.001, regulatory_fee_per_share: 0.0001, commission_per_share: 0, stop_gap_through_pct: 0.01 },
   single_leg_options: { assumed_spread_pct_of_mid: 0.05, spread_crossing_pct_open: 0.5, spread_crossing_pct_close: 0.5, spread_crossing_pct_close_when_losing: 0.75, commission_per_contract: 0.65, regulatory_fee_per_contract: 0.01 },
   iron_condor: { assumed_spread_pct_of_credit: 0.1, spread_crossing_pct_close: 0.5, spread_crossing_pct_close_when_losing: 0.75, commission_per_contract: 0.65, regulatory_fee_per_contract: 0.01, leg_count: 4 },
 };
@@ -32,7 +31,6 @@ test('buildStressConfig doubles uncertain frictions, leaves deterministic fees',
   // uncertain → doubled
   assert.equal(stress.stocks.per_share_slippage_usd, 0.02);
   assert.equal(stress.stocks.stop_gap_through_pct, 0.006);
-  assert.equal(stress.penny_stocks.slippage_pct_of_price_floor, 0.002);
   assert.equal(stress.single_leg_options.assumed_spread_pct_of_mid, 0.10);
   // deterministic fees → unchanged
   assert.equal(stress.stocks.regulatory_fee_per_share, 0.0001);

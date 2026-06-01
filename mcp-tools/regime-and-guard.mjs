@@ -21,7 +21,7 @@ export const regimeAndGuardTools = [
   {
     name: 'get_guard_status',
     description:
-      'Get the current TradeGuard status across all four agents. Returns penny-cap usage, daily-loss circuit state, and (when sector aggregation is enabled) sector_exposure_dollars + sector_max_by_bucket_dollars — current dollar exposure per sector bucket (TECH, INDEX_BETA, FINANCIALS, etc.) and the cap per bucket. Read this before sizing entries to know how much headroom remains in the relevant sector bucket. Source: services/trade_guard.go Status().',
+      'Get the current TradeGuard status. Returns daily-loss circuit state, and (when sector aggregation is enabled) sector_exposure_dollars + sector_max_by_bucket_dollars — current dollar exposure per sector bucket (TECH, INDEX_BETA, FINANCIALS, etc.) and the cap per bucket. Read this before sizing entries to know how much headroom remains in the relevant sector bucket. Source: services/trade_guard.go Status().',
     inputSchema: {
       type: 'object',
       properties: {},

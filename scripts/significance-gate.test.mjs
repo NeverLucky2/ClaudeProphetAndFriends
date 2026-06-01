@@ -9,12 +9,6 @@ test('exposurePerTrade: stocks = |entry_price × size|', () => {
   assert.equal(exposurePerTrade(t), 5000);
 });
 
-test('exposurePerTrade: penny_stocks same as stocks shape', () => {
-  const t = { friction_meta: { profile_applied: 'penny_stocks' },
-              market_data: { entry_price: 0.5, size: 1000 } };
-  assert.equal(exposurePerTrade(t), 500);
-});
-
 test('exposurePerTrade: single_leg_options = |entry × size × 100|', () => {
   const t = { friction_meta: { profile_applied: 'single_leg_options' },
               market_data: { entry_price: 2.5, size: 6 } };

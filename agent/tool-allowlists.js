@@ -3,8 +3,8 @@
 // Each trading agent should only see the MCP tools its strategy actually uses.
 // The harness passes the resolved list as OPENPROPHET_TOOL_ALLOWLIST; the MCP
 // server filters ListTools to those names (mcp-server.js:1513). Scoping here:
-//   - prevents cross-strategy leakage (e.g. the penny agent seeing
-//     get_mean_reversion_signal), and
+//   - prevents cross-strategy leakage (e.g. an agent seeing
+//     get_mean_reversion_signal when it doesn't need it), and
 //   - trims prompt tokens by not exposing schemas an agent never calls.
 //
 // Stored as a code map keyed by strategyId rather than on the strategy data
@@ -72,9 +72,6 @@ export const ALL_TOOLS = [
   'get_options_position',
   'get_options_positions',
   'get_orders',
-  'get_penny_candidates',
-  'get_penny_signal_detail',
-  'get_penny_universe',
   'get_positions',
   'get_quick_market_intelligence',
   'get_quote',
@@ -103,7 +100,6 @@ export const ALL_TOOLS = [
   'run_market_top_check',
   'run_pead_screener',
   'run_vcp_screener',
-  'scan_penny_universe_now',
   'search_news',
   'set_heartbeat',
   'set_session_mode',
@@ -135,7 +131,7 @@ const BASE = [
   'wait',
 ];
 
-// Stop+target managed-position lifecycle, shared by penny/mean-rev/drift.
+// Stop+target managed-position lifecycle, shared by mean-rev/drift.
 const MANAGED = [
   'place_managed_position',
   'close_managed_position',
@@ -146,7 +142,6 @@ const MANAGED = [
 // Strategy-signal/order endpoints exclusive to a single agent. Each set must
 // appear on exactly one strategy's allowlist (enforced by tests) and is removed
 // from the discretionary Prophet list below.
-const PENNY_SIGNALS = ['get_penny_candidates', 'get_penny_signal_detail', 'get_penny_universe', 'scan_penny_universe_now'];
 const HARVEST_TOOLS = ['get_harvest_state', 'get_harvest_ivr', 'get_harvest_fomc', 'get_harvest_expirations', 'open_iron_condor', 'close_iron_condor'];
 const TREND_SIGNALS = ['get_trend_signal'];
 const MEANREV_SIGNALS = ['get_mean_reversion_candidates', 'get_mean_reversion_signal'];
@@ -205,11 +200,10 @@ function uniq(list) {
 }
 
 // Prophet (v2-options) is the broad discretionary agent: everything EXCEPT the
-// five mechanical strategies' exclusive signal/condor endpoints, the manager
+// four mechanical strategies' exclusive signal/condor endpoints, the manager
 // tools, and the PROPHET_TRIM cost redundancies. Computed (not enumerated) so any
 // new generic server tool added to ALL_TOOLS still flows to Prophet automatically.
 const NON_PROPHET = new Set([
-  ...PENNY_SIGNALS,
   ...HARVEST_TOOLS,
   ...TREND_SIGNALS,
   ...MEANREV_SIGNALS,
@@ -219,16 +213,6 @@ const NON_PROPHET = new Set([
 ]);
 
 export const STRATEGY_TOOL_ALLOWLISTS = {
-  'penny-momentum': uniq([
-    ...BASE,
-    ...PENNY_SIGNALS,
-    ...MANAGED,
-    'place_buy_order',
-    'place_sell_order',
-    'cancel_order',
-    'get_latest_bar',
-    'get_historical_bars',
-  ]),
   'mean-rev-rsi2': uniq([...BASE, ...MEANREV_SIGNALS, ...MANAGED]),
   'earnings-drift': uniq([...BASE, ...DRIFT_SIGNALS, ...MANAGED]),
   'harvest': uniq([
@@ -258,7 +242,6 @@ export function resolveAllowedTools(sandboxAllow, strategyId) {
 export const _internals = {
   BASE,
   MANAGED,
-  PENNY_SIGNALS,
   HARVEST_TOOLS,
   TREND_SIGNALS,
   MEANREV_SIGNALS,

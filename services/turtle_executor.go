@@ -14,7 +14,7 @@ import (
 )
 
 // nyLoc (the America/New_York timezone) is declared once at package scope
-// in penny_universe_service.go and reused here. tzdata is bundled into the
+// in earnings_calendar_service.go and reused here. tzdata is bundled into the
 // Go binary since 1.15, so the error path is effectively dead — a nil
 // location would cause a clear nil-deref at the first call site rather than
 // silent UTC fallback.
@@ -454,9 +454,8 @@ func (e *TurtleExecutor) openPositionReturns(ctx context.Context, openRows []*mo
 // the TradeGuard's CheckBuy approves it. Per-ticker failures append to skips
 // or errors but don't halt the loop (self-review gap #5).
 //
-// AgentMain is passed to TradeGuard: Turtle is not from the penny pipeline,
-// so the symbol-overlap / penny-cap rules don't apply; the daily-loss
-// circuit breaker (account-wide) still engages.
+// AgentMain is passed to TradeGuard: Turtle is mechanical; the symbol-overlap
+// rules don't apply; the daily-loss circuit breaker (account-wide) still engages.
 func (e *TurtleExecutor) runEntries(ctx context.Context, openRows []*models.DBTrendLedgerEntry, held map[string]struct{}, session *models.DBTurtleSession, now time.Time, res *HeartbeatResult) {
 	entriesPlaced := 0
 	coldStart := session == nil || !session.ColdStartCompleted

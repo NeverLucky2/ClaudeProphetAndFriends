@@ -76,7 +76,7 @@ func isCacheableTF(tf string) bool {
 // dateKey normalizes an instant to its Eastern trading date. All bar callers
 // pass end=now (a continuously shifting timestamp), so the key must collapse to
 // date granularity or it would never hit. nyLoc is the services-package ET
-// location (declared in penny_universe_service.go).
+// location (declared in earnings_calendar_service.go).
 func dateKey(t time.Time) string { return t.In(nyLoc).Format("2006-01-02") }
 
 // sanitize keeps only filesystem-safe characters (e.g. "BRK.B" -> "BRK_B").

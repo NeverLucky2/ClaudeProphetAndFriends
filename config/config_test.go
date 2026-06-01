@@ -5,25 +5,6 @@ import (
 	"time"
 )
 
-func TestLoad_MissingOperatorEmail_ReturnsError(t *testing.T) {
-	t.Setenv("OPERATOR_EMAIL", "")
-	err := Load()
-	if err == nil {
-		t.Fatal("expected error when OPERATOR_EMAIL is unset, got nil")
-	}
-}
-
-func TestLoad_WithOperatorEmail_Succeeds(t *testing.T) {
-	t.Setenv("OPERATOR_EMAIL", "test@example.com")
-	err := Load()
-	if err != nil {
-		t.Fatalf("expected no error with OPERATOR_EMAIL set, got: %v", err)
-	}
-	if AppConfig.OperatorEmail != "test@example.com" {
-		t.Errorf("expected OperatorEmail=test@example.com, got %q", AppConfig.OperatorEmail)
-	}
-}
-
 // Regime gate defaults follow the Item 1 flag-gated rollout pattern:
 // enforcement off until observed in production. ReportPath defaults to the
 // canonical scheduler-written location so the operator doesn't have to set it.
