@@ -97,19 +97,30 @@ def _pct(a: float, b: float) -> Optional[float]:
     return round((a - b) / b * 100.0, 2)
 
 
-def compute_technicals(ticker: str, lookback_days: int = 400) -> dict:
-    client = FMPClient()
-    bars = client.get_historical_prices(ticker.upper(), days=lookback_days)
+def compute_from_bars(ticker: str, bars: list[dict]) -> dict:
+    """Compute the technicals dict from raw FMP OHLCV bars (newest-first, as FMP returns).
+
+    Pure function — no network — so the indicator math (and the 52-week range fix) is
+    unit-testable by injecting synthetic bars.
+    """
     if not bars:
         return {"ticker": ticker.upper(), "error": "no historical price data"}
 
     # FMP returns newest-first; flip to oldest-first for indicator math.
     bars = list(reversed(bars))
-    closes = [float(b["close"]) for b in bars if b.get("close") is not None]
-    highs = [float(b["high"]) for b in bars if b.get("high") is not None]
-    lows = [float(b["low"]) for b in bars if b.get("low") is not None]
-    volumes = [float(b.get("volume") or 0) for b in bars]
-    last_bar = bars[-1]
+    # Build aligned OHLCV arrays in one pass so the 52w high/low windows line up.
+    closes, highs, lows, volumes, dates = [], [], [], [], []
+    for b in bars:
+        c, h, l = b.get("close"), b.get("high"), b.get("low")
+        if c is None or h is None or l is None:
+            continue
+        closes.append(float(c))
+        highs.append(float(h))
+        lows.append(float(l))
+        volumes.append(float(b.get("volume") or 0))
+        dates.append(b.get("date"))
+    if not closes:
+        return {"ticker": ticker.upper(), "error": "no usable OHLC bars"}
 
     current = closes[-1]
     prev_close = closes[-2] if len(closes) > 1 else None
@@ -118,9 +129,11 @@ def compute_technicals(ticker: str, lookback_days: int = 400) -> dict:
     ma50 = sum(closes[-50:]) / 50 if len(closes) >= 50 else None
     ma200 = sum(closes[-200:]) / 200 if len(closes) >= 200 else None
 
-    window_252 = closes[-252:] if len(closes) >= 252 else closes
-    high_52w = max(window_252)
-    low_52w = min(window_252)
+    # 52-week range from intraday highs/lows (not closes) — a spike high or flush low
+    # that didn't close at the extreme still counts, matching how "52-week high" is quoted.
+    n = min(252, len(closes))
+    high_52w = max(highs[-n:])
+    low_52w = min(lows[-n:])
 
     rsi14 = _rsi(closes, 14)
     macd_line, macd_sig, macd_hist = _macd(closes)
@@ -130,7 +143,7 @@ def compute_technicals(ticker: str, lookback_days: int = 400) -> dict:
 
     return {
         "ticker": ticker.upper(),
-        "as_of_date": last_bar.get("date"),
+        "as_of_date": dates[-1],
         "current_price": round(current, 2),
         "prev_close": round(prev_close, 2) if prev_close else None,
         "day_change_pct": _pct(current, prev_close) if prev_close else None,
@@ -152,8 +165,15 @@ def compute_technicals(ticker: str, lookback_days: int = 400) -> dict:
         "volume_ratio": round(last_vol / avg_vol_20, 2) if (avg_vol_20 and last_vol) else None,
         "atr14": round(atr14, 2) if atr14 is not None else None,
         "atr_pct": round(atr14 / current * 100.0, 2) if (atr14 is not None and current) else None,
-        "_api_stats": client.get_api_stats(),
     }
+
+
+def compute_technicals(ticker: str, lookback_days: int = 400, client: Optional[FMPClient] = None) -> dict:
+    client = client or FMPClient()
+    bars = client.get_historical_prices(ticker.upper(), days=lookback_days)
+    result = compute_from_bars(ticker, bars or [])
+    result["_api_stats"] = client.get_api_stats()
+    return result
 
 
 def main() -> int:

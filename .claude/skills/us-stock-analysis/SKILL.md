@@ -27,6 +27,11 @@ Run from the skill directory. Each script emits a single JSON object on stdout �
 3. Identify 3–5 peers, then `fetch_peers.py --tickers <T>,<P1>,<P2>,<P3>` → comparison table
 4. Use WebSearch ONLY for qualitative items the scripts don't cover: latest earnings call commentary, news narrative around the latest quarter, breaking M&A, or sentiment.
 
+**Data-quality habit — read before trusting the numbers:**
+- `fetch_stock_snapshot.py` emits a `share_context` block: the share-count trend plus a `marketCap ≈ price × shares` check. If a price looks surprising (a name you remember near $900 prints at $136), read `share_context.note` BEFORE concluding the data is wrong — `marketcap_consistent: true` with a ratio near 1.0 means it's just split-adjusted, not corrupt. A ratio far from 1.0 flags a split/issuance/stale-series to verify.
+- `pct_off_52w_high`/`low` use intraday highs/lows, so "0.0% off high" means literally at the high (not just the highest close).
+- Peer rows include `revenue_growth` (latest annual YoY) alongside the multiples.
+
 **Fallback: WebSearch (when no FMP key or for qualitative narrative).**
 
 Primary data to fetch via WebSearch in fallback mode:

@@ -2,11 +2,11 @@
 """
 Build a side-by-side comparable-multiples table for N tickers.
 
-Emits a JSON list, one row per ticker, with normalized fields:
+Emits {"peers": [...]} where each row carries normalized fields:
   ticker, name, sector, industry, market_cap, price,
-  pe_ttm, pe_forward, peg, ps, pb, ev_ebitda, ev_sales,
-  fcf_yield, roe, roic, gross_margin, operating_margin, net_margin,
-  revenue_growth_ttm, debt_to_equity, current_ratio
+  pe_ttm, peg, ps, pb, ev_ebitda, ev_sales,
+  fcf_yield, earnings_yield, roe, roic, gross_margin, operating_margin, net_margin,
+  revenue_growth, debt_to_equity, current_ratio, dividend_yield
 
 Usage:
   python fetch_peers.py --tickers SE,MELI,PDD,GRAB
@@ -42,12 +42,28 @@ def _round(v, digits=2):
         return None
 
 
+def _yoy_revenue_growth(income) -> Optional[float]:
+    """YoY revenue growth from the two most recent annual income rows.
+
+    Robust to FMP's ordering: we sort by fiscalYear descending rather than trusting
+    newest-first. Returns a fraction (0.20 = +20%) or None if history is insufficient.
+    """
+    if not income or len(income) < 2:
+        return None
+    rows = sorted(income, key=lambda r: str(r.get("fiscalYear", "")), reverse=True)
+    latest, prior = rows[0].get("revenue"), rows[1].get("revenue")
+    if not latest or not prior:
+        return None
+    return round(latest / prior - 1.0, 4)
+
+
 def build_peer_row(client: FMPClient, ticker: str) -> dict:
     t = ticker.upper()
     quote = client.get_quote(t) or {}
     profile = client.get_profile(t) or {}
     ratios = client.get_ratios_ttm(t) or {}
     metrics = client.get_key_metrics_ttm(t) or {}
+    income = client.get_income_statement(t, "annual", 2) or []
 
     return {
         "ticker": t,
@@ -56,6 +72,7 @@ def build_peer_row(client: FMPClient, ticker: str) -> dict:
         "industry": _g(profile, "industry"),
         "price": _round(_g(quote, "price")),
         "market_cap": _g(quote, "marketCap", "mktCap"),
+        "revenue_growth": _yoy_revenue_growth(income),
         "pe_ttm": _round(_g(ratios, "priceToEarningsRatioTTM", "priceEarningsRatioTTM")),
         "peg": _round(_g(ratios, "priceToEarningsGrowthRatioTTM", "priceEarningsToGrowthRatioTTM")),
         "ps": _round(_g(ratios, "priceToSalesRatioTTM")),
