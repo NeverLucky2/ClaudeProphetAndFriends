@@ -12,6 +12,7 @@ import (
 	"prophet-trader/controllers"
 	"prophet-trader/database"
 	"prophet-trader/interfaces"
+	"prophet-trader/models"
 	"prophet-trader/services"
 	"syscall"
 	"time"
@@ -193,13 +194,13 @@ func main() {
 	// Per-agent equity universes for the agent-universe gate (Coil/Drift/Trend).
 	// Built from the same Go-constant lists the runtime iterates, so the
 	// order-time guard and the candidate/entry feed can never diverge:
-	// MeanRev/Drift from their scanner constants, Trend from controllers.
-	// TrendUniverse (which services.turtleUniverse mirrors). Agents absent here
-	// (Main/Penny) fail open — the gate never blocks them.
+	// MeanRev/Drift from their scanner constants, Trend from the centralized
+	// models.TrendUniverse (the single source of truth the executor iterates).
+	// Agents absent here (Main/Penny) fail open — the gate never blocks them.
 	agentUniverses := map[services.AgentSource]map[string]bool{
 		services.AgentMeanRev: services.SymbolSet(services.MeanRevUniverse),
 		services.AgentDrift:   services.SymbolSet(services.DriftUniverse),
-		services.AgentTrend:   services.SymbolSet(controllers.TrendUniverse),
+		services.AgentTrend:   services.SymbolSet(models.TrendUniverseTickers()),
 	}
 
 	// Create trade guard and wire into both controllers

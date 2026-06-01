@@ -39,6 +39,12 @@ type TrendSignal struct {
 	SMA200          float64 `json:"sma_200"`
 	ATR20           float64 `json:"atr_20"`
 	SignalVersion   string  `json:"signal_version"`
+
+	// Closes is the full daily close series (oldest→newest) used as a
+	// fixed-window correlation feed by the Turtle entry loop. Excluded from
+	// the HTTP signal payload (json:"-") — it would bloat the response and no
+	// API consumer needs it.
+	Closes []float64 `json:"-"`
 }
 
 const (
@@ -94,6 +100,7 @@ func ComputeSignal(symbol string, bars []*interfaces.Bar) *TrendSignal {
 		SMA200:          sma(closes, smaWindow),
 		ATR20:           wilderATR(highs, lows, closes, atrWindow),
 		SignalVersion:   signalVersion,
+		Closes:          closes,
 	}
 }
 

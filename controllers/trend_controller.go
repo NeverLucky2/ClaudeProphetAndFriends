@@ -10,12 +10,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"prophet-trader/models"
 	"prophet-trader/services"
 )
-
-// TrendUniverse is the fixed set of ETFs TrendProphet trades. Requests for
-// any other symbol return 400. The list mirrors TRADING_RULES_TREND.md.
-var TrendUniverse = []string{"TLT", "GLD", "USO", "DBC", "UUP", "EEM"}
 
 // TrendController exposes /api/v1/trend/* HTTP endpoints.
 type TrendController struct {
@@ -36,10 +33,10 @@ func NewTrendController(signalSvc *services.TrendSignalService) *TrendController
 //   500 → upstream data fetch failed
 func (tc *TrendController) HandleGetSignal(c *gin.Context) {
 	symbol := strings.ToUpper(c.Param("symbol"))
-	if !inTrendUniverse(symbol) {
+	if !models.InTrendUniverse(symbol) {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":    fmt.Sprintf("symbol %s not in trend universe", symbol),
-			"universe": TrendUniverse,
+			"universe": models.TrendUniverseTickers(),
 		})
 		return
 	}
@@ -60,13 +57,4 @@ func (tc *TrendController) HandleGetSignal(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, signal)
-}
-
-func inTrendUniverse(s string) bool {
-	for _, t := range TrendUniverse {
-		if t == s {
-			return true
-		}
-	}
-	return false
 }

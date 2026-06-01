@@ -59,20 +59,25 @@ policy still applies on tool error).
 
 ## Universe
 
-Six ETFs, one per asset bucket:
+Fifteen ETFs across six macro-driver clusters — liquid, unleveraged, non-inverse only:
 
-| Bucket | Ticker | Notes |
+| Cluster | Tickers | Driver |
 |---|---|---|
-| Rates | TLT | Long-duration Treasuries |
-| Metals | GLD | Gold |
-| Energy | USO | Oil ETF |
-| Broad commodities | DBC | Diversified commodity basket |
-| Currency | UUP | US dollar index |
-| EM equity | EEM | Emerging-markets equity |
+| Rates | TLT, IEF, TIP | Treasury duration (long + mid curve) + inflation-linked real rates |
+| Metals | GLD, SLV | Precious metals |
+| Energy | USO, UNG | Oil, natural gas |
+| Commodity | DBC, DBA, DBB | Broad commodity, agriculture, base metals |
+| FX | UUP, FXE, FXY | US dollar, euro, yen (yen = risk-off ballast) |
+| Intl equity | EEM, EFA | EM + developed-ex-US (the only equity-beta cluster) |
 
-No other instruments. If any tool returns data on other tickers, ignore it.
+No other instruments. No leveraged or inverse ETFs (decay destroys trend systems). If any tool returns data on other tickers, ignore it. The single source of truth is `models.TrendUniverse` (Go); this table mirrors it.
 
-The universe was deliberately trimmed from a larger candidate list to one ticker per asset bucket. This eliminates within-bucket correlation (e.g., TLT and IEF are 90%+ correlated) and removes the need for a conditional "max 1 per bucket" diversification rule. With six tickers, six positions is by construction one position per bucket.
+**Diversification (two layers).** The basket was deliberately broadened from one ticker per bucket to several genuinely different drivers, so two caps keep the system from quietly concentrating into co-moving breakouts:
+
+1. **Cluster cap (static, always on):** at most **one open position per cluster**. The strongest-trending ETF wins its cluster's slot; the intl-equity cluster is therefore held to ≤1 (the tightest), capping equity beta.
+2. **Correlation guard (dynamic):** before an entry, compute the 60-trading-day daily-return correlation between the candidate and each open position; **skip the entry if positive ρ > 0.70 with any open position**. Negative correlation is diversifying and is allowed. This catches cross-cluster co-trending the static cap misses (e.g. EEM + DBC in a commodity-driven EM rally).
+
+A basket member with insufficient Alpaca history is dropped for that beat with a logged skip (never fails the run).
 
 **Note on overlap with HARVEST:** HARVEST sells iron condors on GLD and TLT (short vol, range-bound thesis). Turtle may go directionally long these same underlyings. This is allowed — the strategies have different return drivers. Combined notional exposure is bounded by the segment caps in each strategy's rules.
 
@@ -249,8 +254,8 @@ For every entry:
 
 ## Risk Management — Portfolio Level
 
-**Rule:** Maximum 5 open trend positions simultaneously
-- Six-ticker universe; cap of 5 leaves headroom and prevents the segment from being fully concentrated even when every asset is trending
+**Rule:** Maximum 6 open trend positions simultaneously
+- Position-count cap of 6 (= the cluster count) is a backstop; the one-per-cluster caps and the 2.5% aggregate-risk cap are the binding constraints on concurrency
 
 **Rule:** Maximum 4% of portfolio per single trend position (hard cap, regardless of computed size)
 
@@ -356,7 +361,7 @@ For each ticker in the ledger:
 
 ### Step 3: Entry checks (for each ticker not currently held)
 
-For each ticker in [TLT, GLD, USO, DBC, UUP, EEM]:
+For each ticker in the basket (the 15 ETFs of `models.TrendUniverse`, across the 6 driver clusters):
 
 Skip this ticker if:
 - The ledger already contains an open position for this ticker

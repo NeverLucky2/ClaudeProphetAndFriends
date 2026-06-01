@@ -15,6 +15,11 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// universeTickers is the centralized basket's ticker list. Tests that need to
+// set up signals/bars across the whole universe range over this instead of a
+// local copy.
+func universeTickers() []string { return models.TrendUniverseTickers() }
+
 // ---- per-test stubs (kept local so tests don't share mutable state) ----
 
 type stubSignals struct {
@@ -635,7 +640,7 @@ func TestRunExits_TrailingStopFiresPlacesMarketSell(t *testing.T) {
 	sigs.signals["TLT"] = &TrendSignal{Ticker: "TLT", Donchian50Low: 91, ATR20: 1.5, BarsCount: 300}
 	bars.bars["TLT"] = &interfaces.Bar{Open: 90.5}
 	// Other universe tickers — ineligible so no entries placed (focus on exits).
-	for _, sym := range turtleUniverse {
+	for _, sym := range universeTickers() {
 		if sym == "TLT" {
 			continue
 		}
@@ -697,7 +702,7 @@ func TestRunExits_HoldAboveStop(t *testing.T) {
 	sigs.signals["TLT"] = &TrendSignal{Donchian50Low: 91}
 	bars.bars["TLT"] = &interfaces.Bar{Open: 96}
 	// Universe ineligibility (focus on exits).
-	for _, sym := range turtleUniverse {
+	for _, sym := range universeTickers() {
 		if sym == "TLT" {
 			continue
 		}
@@ -731,7 +736,7 @@ func TestRunExits_SignalFetchErrorAppendsErrorAndContinues(t *testing.T) {
 	_ = ledger.Save(row2)
 
 	// Other-universe ineligible fixtures (avoid overwriting TLT/GLD below).
-	for _, sym := range turtleUniverse {
+	for _, sym := range universeTickers() {
 		if sym == "TLT" || sym == "GLD" {
 			continue
 		}
@@ -765,7 +770,7 @@ func TestRunExits_OrderPlacementErrorAppendsErrorContinuesOtherRows(t *testing.T
 	_ = ledger.Save(row1)
 	_ = ledger.Save(row2)
 	// Other-universe ineligible fixtures.
-	for _, sym := range turtleUniverse {
+	for _, sym := range universeTickers() {
 		if sym == "TLT" || sym == "GLD" {
 			continue
 		}
@@ -803,7 +808,7 @@ func TestRunExits_SkipsPendingFillRows(t *testing.T) {
 
 	// Set up ineligible signals for OTHER universe tickers (skip TLT/GLD so
 	// we don't overwrite the exit-loop fixtures below).
-	for _, sym := range turtleUniverse {
+	for _, sym := range universeTickers() {
 		if sym == "TLT" || sym == "GLD" {
 			continue
 		}
@@ -856,7 +861,7 @@ func TestRunExits_DaysSinceEntryComputed(t *testing.T) {
 	}
 	sigs.signals["TLT"] = &TrendSignal{Donchian50Low: 80} // trailing far below
 	bars.bars["TLT"] = &interfaces.Bar{Open: 91}          // below initial stop, above donchian
-	for _, sym := range turtleUniverse {
+	for _, sym := range universeTickers() {
 		if sym == "TLT" {
 			continue
 		}
@@ -888,7 +893,7 @@ func universeIneligibleExcept(sigs *stubSignals, bars *stubBars, except ...strin
 	for _, s := range except {
 		skip[s] = struct{}{}
 	}
-	for _, sym := range turtleUniverse {
+	for _, sym := range universeTickers() {
 		if _, ok := skip[sym]; ok {
 			continue
 		}
@@ -1131,28 +1136,31 @@ func TestRunEntries_DeployedCapAt18PctSkipsEntries(t *testing.T) {
 	}
 }
 
-func TestRunEntries_PositionCountCap5Skips(t *testing.T) {
+func TestRunEntries_PositionCountCapBlocksSeventh(t *testing.T) {
 	sigs, bars, trader, seg, regime, guard := fullStubs()
 	exe, ledger := newTestExecutor(t, sigs, bars, trader, seg, regime, guard)
-	// Pre-populate 5 open rows for 5 of the universe tickers (TLT GLD USO DBC UUP);
-	// leave EEM as the unheld candidate with a valid signal.
-	for _, sym := range []string{"TLT", "GLD", "USO", "DBC", "UUP"} {
+	// Six open positions, one per cluster, each with negligible risk so the
+	// 2.5% aggregate-risk cap does not pre-empt the count cap.
+	for _, sym := range []string{"TLT", "GLD", "USO", "DBC", "UUP", "EEM"} {
 		row := &models.DBTrendLedgerEntry{Ticker: sym, Status: "open", Strategy: "trend",
-			EntryPrice: 100, Shares: 10, ATRAtEntry: 1.0, EntryDate: at1700(t, "2026-04-10")}
+			EntryPrice: 100, Shares: 1, ATRAtEntry: 0.01, EntryDate: at1700(t, "2026-04-10")}
 		_ = ledger.Save(row)
 		// Hold (no exit) for these tickers.
 		sigs.signals[sym] = &TrendSignal{Donchian50Low: 50}
 		bars.bars[sym] = &interfaces.Bar{Open: 200}
 	}
-	sigs.signals["EEM"] = goodEntrySignal("EEM")
-	bars.bars["EEM"] = &interfaces.Bar{Open: 99, Close: 100}
+	// IEF is a valid breakout candidate; with 6 positions already open the
+	// position-count cap (6) blocks any 7th entry.
+	universeIneligibleExcept(sigs, bars, "TLT", "GLD", "USO", "DBC", "UUP", "EEM", "IEF")
+	sigs.signals["IEF"] = goodEntrySignal("IEF")
+	bars.bars["IEF"] = &interfaces.Bar{Open: 99, Close: 100}
 
 	if _, err := exe.RunHeartbeat(context.Background(), at1700(t, "2026-05-15")); err != nil {
 		t.Fatalf("RunHeartbeat: %v", err)
 	}
 	for _, o := range trader.placedOrders {
 		if o.Side == "buy" {
-			t.Errorf("no buy expected at 5-position cap, got %+v", o)
+			t.Errorf("no 7th buy expected at the position-count cap, got %+v", o)
 		}
 	}
 }
@@ -1160,6 +1168,7 @@ func TestRunEntries_PositionCountCap5Skips(t *testing.T) {
 func TestRunEntries_AggregateRiskCapBlocks(t *testing.T) {
 	sigs, bars, trader, seg, regime, guard := fullStubs()
 	exe, ledger := newTestExecutor(t, sigs, bars, trader, seg, regime, guard)
+	universeIneligibleExcept(sigs, bars, "TLT", "GLD", "USO", "DBC", "UUP", "EEM")
 	// 4 open rows each at 0.5% risk (sum 2.0%). Universe candidate EEM
 	// would add 0.7% → projected 2.7% > 2.5% cap → skip.
 	// portfolio = $100k, cap = $2,500. Each existing risk = 2*atr*shares = $500
@@ -1498,7 +1507,7 @@ func TestColdStartStaysFalseWhenNoEntryPlaced(t *testing.T) {
 	sigs, bars, trader, seg, regime, guard := fullStubs()
 	exe, ledger := newTestExecutor(t, sigs, bars, trader, seg, regime, guard)
 	// All universe tickers ineligible.
-	for _, sym := range turtleUniverse {
+	for _, sym := range universeTickers() {
 		sigs.signals[sym] = &TrendSignal{Ticker: sym, LastClose: 50, Donchian100High: 60, BarsCount: 300}
 		bars.bars[sym] = &interfaces.Bar{Open: 50}
 	}
@@ -1522,7 +1531,7 @@ func fp(v float64) *float64 { return &v }
 
 func TestReconcile_FilledFlipsToOpen(t *testing.T) {
 	sigs, bars, trader, seg, regime, guard := fullStubs()
-	for _, sym := range turtleUniverse {
+	for _, sym := range universeTickers() {
 		sigs.signals[sym] = &TrendSignal{Ticker: sym, LastClose: 50, Donchian100High: 60, BarsCount: 300}
 		bars.bars[sym] = &interfaces.Bar{Open: 50, Close: 50}
 	}
@@ -1565,7 +1574,7 @@ func TestReconcile_FilledFlipsToOpen(t *testing.T) {
 
 func TestReconcile_PartiallyFilledFlipsToOpenWithReducedShares(t *testing.T) {
 	sigs, bars, trader, seg, regime, guard := fullStubs()
-	for _, sym := range turtleUniverse {
+	for _, sym := range universeTickers() {
 		sigs.signals[sym] = &TrendSignal{Ticker: sym, LastClose: 50, Donchian100High: 60, BarsCount: 300}
 		bars.bars[sym] = &interfaces.Bar{Open: 50, Close: 50}
 	}
@@ -1735,7 +1744,7 @@ func TestRunHeartbeat_FirstRunCreatesSession(t *testing.T) {
 	sigs, bars, trader, seg, regime, guard := fullStubs()
 	// All universe tickers produce ineligible signals so no entry is placed —
 	// keeps the test focused on the session-creation behavior.
-	for _, sym := range turtleUniverse {
+	for _, sym := range universeTickers() {
 		sigs.signals[sym] = &TrendSignal{Ticker: sym, LastClose: 50, Donchian100High: 60, BarsCount: 300}
 		bars.bars[sym] = &interfaces.Bar{Open: 50, Close: 50}
 	}
@@ -1762,5 +1771,215 @@ func TestRunHeartbeat_FirstRunCreatesSession(t *testing.T) {
 	}
 	if sess.LastHeartbeatDate != "2026-05-15" {
 		t.Errorf("LastHeartbeatDate: got %q, want 2026-05-15", sess.LastHeartbeatDate)
+	}
+}
+
+// synthCloses builds a price series of len(rets)+1 starting at 100 whose
+// per-step simple returns equal sign*rets[i]. Using sign=+1 vs sign=-1 on the
+// same rets yields two series that are perfectly (anti-)correlated.
+func synthCloses(rets []float64, sign float64) []float64 {
+	closes := make([]float64, len(rets)+1)
+	closes[0] = 100.0
+	for i, r := range rets {
+		closes[i+1] = closes[i] * (1 + sign*r)
+	}
+	return closes
+}
+
+// varyingReturns returns n deterministic, non-constant daily returns (so the
+// resulting close series has non-zero variance and a defined correlation).
+func varyingReturns(n int) []float64 {
+	out := make([]float64, n)
+	for i := range out {
+		out[i] = 0.006 + 0.004*math.Sin(float64(i)) // ranges ~[0.002, 0.010]
+	}
+	return out
+}
+
+// corrEntrySignal returns a valid breakout signal (passes evaluateEntry with
+// coldStart, anti-cap sizing) carrying the given close series for the
+// correlation guard.
+func corrEntrySignal(ticker string, closes []float64) *TrendSignal {
+	sig := goodEntrySignal(ticker)
+	sig.Closes = closes
+	return sig
+}
+
+func TestRunEntries_SecondSameClusterBreakoutBlockedByClusterCap(t *testing.T) {
+	sigs, bars, trader, seg, regime, guard := fullStubs()
+	exe, ledger := newTestExecutor(t, sigs, bars, trader, seg, regime, guard)
+	// One open rates position (TLT); IEF is also rates → cluster slot taken.
+	row := &models.DBTrendLedgerEntry{Ticker: "TLT", Status: "open", Strategy: "trend",
+		EntryPrice: 100, Shares: 1, ATRAtEntry: 0.01, EntryDate: at1700(t, "2026-04-10")}
+	_ = ledger.Save(row)
+	sigs.signals["TLT"] = &TrendSignal{Donchian50Low: 50} // hold, no exit
+	bars.bars["TLT"] = &interfaces.Bar{Open: 200}
+	universeIneligibleExcept(sigs, bars, "TLT", "IEF")
+	sigs.signals["IEF"] = goodEntrySignal("IEF")
+	bars.bars["IEF"] = &interfaces.Bar{Open: 99, Close: 100}
+
+	res, err := exe.RunHeartbeat(context.Background(), at1700(t, "2026-05-15"))
+	if err != nil {
+		t.Fatalf("RunHeartbeat: %v", err)
+	}
+	for _, o := range trader.placedOrders {
+		if o.Side == "buy" && o.Symbol == "IEF" {
+			t.Errorf("IEF (rates) must be blocked — rates cluster already holds TLT")
+		}
+	}
+	foundCluster := false
+	for _, s := range res.Skips {
+		if strings.Contains(s, "IEF") && containsCaseInsensitive(s, "cluster") {
+			foundCluster = true
+		}
+	}
+	if !foundCluster {
+		t.Errorf("expected an IEF cluster-cap skip, got %v", res.Skips)
+	}
+}
+
+func TestRunEntries_DifferentClusterBreakoutAllowed(t *testing.T) {
+	sigs, bars, trader, seg, regime, guard := fullStubs()
+	exe, ledger := newTestExecutor(t, sigs, bars, trader, seg, regime, guard)
+	// One open rates position (TLT); GLD is metals → different cluster → allowed.
+	row := &models.DBTrendLedgerEntry{Ticker: "TLT", Status: "open", Strategy: "trend",
+		EntryPrice: 100, Shares: 1, ATRAtEntry: 0.01, EntryDate: at1700(t, "2026-04-10")}
+	_ = ledger.Save(row)
+	sigs.signals["TLT"] = &TrendSignal{Donchian50Low: 50}
+	bars.bars["TLT"] = &interfaces.Bar{Open: 200}
+	universeIneligibleExcept(sigs, bars, "TLT", "GLD")
+	sigs.signals["GLD"] = goodEntrySignal("GLD")
+	bars.bars["GLD"] = &interfaces.Bar{Open: 99, Close: 100}
+
+	if _, err := exe.RunHeartbeat(context.Background(), at1700(t, "2026-05-15")); err != nil {
+		t.Fatalf("RunHeartbeat: %v", err)
+	}
+	hasGLD := false
+	for _, o := range trader.placedOrders {
+		if o.Side == "buy" && o.Symbol == "GLD" {
+			hasGLD = true
+		}
+	}
+	if !hasGLD {
+		t.Errorf("GLD (metals) must be allowed — different cluster from open TLT (rates)")
+	}
+}
+
+func TestRunEntries_SameBeatSecondSameClusterBlocked(t *testing.T) {
+	sigs, bars, trader, seg, regime, guard := fullStubs()
+	exe, _ := newTestExecutor(t, sigs, bars, trader, seg, regime, guard)
+	// No open positions. TLT and IEF are both rates and both break out this
+	// beat. The first by iteration order (TLT) enters; the second (IEF) is
+	// blocked by the cluster cap counting the same-beat entry.
+	universeIneligibleExcept(sigs, bars, "TLT", "IEF")
+	sigs.signals["TLT"] = goodEntrySignal("TLT")
+	bars.bars["TLT"] = &interfaces.Bar{Open: 99, Close: 100}
+	sigs.signals["IEF"] = goodEntrySignal("IEF")
+	bars.bars["IEF"] = &interfaces.Bar{Open: 99, Close: 100}
+
+	if _, err := exe.RunHeartbeat(context.Background(), at1700(t, "2026-05-15")); err != nil {
+		t.Fatalf("RunHeartbeat: %v", err)
+	}
+	var ratesBuys []string
+	for _, o := range trader.placedOrders {
+		if o.Side == "buy" && (o.Symbol == "TLT" || o.Symbol == "IEF") {
+			ratesBuys = append(ratesBuys, o.Symbol)
+		}
+	}
+	if len(ratesBuys) != 1 {
+		t.Errorf("exactly one rates entry expected this beat, got %v", ratesBuys)
+	}
+}
+
+func TestRunEntries_HighlyCorrelatedCrossClusterBreakoutSkipped(t *testing.T) {
+	sigs, bars, trader, seg, regime, guard := fullStubs()
+	exe, ledger := newTestExecutor(t, sigs, bars, trader, seg, regime, guard)
+	rets := varyingReturns(80)
+	// Open EEM (intl_equity) with a known return series; DBC (commodity) is a
+	// DIFFERENT cluster (cluster cap won't fire) but perfectly +correlated.
+	row := &models.DBTrendLedgerEntry{Ticker: "EEM", Status: "open", Strategy: "trend",
+		EntryPrice: 100, Shares: 1, ATRAtEntry: 0.01, EntryDate: at1700(t, "2026-04-10")}
+	_ = ledger.Save(row)
+	eemSig := &TrendSignal{Donchian50Low: 50, Closes: synthCloses(rets, +1)} // hold, no exit
+	sigs.signals["EEM"] = eemSig
+	bars.bars["EEM"] = &interfaces.Bar{Open: 200}
+	universeIneligibleExcept(sigs, bars, "EEM", "DBC")
+	sigs.signals["DBC"] = corrEntrySignal("DBC", synthCloses(rets, +1)) // identical returns → ρ=+1
+	bars.bars["DBC"] = &interfaces.Bar{Open: 99, Close: 100}
+
+	res, err := exe.RunHeartbeat(context.Background(), at1700(t, "2026-05-15"))
+	if err != nil {
+		t.Fatalf("RunHeartbeat: %v", err)
+	}
+	for _, o := range trader.placedOrders {
+		if o.Side == "buy" && o.Symbol == "DBC" {
+			t.Errorf("DBC must be blocked by the correlation guard (ρ=+1 vs open EEM)")
+		}
+	}
+	foundCorr := false
+	for _, s := range res.Skips {
+		if strings.Contains(s, "DBC") && containsCaseInsensitive(s, "correlation") {
+			foundCorr = true
+		}
+	}
+	if !foundCorr {
+		t.Errorf("expected a DBC correlation-guard skip, got %v", res.Skips)
+	}
+}
+
+func TestRunEntries_AntiCorrelatedBreakoutAllowed(t *testing.T) {
+	sigs, bars, trader, seg, regime, guard := fullStubs()
+	exe, ledger := newTestExecutor(t, sigs, bars, trader, seg, regime, guard)
+	rets := varyingReturns(80)
+	// Open EEM with a return series; UUP (fx) is anti-correlated → allowed.
+	row := &models.DBTrendLedgerEntry{Ticker: "EEM", Status: "open", Strategy: "trend",
+		EntryPrice: 100, Shares: 1, ATRAtEntry: 0.01, EntryDate: at1700(t, "2026-04-10")}
+	_ = ledger.Save(row)
+	sigs.signals["EEM"] = &TrendSignal{Donchian50Low: 50, Closes: synthCloses(rets, +1)}
+	bars.bars["EEM"] = &interfaces.Bar{Open: 200}
+	universeIneligibleExcept(sigs, bars, "EEM", "UUP")
+	sigs.signals["UUP"] = corrEntrySignal("UUP", synthCloses(rets, -1)) // negated returns → ρ=-1
+	bars.bars["UUP"] = &interfaces.Bar{Open: 99, Close: 100}
+
+	if _, err := exe.RunHeartbeat(context.Background(), at1700(t, "2026-05-15")); err != nil {
+		t.Fatalf("RunHeartbeat: %v", err)
+	}
+	hasUUP := false
+	for _, o := range trader.placedOrders {
+		if o.Side == "buy" && o.Symbol == "UUP" {
+			hasUUP = true
+		}
+	}
+	if !hasUUP {
+		t.Errorf("UUP must be allowed — anti-correlated (ρ=-1) with open EEM is diversifying")
+	}
+}
+
+func TestRunEntries_InsufficientCorrelationHistoryAllowsEntry(t *testing.T) {
+	sigs, bars, trader, seg, regime, guard := fullStubs()
+	exe, ledger := newTestExecutor(t, sigs, bars, trader, seg, regime, guard)
+	// Open EEM whose Closes series is too short to assess (< window+1). The
+	// candidate DBC has a full series, but with no assessable open pair the
+	// guard cannot block → DBC enters (cluster + agg-risk still bound it).
+	row := &models.DBTrendLedgerEntry{Ticker: "EEM", Status: "open", Strategy: "trend",
+		EntryPrice: 100, Shares: 1, ATRAtEntry: 0.01, EntryDate: at1700(t, "2026-04-10")}
+	_ = ledger.Save(row)
+	sigs.signals["EEM"] = &TrendSignal{Donchian50Low: 50, Closes: []float64{100, 101, 102}}
+	bars.bars["EEM"] = &interfaces.Bar{Open: 200}
+	universeIneligibleExcept(sigs, bars, "EEM", "DBC")
+	sigs.signals["DBC"] = corrEntrySignal("DBC", synthCloses(varyingReturns(80), +1))
+	bars.bars["DBC"] = &interfaces.Bar{Open: 99, Close: 100}
+
+	if _, err := exe.RunHeartbeat(context.Background(), at1700(t, "2026-05-15")); err != nil {
+		t.Fatalf("RunHeartbeat: %v", err)
+	}
+	hasDBC := false
+	for _, o := range trader.placedOrders {
+		if o.Side == "buy" && o.Symbol == "DBC" {
+			hasDBC = true
+		}
+	}
+	if !hasDBC {
+		t.Errorf("DBC must enter — open EEM history too short to assess correlation")
 	}
 }

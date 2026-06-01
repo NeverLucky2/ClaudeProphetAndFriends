@@ -2,8 +2,10 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -212,5 +214,32 @@ func TestGetSignal_FullCompute(t *testing.T) {
 	}
 	if sig.SignalVersion != "v1" {
 		t.Errorf("SignalVersion = %v, want v1", sig.SignalVersion)
+	}
+}
+
+func TestComputeSignal_PopulatesClosesButHidesFromJSON(t *testing.T) {
+	closes := make([]float64, 260)
+	for i := range closes {
+		closes[i] = 100.0 + float64(i)
+	}
+	sig := ComputeSignal("TEST", makeBars(closes))
+
+	if len(sig.Closes) != len(closes) {
+		t.Fatalf("Closes length: got %d, want %d", len(sig.Closes), len(closes))
+	}
+	if sig.Closes[len(sig.Closes)-1] != closes[len(closes)-1] {
+		t.Errorf("last close: got %v, want %v", sig.Closes[len(sig.Closes)-1], closes[len(closes)-1])
+	}
+	if sig.Closes[len(sig.Closes)-1] != sig.LastClose {
+		t.Errorf("Closes tail (%v) must equal LastClose (%v)", sig.Closes[len(sig.Closes)-1], sig.LastClose)
+	}
+
+	// Closes must NOT appear in the JSON payload (json:"-").
+	b, err := json.Marshal(sig)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(b), "Closes") || strings.Contains(string(b), "\"closes\"") {
+		t.Errorf("Closes must be excluded from JSON, got: %s", b)
 	}
 }

@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -12,12 +13,6 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// turtleUniverse mirrors controllers.TrendUniverse — kept local so the
-// executor has no upstream import on controllers, which would create a cycle.
-// If these ever drift, both must be updated together; consider promoting to
-// a shared models package as a follow-up.
-var turtleUniverse = []string{"TLT", "GLD", "USO", "DBC", "UUP", "EEM"}
-
 // nyLoc (the America/New_York timezone) is declared once at package scope
 // in penny_universe_service.go and reused here. tzdata is bundled into the
 // Go binary since 1.15, so the error path is effectively dead — a nil
@@ -27,11 +22,14 @@ var turtleUniverse = []string{"TLT", "GLD", "USO", "DBC", "UUP", "EEM"}
 const (
 	turtleWindowStartMin  = 16*60 + 55 // 16:55 ET
 	turtleWindowEndMin    = 17*60 + 5  // 17:05 ET
-	turtlePositionCap     = 5
+	turtlePositionCap     = 6 // = cluster count; cluster caps + agg-risk cap are the binding gates
 	turtleDeployedCapPct  = 18.0
 	turtleAggRiskCapPct   = 0.025
 	turtleSegmentBreaker  = -2.0
 	turtleLimitMultiplier = 1.005
+	turtleMaxPositionsPerCluster = 1    // one position per driver cluster
+	turtleCorrThreshold          = 0.70 // block entries with positive ρ above this vs any open position
+	turtleCorrWindow             = 60   // trailing trading-day return window for the correlation guard
 )
 
 // signalFetcher is implemented by *TrendSignalService in production.
@@ -417,6 +415,38 @@ func (e *TurtleExecutor) runExits(ctx context.Context, rows []*models.DBTrendLed
 	}
 }
 
+// openPositionReturns builds the trailing daily-return series for each
+// still-open position (status open or pending_fill) by reusing the trend
+// signal feed. Returns are keyed by ticker. Positions whose signal can't be
+// fetched, or whose history is too short to produce returns, are omitted — the
+// correlation guard treats a missing series as "cannot assess → allow" (the
+// cluster cap + aggregate-risk cap still bound the book). This re-reads the
+// signal the exit loop already fetched for open rows; at a once-daily cadence
+// over a handful of positions the duplicate read is negligible and keeps the
+// entry path self-contained (no new data dependency).
+func (e *TurtleExecutor) openPositionReturns(ctx context.Context, openRows []*models.DBTrendLedgerEntry) map[string][]float64 {
+	out := map[string][]float64{}
+	for _, row := range openRows {
+		if row.Status != "open" && row.Status != "pending_fill" {
+			continue
+		}
+		if _, done := out[row.Ticker]; done {
+			continue
+		}
+		sig, err := e.signals.GetSignal(ctx, row.Ticker)
+		if err != nil {
+			e.logger.WithFields(logrus.Fields{"ticker": row.Ticker, "stage": "corr_open_signal"}).WithError(err).Debug("turtle corr: open-position signal unavailable — pair not assessed")
+			continue
+		}
+		rets := dailyReturns(sig.Closes)
+		if len(rets) == 0 {
+			continue
+		}
+		out[row.Ticker] = rets
+	}
+	return out
+}
+
 // runEntries iterates the universe and places limit buys for each ticker
 // that passes the full eligibility ladder: not already held, fresh signal
 // passes evaluateEntry (with coldStart proximity if session.ColdStartCompleted
@@ -431,7 +461,16 @@ func (e *TurtleExecutor) runEntries(ctx context.Context, openRows []*models.DBTr
 	entriesPlaced := 0
 	coldStart := session == nil || !session.ColdStartCompleted
 
-	for _, ticker := range turtleUniverse {
+	// workingOpen tracks positions for the cluster cap and grows as entries are
+	// placed this beat, so two same-cluster breakouts can't both enter.
+	workingOpen := make([]*models.DBTrendLedgerEntry, len(openRows))
+	copy(workingOpen, openRows)
+	// openReturns feeds the correlation guard; same-beat entries are added as
+	// they're placed so a later candidate is checked against earlier ones.
+	openReturns := e.openPositionReturns(ctx, openRows)
+
+	for _, inst := range models.TrendUniverse {
+		ticker := inst.Ticker
 		if _, ok := held[ticker]; ok {
 			continue
 		}
@@ -442,6 +481,13 @@ func (e *TurtleExecutor) runEntries(ctx context.Context, openRows []*models.DBTr
 		}
 		sig, err := e.signals.GetSignal(ctx, ticker)
 		if err != nil {
+			if errors.Is(err, ErrInsufficientHistory) {
+				// Thin/young ETF (e.g. a recently-listed basket member): drop it
+				// from the active universe for this beat with a logged skip
+				// rather than a hard error. The run continues.
+				res.Skips = append(res.Skips, fmt.Sprintf("%s: insufficient history (thin name) — dropped", ticker))
+				continue
+			}
 			e.logger.WithFields(logrus.Fields{"ticker": ticker, "stage": "entry_signal"}).WithError(err).Error("turtle entry: signal fetch failed")
 			res.Errors = append(res.Errors, fmt.Sprintf("entry %s: signal: %v", ticker, err))
 			continue
@@ -473,6 +519,17 @@ func (e *TurtleExecutor) runEntries(ctx context.Context, openRows []*models.DBTr
 		}
 		if wouldExceedAggregateRiskCap(openRows, sig.ATR20, proposedShares, acct.PortfolioValue) {
 			res.Skips = append(res.Skips, fmt.Sprintf("%s: aggregate risk cap would exceed %.1f%%", ticker, turtleAggRiskCapPct*100))
+			continue
+		}
+		// Diversification gate 1 — static cluster cap (cheap, deterministic).
+		if clusterSlotTaken(workingOpen, inst.Cluster, turtleMaxPositionsPerCluster) {
+			res.Skips = append(res.Skips, fmt.Sprintf("%s: cluster cap (%s, max %d)", ticker, inst.Cluster, turtleMaxPositionsPerCluster))
+			continue
+		}
+		// Diversification gate 2 — dynamic positive-correlation guard.
+		candReturns := dailyReturns(sig.Closes)
+		if tooCorrelated(candReturns, openReturns, turtleCorrThreshold, turtleCorrWindow) {
+			res.Skips = append(res.Skips, fmt.Sprintf("%s: correlation guard (positive rho > %.2f vs an open position)", ticker, turtleCorrThreshold))
 			continue
 		}
 		if e.guard != nil {
@@ -520,6 +577,10 @@ func (e *TurtleExecutor) runEntries(ctx context.Context, openRows []*models.DBTr
 		}
 		entriesPlaced++
 		res.Entries = append(res.Entries, ticker)
+		// Count this entry toward the cluster cap and correlation guard for any
+		// later same-beat candidate.
+		workingOpen = append(workingOpen, entry)
+		openReturns[ticker] = candReturns
 	}
 }
 
