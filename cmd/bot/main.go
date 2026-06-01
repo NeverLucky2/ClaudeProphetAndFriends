@@ -494,6 +494,28 @@ func main() {
 		logger.Warn("Turtle Go scheduler requested but trading service unavailable — scheduler not started")
 	}
 
+	// Defensive-Prophet hedge scheduler (ENABLE_PROPHET_DEFENSIVE=false by default).
+	// Triggered, defined-risk QQQ put-spread hedge — a mechanical daily 17:00 ET
+	// beat like Turtle. When the flag is off, nothing is constructed.
+	if cfg.EnableProphetDefensive && tradingService != nil {
+		hedgeLedger := services.NewProphetHedgeLedger(storageService)
+		hedgeOptionsData := services.NewAlpacaOptionsDataService(cfg.AlpacaAPIKey, cfg.AlpacaSecretKey)
+		hedgeExecutor := services.NewProphetHedgeExecutor(
+			hedgeLedger,
+			regimeGate,
+			hedgeOptionsData,
+			tradingService,
+			services.NewHedgeAccountFetcher(tradingService, dataService),
+			tradeGuard,
+			logger,
+		)
+		hedgeScheduler := services.NewProphetHedgeScheduler(hedgeExecutor, logger)
+		go hedgeScheduler.Start(ctx)
+		logger.Info("Defensive-Prophet hedge scheduler started (ENABLE_PROPHET_DEFENSIVE=true)")
+	} else if cfg.EnableProphetDefensive {
+		logger.Warn("Defensive-Prophet hedge requested but trading service unavailable — scheduler not started")
+	}
+
 	// Beat-context aggregator endpoint. Bundles account, positions, econ
 	// blackout, regime gate, and segment P&L into a single response so the
 	// harness can inject one read-only block per beat instead of the LLM

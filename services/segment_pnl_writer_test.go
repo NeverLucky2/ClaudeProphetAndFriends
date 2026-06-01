@@ -96,3 +96,40 @@ func TestWriteDailyMarks_IdempotentForSameDay(t *testing.T) {
 		t.Errorf("second run re-wrote an existing day; RealizedPnL=%v, want 12345 (skip)", again.RealizedPnL)
 	}
 }
+
+func TestWriteDailyMarks_ProphetDefensiveRealized(t *testing.T) {
+	storage, err := database.NewLocalStorage(":memory:")
+	if err != nil {
+		t.Fatalf("storage: %v", err)
+	}
+
+	// Save a closed prophet_hedge_spread with realized P&L of 250.
+	closedAt := etMoment(t, 2026, 5, 29, 14, 45).UTC()
+	_ = storage.SaveProphetHedgeSpread(&models.DBProphetHedgeSpread{
+		SpreadID:     "spread-1",
+		Underlying:   "QQQ",
+		Status:       "closed",
+		RealizedPnL:  250,
+		ClosedAt:     &closedAt,
+	})
+
+	// Construct the writer as in the existing tests.
+	seg := NewSegmentPnLService(storage, &stubTrading{})
+	w := NewSegmentPnLWriter(storage, seg, logrus.New())
+
+	// Call WriteDailyMarks with a time that passes shouldWriteSegmentMarks.
+	now := etMoment(t, 2026, 5, 29, 16, 5)
+	if err := w.WriteDailyMarks(context.Background(), now); err != nil {
+		t.Fatalf("WriteDailyMarks: %v", err)
+	}
+
+	// Verify the segment PnL row was created with the realized P&L from the closed spread.
+	day := time.Date(2026, 5, 29, 0, 0, 0, 0, time.UTC)
+	row, err := storage.GetSegmentPnLForDate("prophet-defensive", day)
+	if err != nil || row == nil {
+		t.Fatalf("row missing: row=%v err=%v", row, err)
+	}
+	if row.RealizedPnL != 250 {
+		t.Errorf("RealizedPnL = %v, want 250", row.RealizedPnL)
+	}
+}

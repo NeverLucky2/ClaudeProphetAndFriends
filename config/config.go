@@ -45,6 +45,11 @@ type Config struct {
 	EnableRegimeGate bool
 	RegimeReportPath string
 
+	// Defensive-Prophet hedge (flag-gated rollout, default OFF). When false the
+	// executor/scheduler is never constructed in cmd/bot (mirrors the regime-gate
+	// observe-before-enable pattern).
+	EnableProphetDefensive bool
+
 	// Position caps (hybrid hard backstops). Flag-gated like the regime gate.
 	EnablePositionCaps bool
 	MaxPositionPct     float64 // per-position cap, fraction of portfolio (0.12 = 12%)
@@ -124,6 +129,8 @@ func Load() error {
 		// flip ENABLE_REGIME_GATE=true.
 		EnableRegimeGate: getEnvOrDefault("ENABLE_REGIME_GATE", "false") == "true",
 		RegimeReportPath: getEnvOrDefault("REGIME_REPORT_PATH", "./data/reports/regime_gate.json"),
+
+		EnableProphetDefensive: getEnvOrDefault("ENABLE_PROPHET_DEFENSIVE", "false") == "true",
 
 		EnablePositionCaps: getEnvOrDefault("ENABLE_POSITION_CAPS", "true") == "true",
 		MaxPositionPct:     parseFloat(getEnvOrDefault("MAX_POSITION_PCT", "0.12")),

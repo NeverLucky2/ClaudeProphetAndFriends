@@ -74,6 +74,23 @@ func (w *SegmentPnLWriter) WriteDailyMarks(ctx context.Context, now time.Time) e
 		return err
 	}
 
+	// D-DP9: defensive-Prophet persists to its own prophet_hedge_spreads table and
+	// never writes managed_positions, so it won't appear in ListManagedStrategies().
+	// Include it explicitly so its daily series is continuous (a 0/0 row on flat days).
+	// NOTE / known limitation: only realized P&L (closed spreads) is folded in here;
+	// open-spread unrealized marks require option-leg strategy attribution (mleg legs
+	// aren't written to DBOrder), which is deferred to the grading-consumption work.
+	hasDefensive := false
+	for _, s := range strategies {
+		if s == "prophet-defensive" {
+			hasDefensive = true
+			break
+		}
+	}
+	if !hasDefensive {
+		strategies = append(strategies, "prophet-defensive")
+	}
+
 	for _, strat := range strategies {
 		existing, err := w.storage.GetSegmentPnLForDate(strat, dayKey)
 		if err != nil {
@@ -91,6 +108,11 @@ func (w *SegmentPnLWriter) WriteDailyMarks(ctx context.Context, now time.Time) e
 		}
 		if strat == "harvest" {
 			if h, herr := w.storage.GetHarvestClosedPnL(dayStart, dayEnd); herr == nil {
+				realized += h
+			}
+		}
+		if strat == "prophet-defensive" {
+			if h, herr := w.storage.GetProphetHedgeClosedPnL(dayStart, dayEnd); herr == nil {
 				realized += h
 			}
 		}

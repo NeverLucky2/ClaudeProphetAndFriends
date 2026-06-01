@@ -179,3 +179,25 @@ func TestLoad_PositionCapDefaults(t *testing.T) {
 		t.Errorf("MaxDeployedPct = %v, want 0.50", AppConfig.MaxDeployedPct)
 	}
 }
+
+func TestLoadConfig_ProphetDefensiveDefaultsOff(t *testing.T) {
+	t.Setenv("OPERATOR_EMAIL", "test@example.com")
+	t.Setenv("ENABLE_PROPHET_DEFENSIVE", "")
+	if err := Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if AppConfig.EnableProphetDefensive {
+		t.Fatal("EnableProphetDefensive must default to false")
+	}
+}
+
+func TestLoadConfig_ProphetDefensiveOn(t *testing.T) {
+	t.Setenv("OPERATOR_EMAIL", "test@example.com")
+	t.Setenv("ENABLE_PROPHET_DEFENSIVE", "true")
+	if err := Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !AppConfig.EnableProphetDefensive {
+		t.Fatal("ENABLE_PROPHET_DEFENSIVE=true must set the flag")
+	}
+}

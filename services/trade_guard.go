@@ -15,12 +15,13 @@ import (
 type AgentSource string
 
 const (
-	AgentMain    AgentSource = "main"
-	AgentPenny   AgentSource = "penny"
-	AgentHarvest AgentSource = "harvest"
-	AgentTrend   AgentSource = "trend"
-	AgentMeanRev AgentSource = "meanrev"
-	AgentDrift   AgentSource = "drift"
+	AgentMain            AgentSource = "main"
+	AgentPenny           AgentSource = "penny"
+	AgentHarvest         AgentSource = "harvest"
+	AgentTrend           AgentSource = "trend"
+	AgentMeanRev         AgentSource = "meanrev"
+	AgentDrift           AgentSource = "drift"
+	AgentProphetDefensive AgentSource = "prophet-defensive"
 )
 
 const agentTagPrefix = "agent:"
@@ -54,6 +55,8 @@ func AgentForStrategy(strategyId string) AgentSource {
 		return AgentMeanRev
 	case "earnings-drift":
 		return AgentDrift
+	case "prophet-defensive":
+		return AgentProphetDefensive
 	default:
 		return AgentMain
 	}
@@ -367,7 +370,7 @@ func (g *TradeGuard) CheckBuy(ctx context.Context, agent AgentSource, symbol str
 //
 // Scope: AgentMain (Prophet) only. Other agents pass through untouched.
 func (g *TradeGuard) CheckOptionsOpen(agent AgentSource, underlying, symbol string, quote *interfaces.OptionsQuote, now time.Time) error {
-	if agent != AgentMain {
+	if agent != AgentMain && agent != AgentProphetDefensive {
 		return nil
 	}
 

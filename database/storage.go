@@ -52,6 +52,8 @@ func NewLocalStorage(dbPath string) (*LocalStorage, error) {
 		&models.DBSegmentPnL{},
 		&models.DBTrendLedgerEntry{},
 		&models.DBTurtleSession{},
+		&models.DBProphetHedgeSpread{},
+		&models.DBProphetHedgeSession{},
 	); err != nil {
 		return nil, fmt.Errorf("failed to migrate database: %w", err)
 	}
@@ -610,6 +612,57 @@ func (s *LocalStorage) SaveTurtleSession(sess *models.DBTurtleSession) error {
 		sess.SessionID = "singleton"
 	}
 	return s.db.Save(sess).Error
+}
+
+// ── Defensive-Prophet hedge storage ────────────────────────────────
+
+func (s *LocalStorage) SaveProphetHedgeSpread(e *models.DBProphetHedgeSpread) error {
+	return s.db.Save(e).Error
+}
+
+// ListOpenProphetHedgeSpreads returns spreads still in a live state
+// (pending_fill, open, closing) — the set the executor reconciles/manages.
+func (s *LocalStorage) ListOpenProphetHedgeSpreads() ([]*models.DBProphetHedgeSpread, error) {
+	var out []*models.DBProphetHedgeSpread
+	err := s.db.Where("status IN ?", []string{"pending_fill", "open", "closing"}).Find(&out).Error
+	return out, err
+}
+
+func (s *LocalStorage) GetProphetHedgeSpreadByID(id uint) (*models.DBProphetHedgeSpread, error) {
+	var e models.DBProphetHedgeSpread
+	if err := s.db.First(&e, id).Error; err != nil {
+		return nil, err
+	}
+	return &e, nil
+}
+
+func (s *LocalStorage) GetProphetHedgeSession() (*models.DBProphetHedgeSession, error) {
+	var sess models.DBProphetHedgeSession
+	err := s.db.Where("session_id = ?", "singleton").First(&sess).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil // first run
+		}
+		return nil, err
+	}
+	return &sess, nil
+}
+
+func (s *LocalStorage) SaveProphetHedgeSession(sess *models.DBProphetHedgeSession) error {
+	if sess.SessionID == "" {
+		sess.SessionID = "singleton"
+	}
+	return s.db.Save(sess).Error
+}
+
+// GetProphetHedgeClosedPnL sums RealizedPnL of spreads CLOSED within [start,end)
+// — the realized half the segment writer needs, analogous to GetHarvestClosedPnL.
+func (s *LocalStorage) GetProphetHedgeClosedPnL(start, end time.Time) (float64, error) {
+	var total float64
+	err := s.db.Model(&models.DBProphetHedgeSpread{}).
+		Where("status = ? AND closed_at >= ? AND closed_at < ?", "closed", start, end).
+		Select("COALESCE(SUM(realized_pnl), 0)").Scan(&total).Error
+	return total, err
 }
 
 // Close closes the database connection
