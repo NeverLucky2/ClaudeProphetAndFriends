@@ -132,6 +132,14 @@ type PositionManager struct {
 	segmentWriter       *SegmentPnLWriter
 	lastSegmentWriteDay string
 
+	// orphanAlerted tracks symbols already reported as orphans (broker holds the
+	// shares but this agent's ledger marked the position terminal), so the ~60s
+	// reconcile pass logs/reports each one once. Guarded by mu.
+	orphanAlerted map[string]bool
+	// orphanReporter persists the current orphan set to disk. nil-safe: if never
+	// installed, detection still logs but writes no file.
+	orphanReporter *OrphanReporter
+
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -155,6 +163,7 @@ func NewPositionManager(
 		storageService:     storageService,
 		positions:          make(map[string]*ManagedPosition),
 		reconcileMissCount: make(map[string]int),
+		orphanAlerted:      make(map[string]bool),
 		logger:             logger,
 		ctx:                ctx,
 		cancel:             cancel,
@@ -173,6 +182,12 @@ func NewPositionManager(
 // simply does not write daily marks.
 func (pm *PositionManager) SetSegmentWriter(w *SegmentPnLWriter) {
 	pm.segmentWriter = w
+}
+
+// SetOrphanReporter installs the report-only orphan reporter (wired at startup).
+// Optional: if never set, detectOrphans still logs but writes no report file.
+func (pm *PositionManager) SetOrphanReporter(r *OrphanReporter) {
+	pm.orphanReporter = r
 }
 
 // PlaceManagedPosition opens a new managed position with automated risk management
@@ -427,8 +442,6 @@ func (pm *PositionManager) reconcileWithBroker(ctx context.Context) (int, error)
 	}
 
 	pm.mu.Lock()
-	defer pm.mu.Unlock()
-
 	closed := 0
 	for id, pos := range pm.positions {
 		// Only entry-filled positions can be phantoms. PENDING/terminal states
@@ -469,6 +482,10 @@ func (pm *PositionManager) reconcileWithBroker(ctx context.Context) (int, error)
 		}).Warn("Managed position closed by broker reconciliation — broker holds none (no exit order placed)")
 		closed++
 	}
+	pm.mu.Unlock()
+
+	// Report-only orphan detection reuses the broker positions read above.
+	pm.detectOrphans(brokerPositions)
 
 	return closed, nil
 }
@@ -1268,6 +1285,115 @@ func isInsufficientQtyErr(err error) bool {
 	}
 	s := strings.ToLower(err.Error())
 	return strings.Contains(s, "insufficient qty") || strings.Contains(s, "insufficient quantity")
+}
+
+// isTerminalStatus reports whether a managed-position status is terminal — the
+// position is done from this agent's point of view. Any other status
+// (ACTIVE/PARTIAL/PENDING or unknown) is treated as non-terminal/live, so a
+// malformed record can never be mistaken for an orphan source.
+func isTerminalStatus(status string) bool {
+	return status == "CLOSED" || status == "STOPPED_OUT" || status == "FAILED"
+}
+
+// findOrphans returns the broker positions this agent considers orphans: the
+// broker holds the symbol, this PM has at least one managed record for it, and
+// EVERY record for that symbol is terminal (CLOSED/STOPPED_OUT/FAILED). Symbols
+// with a non-terminal record (live) or with no record at all (another agent's
+// position on the shared broker account) are excluded. Pure — no I/O, no locks.
+func findOrphans(brokerPositions []*interfaces.Position, managed []*ManagedPosition) []OrphanAlert {
+	hasNonTerminal := make(map[string]bool)
+	terminal := make(map[string]*ManagedPosition) // symbol -> a terminal record
+	for _, p := range managed {
+		if p == nil {
+			continue
+		}
+		if isTerminalStatus(p.Status) {
+			if _, seen := terminal[p.Symbol]; !seen {
+				terminal[p.Symbol] = p
+			}
+		} else {
+			hasNonTerminal[p.Symbol] = true
+		}
+	}
+
+	now := time.Now()
+	var orphans []OrphanAlert
+	for _, bp := range brokerPositions {
+		if bp == nil || bp.Qty == 0 {
+			continue
+		}
+		if hasNonTerminal[bp.Symbol] {
+			continue // a live record exists — normal position
+		}
+		rec, ok := terminal[bp.Symbol]
+		if !ok {
+			continue // no record for this symbol — another agent's position
+		}
+		orphans = append(orphans, OrphanAlert{
+			Symbol:       bp.Symbol,
+			BrokerQty:    bp.Qty,
+			PositionID:   rec.ID,
+			LedgerStatus: rec.Status,
+			ClosedAt:     rec.ClosedAt,
+			DetectedAt:   now,
+		})
+	}
+	return orphans
+}
+
+// detectOrphans is the report-only orphan check. It finds broker positions this
+// agent's ledger has marked terminal while the broker still holds them, logs each
+// newly-detected one for operator review, and refreshes the orphans report when
+// the set changes. It places NO orders. Called from reconcileWithBroker, reusing
+// the broker positions already read there.
+func (pm *PositionManager) detectOrphans(brokerPositions []*interfaces.Position) {
+	pm.mu.Lock()
+	managed := make([]*ManagedPosition, 0, len(pm.positions))
+	for _, p := range pm.positions {
+		managed = append(managed, p)
+	}
+	pm.mu.Unlock()
+
+	orphans := findOrphans(brokerPositions, managed)
+
+	current := make(map[string]bool, len(orphans))
+	for _, o := range orphans {
+		current[o.Symbol] = true
+	}
+
+	pm.mu.Lock()
+	var newly []OrphanAlert
+	changed := false
+	for _, o := range orphans {
+		if !pm.orphanAlerted[o.Symbol] {
+			pm.orphanAlerted[o.Symbol] = true
+			newly = append(newly, o)
+			changed = true
+		}
+	}
+	for sym := range pm.orphanAlerted {
+		if !current[sym] {
+			delete(pm.orphanAlerted, sym)
+			changed = true
+		}
+	}
+	pm.mu.Unlock()
+
+	for _, o := range newly {
+		pm.logger.WithFields(logrus.Fields{
+			"symbol":                   o.Symbol,
+			"broker_qty":               o.BrokerQty,
+			"position_id":              o.PositionID,
+			"ledger_status":            o.LedgerStatus,
+			"operator_review_required": true,
+		}).Error("Orphan position detected — ledger marked terminal but broker still holds shares (no order placed)")
+	}
+
+	if changed && pm.orphanReporter != nil {
+		if err := pm.orphanReporter.Report(orphans); err != nil {
+			pm.logger.WithError(err).Warn("Failed to write orphans report")
+		}
+	}
 }
 
 // Helper functions

@@ -463,6 +463,11 @@ func main() {
 	// day after close it persists a DBSegmentPnL row per strategy (Foundation B).
 	positionManager.SetSegmentWriter(services.NewSegmentPnLWriter(storageService, segmentPnLSvc, logger))
 
+	// Wire the report-only orphan detector's reporter. Detected orphans (ledger
+	// marked terminal while the broker still holds the shares) are written to
+	// <db-dir>/reports/orphans.json next to this sandbox's database.
+	positionManager.SetOrphanReporter(services.NewOrphanReporter(filepath.Join(filepath.Dir(cfg.DatabasePath), "reports")))
+
 	// Turtle Go scheduler (TURTLE_SCHEDULER_ENABLED=false by default).
 	// When enabled, the daily 17:00 ET TRADING_RULES_TREND.md heartbeat
 	// sequence runs in this Go service instead of the LLM. The trend agent's
