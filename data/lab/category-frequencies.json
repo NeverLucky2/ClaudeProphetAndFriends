@@ -1,0 +1,538 @@
+{
+  "window_years": 4.42,
+  "universe_size": 57,
+  "dedup_window_days": 5,
+  "uncorrected_bar": 470,
+  "K_committed": 10,
+  "corrected_alpha": 0.005,
+  "corrected_n_per_split": 446,
+  "testable_uncorrected": [
+    "analyst_downgrade",
+    "analyst_pt",
+    "analyst_upgrade",
+    "antitrust",
+    "earnings_beat",
+    "legal_action",
+    "ma_acquirer",
+    "product_launch",
+    "restructuring",
+    "tariff"
+  ],
+  "conclusive_at_corrected": [
+    "analyst_downgrade",
+    "analyst_pt",
+    "analyst_upgrade",
+    "antitrust",
+    "legal_action",
+    "product_launch",
+    "restructuring",
+    "tariff"
+  ],
+  "categories": {
+    "analyst_pt": {
+      "distinct": 4250,
+      "raw_coverage": 12447,
+      "distinct_by_W": {
+        "3": 4725,
+        "5": 4250,
+        "10": 3176
+      },
+      "per_year": {
+        "2022": 849,
+        "2023": 885,
+        "2024": 1017,
+        "2025": 1036,
+        "2026": 463
+      },
+      "events_per_year": 961.5,
+      "clears_uncorrected_470": true,
+      "conclusive_at_corrected": true,
+      "years_to_corrected_bar": 0.9
+    },
+    "analyst_upgrade": {
+      "distinct": 1678,
+      "raw_coverage": 2714,
+      "distinct_by_W": {
+        "3": 1752,
+        "5": 1678,
+        "10": 1431
+      },
+      "per_year": {
+        "2022": 347,
+        "2023": 480,
+        "2024": 380,
+        "2025": 320,
+        "2026": 151
+      },
+      "events_per_year": 379.6,
+      "clears_uncorrected_470": true,
+      "conclusive_at_corrected": true,
+      "years_to_corrected_bar": 2.3
+    },
+    "product_launch": {
+      "distinct": 1550,
+      "raw_coverage": 2343,
+      "distinct_by_W": {
+        "3": 1702,
+        "5": 1550,
+        "10": 1256
+      },
+      "per_year": {
+        "2021": 1,
+        "2022": 190,
+        "2023": 307,
+        "2024": 407,
+        "2025": 477,
+        "2026": 168
+      },
+      "events_per_year": 350.7,
+      "clears_uncorrected_470": true,
+      "conclusive_at_corrected": true,
+      "years_to_corrected_bar": 2.5
+    },
+    "legal_action": {
+      "distinct": 1482,
+      "raw_coverage": 2319,
+      "distinct_by_W": {
+        "3": 1615,
+        "5": 1482,
+        "10": 1226
+      },
+      "per_year": {
+        "2022": 297,
+        "2023": 347,
+        "2024": 393,
+        "2025": 305,
+        "2026": 140
+      },
+      "events_per_year": 335.3,
+      "clears_uncorrected_470": true,
+      "conclusive_at_corrected": true,
+      "years_to_corrected_bar": 2.7
+    },
+    "tariff": {
+      "distinct": 1436,
+      "raw_coverage": 4811,
+      "distinct_by_W": {
+        "3": 1658,
+        "5": 1436,
+        "10": 1087
+      },
+      "per_year": {
+        "2022": 43,
+        "2023": 66,
+        "2024": 199,
+        "2025": 907,
+        "2026": 221
+      },
+      "events_per_year": 324.9,
+      "clears_uncorrected_470": true,
+      "conclusive_at_corrected": true,
+      "years_to_corrected_bar": 2.7
+    },
+    "analyst_downgrade": {
+      "distinct": 1296,
+      "raw_coverage": 2122,
+      "distinct_by_W": {
+        "3": 1350,
+        "5": 1296,
+        "10": 1137
+      },
+      "per_year": {
+        "2022": 315,
+        "2023": 468,
+        "2024": 279,
+        "2025": 158,
+        "2026": 76
+      },
+      "events_per_year": 293.2,
+      "clears_uncorrected_470": true,
+      "conclusive_at_corrected": true,
+      "years_to_corrected_bar": 3.0
+    },
+    "restructuring": {
+      "distinct": 958,
+      "raw_coverage": 1503,
+      "distinct_by_W": {
+        "3": 1030,
+        "5": 958,
+        "10": 790
+      },
+      "per_year": {
+        "2019": 1,
+        "2022": 180,
+        "2023": 241,
+        "2024": 214,
+        "2025": 214,
+        "2026": 108
+      },
+      "events_per_year": 216.7,
+      "clears_uncorrected_470": true,
+      "conclusive_at_corrected": true,
+      "years_to_corrected_bar": 4.1
+    },
+    "antitrust": {
+      "distinct": 950,
+      "raw_coverage": 1694,
+      "distinct_by_W": {
+        "3": 1035,
+        "5": 950,
+        "10": 748
+      },
+      "per_year": {
+        "2020": 4,
+        "2022": 162,
+        "2023": 215,
+        "2024": 261,
+        "2025": 237,
+        "2026": 71
+      },
+      "events_per_year": 214.9,
+      "clears_uncorrected_470": true,
+      "conclusive_at_corrected": true,
+      "years_to_corrected_bar": 4.2
+    },
+    "earnings_beat": {
+      "distinct": 849,
+      "raw_coverage": 1227,
+      "distinct_by_W": {
+        "3": 905,
+        "5": 849,
+        "10": 771
+      },
+      "per_year": {
+        "2022": 93,
+        "2023": 115,
+        "2024": 202,
+        "2025": 281,
+        "2026": 158
+      },
+      "events_per_year": 192.1,
+      "clears_uncorrected_470": true,
+      "conclusive_at_corrected": false,
+      "years_to_corrected_bar": 4.6
+    },
+    "ma_acquirer": {
+      "distinct": 530,
+      "raw_coverage": 712,
+      "distinct_by_W": {
+        "3": 547,
+        "5": 530,
+        "10": 497
+      },
+      "per_year": {
+        "2021": 1,
+        "2022": 95,
+        "2023": 101,
+        "2024": 106,
+        "2025": 172,
+        "2026": 55
+      },
+      "events_per_year": 119.9,
+      "clears_uncorrected_470": true,
+      "conclusive_at_corrected": false,
+      "years_to_corrected_bar": 7.4
+    },
+    "buyback": {
+      "distinct": 278,
+      "raw_coverage": 370,
+      "distinct_by_W": {
+        "3": 281,
+        "5": 278,
+        "10": 264
+      },
+      "per_year": {
+        "2022": 66,
+        "2023": 37,
+        "2024": 67,
+        "2025": 68,
+        "2026": 40
+      },
+      "events_per_year": 62.9,
+      "clears_uncorrected_470": false,
+      "conclusive_at_corrected": false,
+      "years_to_corrected_bar": 14.2
+    },
+    "gov_grant": {
+      "distinct": 272,
+      "raw_coverage": 339,
+      "distinct_by_W": {
+        "3": 287,
+        "5": 272,
+        "10": 244
+      },
+      "per_year": {
+        "2022": 32,
+        "2023": 70,
+        "2024": 76,
+        "2025": 83,
+        "2026": 11
+      },
+      "events_per_year": 61.5,
+      "clears_uncorrected_470": false,
+      "conclusive_at_corrected": false,
+      "years_to_corrected_bar": 14.5
+    },
+    "product_recall": {
+      "distinct": 251,
+      "raw_coverage": 354,
+      "distinct_by_W": {
+        "3": 266,
+        "5": 251,
+        "10": 226
+      },
+      "per_year": {
+        "2022": 57,
+        "2023": 65,
+        "2024": 50,
+        "2025": 63,
+        "2026": 16
+      },
+      "events_per_year": 56.8,
+      "clears_uncorrected_470": false,
+      "conclusive_at_corrected": false,
+      "years_to_corrected_bar": 15.7
+    },
+    "fda_approval": {
+      "distinct": 219,
+      "raw_coverage": 321,
+      "distinct_by_W": {
+        "3": 229,
+        "5": 219,
+        "10": 195
+      },
+      "per_year": {
+        "2021": 2,
+        "2022": 45,
+        "2023": 52,
+        "2024": 41,
+        "2025": 54,
+        "2026": 25
+      },
+      "events_per_year": 49.5,
+      "clears_uncorrected_470": false,
+      "conclusive_at_corrected": false,
+      "years_to_corrected_bar": 18.0
+    },
+    "offering": {
+      "distinct": 210,
+      "raw_coverage": 260,
+      "distinct_by_W": {
+        "3": 213,
+        "5": 210,
+        "10": 194
+      },
+      "per_year": {
+        "2022": 37,
+        "2023": 31,
+        "2024": 24,
+        "2025": 98,
+        "2026": 20
+      },
+      "events_per_year": 47.5,
+      "clears_uncorrected_470": false,
+      "conclusive_at_corrected": false,
+      "years_to_corrected_bar": 18.8
+    },
+    "short_report": {
+      "distinct": 185,
+      "raw_coverage": 224,
+      "distinct_by_W": {
+        "3": 191,
+        "5": 185,
+        "10": 173
+      },
+      "per_year": {
+        "2022": 30,
+        "2023": 21,
+        "2024": 35,
+        "2025": 82,
+        "2026": 17
+      },
+      "events_per_year": 41.9,
+      "clears_uncorrected_470": false,
+      "conclusive_at_corrected": false,
+      "years_to_corrected_bar": 21.3
+    },
+    "dividend_change": {
+      "distinct": 150,
+      "raw_coverage": 178,
+      "distinct_by_W": {
+        "3": 151,
+        "5": 150,
+        "10": 149
+      },
+      "per_year": {
+        "2022": 23,
+        "2023": 32,
+        "2024": 39,
+        "2025": 35,
+        "2026": 21
+      },
+      "events_per_year": 33.9,
+      "clears_uncorrected_470": false,
+      "conclusive_at_corrected": false,
+      "years_to_corrected_bar": 26.3
+    },
+    "guidance_raise": {
+      "distinct": 118,
+      "raw_coverage": 132,
+      "distinct_by_W": {
+        "3": 119,
+        "5": 118,
+        "10": 116
+      },
+      "per_year": {
+        "2022": 10,
+        "2023": 22,
+        "2024": 30,
+        "2025": 46,
+        "2026": 10
+      },
+      "events_per_year": 26.7,
+      "clears_uncorrected_470": false,
+      "conclusive_at_corrected": false,
+      "years_to_corrected_bar": 33.4
+    },
+    "guidance_cut": {
+      "distinct": 117,
+      "raw_coverage": 141,
+      "distinct_by_W": {
+        "3": 117,
+        "5": 117,
+        "10": 113
+      },
+      "per_year": {
+        "2022": 30,
+        "2023": 30,
+        "2024": 25,
+        "2025": 29,
+        "2026": 3
+      },
+      "events_per_year": 26.5,
+      "clears_uncorrected_470": false,
+      "conclusive_at_corrected": false,
+      "years_to_corrected_bar": 33.7
+    },
+    "ceo_change": {
+      "distinct": 86,
+      "raw_coverage": 92,
+      "distinct_by_W": {
+        "3": 87,
+        "5": 86,
+        "10": 86
+      },
+      "per_year": {
+        "2022": 13,
+        "2023": 35,
+        "2024": 14,
+        "2025": 13,
+        "2026": 11
+      },
+      "events_per_year": 19.5,
+      "clears_uncorrected_470": false,
+      "conclusive_at_corrected": false,
+      "years_to_corrected_bar": 45.7
+    },
+    "earnings_miss": {
+      "distinct": 79,
+      "raw_coverage": 83,
+      "distinct_by_W": {
+        "3": 79,
+        "5": 79,
+        "10": 79
+      },
+      "per_year": {
+        "2022": 11,
+        "2023": 8,
+        "2024": 23,
+        "2025": 24,
+        "2026": 13
+      },
+      "events_per_year": 17.9,
+      "clears_uncorrected_470": false,
+      "conclusive_at_corrected": false,
+      "years_to_corrected_bar": 49.8
+    },
+    "insider_trade": {
+      "distinct": 58,
+      "raw_coverage": 64,
+      "distinct_by_W": {
+        "3": 60,
+        "5": 58,
+        "10": 55
+      },
+      "per_year": {
+        "2022": 18,
+        "2023": 3,
+        "2024": 6,
+        "2025": 11,
+        "2026": 20
+      },
+      "events_per_year": 13.1,
+      "clears_uncorrected_470": false,
+      "conclusive_at_corrected": false,
+      "years_to_corrected_bar": 68.1
+    },
+    "ma_target": {
+      "distinct": 50,
+      "raw_coverage": 54,
+      "distinct_by_W": {
+        "3": 50,
+        "5": 50,
+        "10": 50
+      },
+      "per_year": {
+        "2022": 16,
+        "2023": 10,
+        "2024": 9,
+        "2025": 9,
+        "2026": 6
+      },
+      "events_per_year": 11.3,
+      "clears_uncorrected_470": false,
+      "conclusive_at_corrected": false,
+      "years_to_corrected_bar": 78.9
+    },
+    "fda_reject": {
+      "distinct": 45,
+      "raw_coverage": 56,
+      "distinct_by_W": {
+        "3": 45,
+        "5": 45,
+        "10": 45
+      },
+      "per_year": {
+        "2022": 17,
+        "2023": 16,
+        "2024": 8,
+        "2025": 2,
+        "2026": 2
+      },
+      "events_per_year": 10.2,
+      "clears_uncorrected_470": false,
+      "conclusive_at_corrected": false,
+      "years_to_corrected_bar": 87.5
+    },
+    "gov_bailout": {
+      "distinct": 44,
+      "raw_coverage": 44,
+      "distinct_by_W": {
+        "3": 44,
+        "5": 44,
+        "10": 44
+      },
+      "per_year": {
+        "2022": 10,
+        "2023": 4,
+        "2024": 4,
+        "2025": 23,
+        "2026": 3
+      },
+      "events_per_year": 10.0,
+      "clears_uncorrected_470": false,
+      "conclusive_at_corrected": false,
+      "years_to_corrected_bar": 89.2
+    }
+  }
+}
