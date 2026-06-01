@@ -1,9 +1,23 @@
 # Per-Category Directional Test — Design (Sub-project 2)
 
 **Date:** 2026-05-31
-**Status:** Design approved; spec for review.
+**Status:** ⛔ **NOT IMPLEMENTED — program STOPPED 2026-05-31** (deliberate call: low expected yield — Stage 1 FAILed, 4/6 categories are arbitraged analyst signals, and even a PASS would need a separate forward-confirmation study to be actionable). This design is retained as a record. **If ever revisited, apply the corrections in the box below FIRST** — the original §3/§8 below contain a known methodological error.
 **Type:** Pre-registered hypothesis test (real verdicts, on untouched data).
-**Parent program:** "Which news *types* genuinely predict short-term direction?" SP1 (`docs/lab/category-frequencies-RESULTS.md`) found ~8 categories testable at power. SP2 tests whether each actually predicts.
+**Parent program:** "Which news *types* genuinely predict short-term direction?" SP1 (`docs/lab/category-frequencies-RESULTS.md`) found ~8 categories testable at power. SP2 *would* test whether each actually predicts. Program summary: `docs/lab/news-prediction-program-SUMMARY.md`.
+
+---
+
+## ⚠ Required corrections if this is ever revisited (cross-session review, 2026-05-31)
+
+1. **Market-adjust the returns (load-bearing).** §8 below claims survivorship "biases discovery upward, so a FAIL is strong" — **this is WRONG and direction-asymmetric.** Today's 56 names are survivors that drifted up over 2016–2021. Up-bets (`upgrade`↑, `pt_raise`↑) are inflated by the drift (PASS suspect, FAIL strong); **down-bets (`downgrade`↓, `pt_cut`↓, `legal_action`↓, `antitrust`↓) are deflated** (FAIL suspect, **PASS strong**). Fix: `R = s·[(P_exit/P_entry − 1) − (SPY_exit/SPY_entry − 1)]` over the same d+1→d+3 window (SPY bars already cached). Without this the down-half measures the names' secular rise, not the news.
+2. **Drop to K=6.** Remove `product_launch` and `restructuring` from the Bonferroni family — they are pre-declared direction-uncertain (`restructuring`↑ is near a coin flip; "could be distress" is the opposite sign), and spending two corrected-α slots on un-predictable directions taxes the six with real theory (α/6≈0.0083 vs α/8=0.00625). Report the two **descriptively**, not gated. (Value concentrates in `legal_action` + `antitrust` — the least-arbitraged; the four analyst variants are near-efficient calibration/negative-control.)
+3. **Align the bootstrap to the binomial.** The guard `p5 > 0.55` is a 5% lower bound while the binomial runs at α/K≈0.0063 — looser than the headline on the shared dimension. Use the bootstrap one-sided p-value (fraction of resamples with HR ≤ 0.55) `< α/K`, with enough resamples (~50k) to resolve that level.
+4. **Regime-concentration flag (diagnostic).** 2016–2021 contains COVID; flag any category whose firings concentrate in a single regime window (e.g. >X% in 2020) — it can clear n and even the 10-session bootstrap while measuring one extraordinary regime. Parallel to Stage 1's overfit signature; not gating.
+5. **Forward confirmation is MANDATORY before any action, not optional.** Pre-burned-period data is weaker than forward out-of-sample on two axes the untouched window does not fix: lived-prior (strong priors about these exact mega-caps in 2016–2021) and stale-regime (ZIRP/pre-inflation/COVID may not generalize to now). A PASS means "this held then," not "tradeable today." The real protection is theory-driven directions + outcome-blind category selection + forward confirmation.
+
+_Everything below is the original design as-approved-then-superseded. Read it through the corrections above._
+
+---
 
 ---
 
