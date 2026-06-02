@@ -53,6 +53,14 @@ type ProphetOptionsStopConfig struct {
 	Cooloff         time.Duration // suppress flatten if LLM acted on the symbol within this window
 	Escalation      time.Duration // wait before escalating rung 0 → rung 1
 	SanityFloorFrac float64       // terminal limit floor as a fraction of the fresh mid
+
+	// Stuck-exit escalation (independent of P&L): when the LLM repeatedly places
+	// non-marketable sell limits that cancel unfilled, the monitor takes over and
+	// crosses the spread with a marketable flatten. This catches the thesis-broken
+	// WINNER that the loss-stop never fires on. Default OFF.
+	StuckExitEnabled     bool
+	StuckExitWindow      time.Duration // lookback for counting LLM canceled-unfilled sells
+	StuckExitMinReprices int           // ≥ this many unfilled cancels in the window → stuck
 }
 
 // stopAttempt tracks the current escalation rung for a symbol within this
@@ -351,17 +359,110 @@ func (m *ProphetOptionsStopMonitor) EvaluateTick(ctx context.Context, now time.T
 			m.logger.WithField("symbol", p.Symbol).Warn("prophet_options_stop_no_basis")
 			continue
 		}
-		if frac < m.cfg.StopPct {
-			delete(m.attempts, p.Symbol) // recovered above floor; reset rung
+		if frac >= m.cfg.StopPct {
+			// Catastrophic-loss flatten (cool-off-guarded so the LLM can act first).
+			m.logger.WithFields(logrus.Fields{
+				"symbol": p.Symbol, "loss_fraction": frac, "stop_pct": m.cfg.StopPct,
+			}).Warn("prophet_options_stop_triggered")
+			if llmActedRecently(p.Symbol, orders, now, m.cfg.Cooloff) {
+				m.logger.WithField("symbol", p.Symbol).Warn("prophet_options_stop_cooloff_suppressed")
+				continue
+			}
+			m.flatten(ctx, p, orders, now)
 			continue
 		}
-		m.logger.WithFields(logrus.Fields{
-			"symbol": p.Symbol, "loss_fraction": frac, "stop_pct": m.cfg.StopPct,
-		}).Warn("prophet_options_stop_triggered")
-		if llmActedRecently(p.Symbol, orders, now, m.cfg.Cooloff) {
-			m.logger.WithField("symbol", p.Symbol).Warn("prophet_options_stop_cooloff_suppressed")
+		// Not a catastrophic loss. Take over only if the LLM is stuck
+		// cancel-replacing an exit it can't fill — the thesis-broken WINNER the
+		// loss-stop never sees. Unlike the loss path there is NO cool-off: the
+		// whole point is that the LLM IS acting and failing.
+		if m.cfg.StuckExitEnabled &&
+			llmExitStuck(p.Symbol, orders, now, m.cfg.StuckExitWindow, m.cfg.StuckExitMinReprices) {
+			m.logger.WithFields(logrus.Fields{
+				"symbol": p.Symbol, "window": m.cfg.StuckExitWindow.String(),
+				"min_reprices": m.cfg.StuckExitMinReprices,
+			}).Warn("prophet_options_stuck_exit_triggered")
+			m.flattenStuckExit(ctx, p, orders, now)
 			continue
 		}
-		m.flatten(ctx, p, orders, now)
+		delete(m.attempts, p.Symbol) // nothing to do; reset rung
 	}
+}
+
+// llmExitStuck reports whether the LLM (v2-options) is stuck cancel-replacing a
+// sell it cannot fill on this symbol: at least minReprices of its sell orders in
+// the window terminated unfilled. Any recent LLM sell that took a fill means it
+// is making progress → not stuck. The monitor's own flatten orders are tagged
+// "v2-options-stop" (ParseStrategy != "v2-options"), so they never count here.
+func llmExitStuck(symbol string, orders []*interfaces.Order, now time.Time, window time.Duration, minReprices int) bool {
+	if minReprices <= 0 {
+		return false // misconfigured / disabled: never fire on a zero threshold
+	}
+	unfilled := 0
+	for _, o := range orders {
+		if o.Symbol != symbol || o.Side != "sell" {
+			continue
+		}
+		if interfaces.ParseStrategyFromClientOrderID(o.ClientOrderID) != prophetStrategyID {
+			continue
+		}
+		if now.Sub(o.SubmittedAt) > window {
+			continue
+		}
+		if o.FilledQty > 0 {
+			return false // making progress on the exit → not stuck
+		}
+		switch o.Status {
+		case "canceled", "expired", "done_for_day":
+			unfilled++
+		}
+	}
+	return unfilled >= minReprices
+}
+
+// workingLLMSell returns the LLM's (v2-options) currently-working sell order for
+// the symbol, if any. Such an order holds the position's qty and would make a
+// fresh monitor flatten fail with insufficient-qty on the shared account, so it
+// must be canceled before the monitor takes over.
+func workingLLMSell(symbol string, orders []*interfaces.Order) *interfaces.Order {
+	for _, o := range orders {
+		if o.Symbol != symbol || o.Side != "sell" {
+			continue
+		}
+		if interfaces.ParseStrategyFromClientOrderID(o.ClientOrderID) != prophetStrategyID {
+			continue
+		}
+		switch o.Status {
+		case "filled", "canceled", "expired", "rejected", "done_for_day", "replaced":
+			continue
+		}
+		return o
+	}
+	return nil
+}
+
+// flattenStuckExit takes over a stuck LLM exit. If the monitor already owns a
+// working flatten, the standard escalation path handles it. Otherwise it cancels
+// any working LLM sell first (cancel-confirm-before-replace — the order holds the
+// qty and would otherwise collide on the shared account), then crosses the spread
+// with a marketable flatten via the same rung-0 path the loss-stop uses.
+func (m *ProphetOptionsStopMonitor) flattenStuckExit(ctx context.Context, p *interfaces.OptionsPosition, orders []*interfaces.Order, now time.Time) {
+	if workingFlattenOrder(p.Symbol, orders) != nil {
+		m.flatten(ctx, p, orders, now)
+		return
+	}
+	if llm := workingLLMSell(p.Symbol, orders); llm != nil {
+		if err := m.flattener.CancelOrder(ctx, llm.ID); err != nil {
+			m.logger.WithError(err).WithField("symbol", p.Symbol).Error("prophet_stuck_exit: cancel llm order failed")
+			return
+		}
+		confirmed, err := m.flattener.GetOrder(ctx, llm.ID)
+		if err != nil || confirmed == nil || (confirmed.Status != "canceled" && confirmed.Status != "filled") {
+			m.logger.WithField("symbol", p.Symbol).Warn("prophet_stuck_exit: llm cancel not confirmed; retry next tick")
+			return
+		}
+		if confirmed.Status == "filled" {
+			return // the LLM's order filled after all; nothing left to flatten
+		}
+	}
+	m.flatten(ctx, p, orders, now)
 }

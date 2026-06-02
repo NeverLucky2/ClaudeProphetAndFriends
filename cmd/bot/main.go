@@ -510,10 +510,13 @@ func main() {
 			optDataSvc,     // GetOptionSnapshot
 			tradingService, // PlaceOptionsOrder / ListOrders / GetOrder / CancelOrder
 			services.ProphetOptionsStopConfig{
-				StopPct:         cfg.ProphetOptionsStopPct,
-				Cooloff:         time.Duration(cfg.ProphetOptionsStopCooloffMin) * time.Minute,
-				Escalation:      time.Duration(cfg.ProphetOptionsStopEscalationSec) * time.Second,
-				SanityFloorFrac: cfg.ProphetOptionsStopSanityFloorFrac,
+				StopPct:              cfg.ProphetOptionsStopPct,
+				Cooloff:              time.Duration(cfg.ProphetOptionsStopCooloffMin) * time.Minute,
+				Escalation:           time.Duration(cfg.ProphetOptionsStopEscalationSec) * time.Second,
+				SanityFloorFrac:      cfg.ProphetOptionsStopSanityFloorFrac,
+				StuckExitEnabled:     cfg.ProphetStuckExitEnabled,
+				StuckExitWindow:      time.Duration(cfg.ProphetStuckExitWindowMin) * time.Minute,
+				StuckExitMinReprices: cfg.ProphetStuckExitMinReprices,
 			},
 		)
 		stopMonitor.SetRawOwnershipChecker(tradeGuard)
@@ -521,7 +524,8 @@ func main() {
 		nyLocStop, _ := time.LoadLocation("America/New_York")
 		stopMarketOpen := func() bool { return services.StaticMarketPhase(time.Now().UTC(), nyLocStop) == "open" }
 		go stopMonitor.Start(ctx, 1*time.Minute, 5*time.Minute, stopMarketOpen)
-		logger.Info("Prophet options stop monitor started (ENABLE_PROPHET_OPTIONS_STOP=true)")
+		logger.WithField("stuck_exit_escalation", cfg.ProphetStuckExitEnabled).
+			Info("Prophet options stop monitor started (ENABLE_PROPHET_OPTIONS_STOP=true)")
 	} else {
 		logger.Info("Prophet options stop monitor disabled (ENABLE_PROPHET_OPTIONS_STOP!=true)")
 	}

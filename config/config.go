@@ -29,7 +29,7 @@ type Config struct {
 	AlpacaDataRatePerMin int
 
 	// Trade guard limits
-	MaxDailyLossPct         float64 // daily loss circuit breaker as positive percent, e.g. 5.0; 0 disables
+	MaxDailyLossPct float64 // daily loss circuit breaker as positive percent, e.g. 5.0; 0 disables
 
 	EnableSectorAggregation bool    // turn on cross-agent sector concentration cap
 	SectorDefaultMaxPct     float64 // fallback cap for buckets without an explicit override
@@ -78,6 +78,14 @@ type Config struct {
 	ProphetOptionsStopEscalationSec   float64
 	ProphetOptionsStopSanityFloorFrac float64
 
+	// Stuck-exit escalation. Rides on the stop monitor (requires
+	// ENABLE_PROPHET_OPTIONS_STOP=true). When the LLM repeatedly cancels unfilled
+	// sell limits — a thesis-broken winner it can't exit at mid — the monitor
+	// crosses the spread with a marketable flatten. Default OFF.
+	ProphetStuckExitEnabled     bool
+	ProphetStuckExitWindowMin   float64
+	ProphetStuckExitMinReprices int
+
 	// Shared daily-bar cache (cross-agent on-disk read cache for >=1Day bars).
 	// Default ON — a pure, soft-failing read optimization. See
 	// docs/superpowers/specs/2026-05-22-shared-daily-bar-cache-design.md.
@@ -95,23 +103,23 @@ func Load() error {
 	AppConfig = &Config{
 		// Accept ALPACA_API_KEY (Go convention) or ALPACA_PUBLIC_KEY (.env.example /
 		// README / Node side). Same dual-name fallback as agent/config-store.js.
-		AlpacaAPIKey:      firstEnvOrDefault("", "ALPACA_API_KEY", "ALPACA_PUBLIC_KEY"),
-		AlpacaSecretKey:   os.Getenv("ALPACA_SECRET_KEY"),
-		AlpacaBaseURL:     firstEnvOrDefault("https://paper-api.alpaca.markets", "ALPACA_BASE_URL", "ALPACA_ENDPOINT"),
-		AlpacaPaper:       getEnvOrDefault("ALPACA_PAPER", "true") == "true",
+		AlpacaAPIKey:    firstEnvOrDefault("", "ALPACA_API_KEY", "ALPACA_PUBLIC_KEY"),
+		AlpacaSecretKey: os.Getenv("ALPACA_SECRET_KEY"),
+		AlpacaBaseURL:   firstEnvOrDefault("https://paper-api.alpaca.markets", "ALPACA_BASE_URL", "ALPACA_ENDPOINT"),
+		AlpacaPaper:     getEnvOrDefault("ALPACA_PAPER", "true") == "true",
 
 		AlpacaDataRatePerMin: parseIntOrDefault("ALPACA_DATA_RATE_PER_MIN", 180),
-		ClaudeAPIKey:      os.Getenv("CLAUDE_API_KEY"),
-		XAIAPIKey:         os.Getenv("XAI_API_KEY"),
-		AIProvider:        resolveAIProvider(os.Getenv("AI_PROVIDER"), os.Getenv("CLAUDE_API_KEY"), os.Getenv("XAI_API_KEY")),
-		FMPAPIKey:         os.Getenv("FMP_API_KEY"),
-		DatabasePath:      getEnvOrDefault("DATABASE_PATH", "./data/prophet_trader.db"),
-		ServerPort:        getEnvOrDefault("PORT", getEnvOrDefault("SERVER_PORT", "4534")),
-		EnableLogging:     getEnvOrDefault("ENABLE_LOGGING", "true") == "true",
-		LogLevel:          getEnvOrDefault("LOG_LEVEL", "info"),
-		DataRetentionDays: 90,
+		ClaudeAPIKey:         os.Getenv("CLAUDE_API_KEY"),
+		XAIAPIKey:            os.Getenv("XAI_API_KEY"),
+		AIProvider:           resolveAIProvider(os.Getenv("AI_PROVIDER"), os.Getenv("CLAUDE_API_KEY"), os.Getenv("XAI_API_KEY")),
+		FMPAPIKey:            os.Getenv("FMP_API_KEY"),
+		DatabasePath:         getEnvOrDefault("DATABASE_PATH", "./data/prophet_trader.db"),
+		ServerPort:           getEnvOrDefault("PORT", getEnvOrDefault("SERVER_PORT", "4534")),
+		EnableLogging:        getEnvOrDefault("ENABLE_LOGGING", "true") == "true",
+		LogLevel:             getEnvOrDefault("LOG_LEVEL", "info"),
+		DataRetentionDays:    90,
 
-		MaxDailyLossPct:         parseFloat(getEnvOrDefault("MAX_DAILY_LOSS_PCT", "5")),
+		MaxDailyLossPct: parseFloat(getEnvOrDefault("MAX_DAILY_LOSS_PCT", "5")),
 
 		// Flag-gated rollout: defaults to false. Set ENABLE_SECTOR_AGGREGATION=true
 		// after a 2-week observation window where Status() reports real bucket exposures.
@@ -145,6 +153,10 @@ func Load() error {
 		ProphetOptionsStopCooloffMin:      parseFloat(getEnvOrDefault("PROPHET_OPTIONS_STOP_COOLOFF_MIN", "7")),
 		ProphetOptionsStopEscalationSec:   parseFloat(getEnvOrDefault("PROPHET_OPTIONS_STOP_ESCALATION_SEC", "60")),
 		ProphetOptionsStopSanityFloorFrac: parseFloat(getEnvOrDefault("PROPHET_OPTIONS_STOP_SANITY_FLOOR_FRAC", "0.50")),
+
+		ProphetStuckExitEnabled:     getEnvOrDefault("ENABLE_PROPHET_STUCK_EXIT_ESCALATION", "false") == "true",
+		ProphetStuckExitWindowMin:   parseFloat(getEnvOrDefault("PROPHET_STUCK_EXIT_WINDOW_MIN", "5")),
+		ProphetStuckExitMinReprices: parseIntOrDefault("PROPHET_STUCK_EXIT_MIN_REPRICES", 3),
 
 		BarCacheEnabled: getEnvOrDefault("BAR_CACHE_ENABLED", "true") == "true",
 		BarCacheDir:     getEnvOrDefault("BAR_CACHE_DIR", "./data/bar-cache"),

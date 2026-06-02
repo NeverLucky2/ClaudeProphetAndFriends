@@ -180,8 +180,23 @@ catalyst.
 
 **Rule:** LIMIT ORDERS ONLY
 - Never: Use market orders on options (too much slippage)
-- Always: Set limit at mid-price or better
+- Always: Set limit at mid-price or better **on entries and unhurried profit-trims**
 - Patient: Let order fill, don't chase
+
+**Exception — urgent / broken-thesis exits (cross the spread):** "Mid or better" is an
+*entry* discipline. When you have decided to FULLY EXIT because the thesis is broken
+(not a patient profit-trim), price the sell **at the bid** — a marketable limit — not
+at mid. A mid-or-better sell into a falling underlying never crosses the spread: it
+rests above where buyers are, cancels unfilled, and you re-price down each beat
+without ever getting out — the exact pattern that strands a position you decided to
+close. Selling at the bid is **not** a market order; it is a limit at a real, hittable
+price. If a bid-priced sell still has not filled after a beat, step the limit *down*
+toward the current bid — never hold it above the bid on a broken-thesis exit.
+> Code backstop: with `ENABLE_PROPHET_OPTIONS_STOP=true` **and**
+> `ENABLE_PROPHET_STUCK_EXIT_ESCALATION=true`, the options-stop monitor detects this
+> stuck cancel-replace pattern (≥3 unfilled LLM sell cancels within 5 min) and crosses
+> the spread for you, bounded by the sanity floor. Treat it as a safety net, not a
+> license to keep resting above the bid.
 
 ---
 
