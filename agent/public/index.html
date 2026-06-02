@@ -1146,6 +1146,7 @@
   <div class="tabs">
     <button class="tab active" data-tab="terminal" onclick="switchTab('terminal')"><span class="tab-full">Terminal</span><span class="tab-short">Term</span></button>
     <button class="tab" data-tab="trades" onclick="switchTab('trades')">Trades</button>
+    <button class="tab" data-tab="engine" onclick="switchTab('engine')"><span class="tab-full">Engine Trades</span><span class="tab-short">Engine</span></button>
     <button class="tab" data-tab="history" onclick="switchTab('history')">History</button>
     <button class="tab" data-tab="costs" onclick="switchTab('costs')">Costs</button>
     <button class="tab" data-tab="tips" onclick="switchTab('tips')">Tips</button>
@@ -1204,6 +1205,16 @@
         </div>
         <div class="trades-recon-items" id="trades-recon-items"></div>
         <div id="trades-feed"><div class="no-data">No trades yet. Start the agent to see live activity.</div></div>
+      </div>
+    </div>
+
+    <!-- Engine Trades Panel -->
+    <div class="panel" id="panel-engine">
+      <div class="settings-content">
+        <h2>Engine Trades</h2>
+        <p class="subtitle">Trades placed directly by Go-scheduler engines (Turtle, DefensiveProphet). These bypass the LLM Trades tab; source is broker order history (true fill status).</p>
+        <div id="engine-trades-status" class="subtitle"></div>
+        <div id="engine-trades-feed"><div class="no-data">Loading…</div></div>
       </div>
     </div>
 
@@ -1778,6 +1789,7 @@ function switchTab(id) {
   if (id === 'history' && !historyState.loaded) loadHistoryPanel();
   if (id === 'costs') renderCostsTab();
   if (id === 'tips') loadTipsPanel();
+  if (id === 'engine') loadEngineTrades();
 }
 
 // ── Costs Tab ──────────────────────────────
@@ -3072,6 +3084,54 @@ async function fetchTrades(from, to) {
   const res = await fetch('/api/trades?' + params.toString());
   if (!res.ok) throw new Error('fetch failed: ' + res.status);
   return res.json();
+}
+
+// Engine Trades tab: trades placed directly by Go-scheduler engines (Turtle,
+// DefensiveProphet), which bypass the LLM trade log. Sourced from broker order
+// history via /api/engine-trades (soft-fails to unavailable when the bot is down).
+async function loadEngineTrades() {
+  const feed = document.getElementById('engine-trades-feed');
+  const statusEl = document.getElementById('engine-trades-status');
+  if (!feed) return;
+  try {
+    const res = await fetch('/api/engine-trades');
+    const data = await res.json();
+    if (data.unavailable) {
+      if (statusEl) statusEl.textContent = 'Engine trades unavailable (bot offline).';
+      feed.innerHTML = '<div class="no-data">Unavailable.</div>';
+      return;
+    }
+    if (statusEl) statusEl.textContent = '';
+    renderEngineTrades(data.trades || []);
+  } catch (err) {
+    if (statusEl) statusEl.textContent = 'Engine trades unavailable.';
+    feed.innerHTML = '<div class="no-data">Unavailable.</div>';
+  }
+}
+
+function renderEngineTrades(trades) {
+  const feed = document.getElementById('engine-trades-feed');
+  if (!feed) return;
+  if (!trades.length) {
+    feed.innerHTML = '<div class="no-data">No engine trades yet.</div>';
+    return;
+  }
+  const fmtP = (p) => (p == null ? '' : Number(p).toFixed(2));
+  const fmtT = (t) => (t ? String(t).replace('T', ' ').slice(0, 16) : '');
+  const priceBit = (t) => (t.limitPrice != null ? ' @ ' + esc(fmtP(t.limitPrice))
+    : (t.stopPrice != null ? ' stop ' + esc(fmtP(t.stopPrice)) : ''));
+  const fillBit = (t) => ' · filled ' + esc(t.filledQty)
+    + (t.filledAvgPrice != null ? ' @ ' + esc(fmtP(t.filledAvgPrice)) : '');
+  feed.innerHTML = trades.map((t) => `
+    <div class="trade-card">
+      <div class="trade-header">
+        <span><span class="trade-symbol">${esc(t.symbol)}</span>
+          <span class="trade-agent-badge">${esc(t.agentName)}</span>
+          <span class="trade-agent-badge">${esc(t.status)}</span></span>
+        <span class="trade-time">${esc(fmtT(t.submittedAt))}</span>
+      </div>
+      <div class="trade-details">${esc(t.side)} ${esc(t.qty)} ${esc(t.type)}${priceBit(t)}${fillBit(t)}</div>
+    </div>`).join('');
 }
 
 function _todayEt() {

@@ -31,6 +31,7 @@ import {
   createSandboxForAccount,
 } from './config-store.js';
 import { appendTrade, readTrades } from './trades-store.js';
+import { filterEngineTrades } from './engine-trades.js';
 import { readTips, createTip, dismissTip, getSources } from './tips-store.js';
 import { scoreTips } from './tips-scorer.js';
 import { promoteCandidate } from './tips-store.js';
@@ -970,6 +971,23 @@ app.get('/api/reconciliation', async (req, res) => {
     res.json(summary);
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/engine-trades — trades placed directly by Go-scheduler agents (Turtle,
+// DefensiveProphet), which bypass the LLM trade log. Sourced from broker order history
+// (the shared account → any sandbox's Go client returns all of it). Soft-fails to an
+// empty list with unavailable:true when the bot is unreachable, so the page never breaks.
+app.get('/api/engine-trades', async (req, res) => {
+  const sandboxId = req.query.sandboxId ? String(req.query.sandboxId) : undefined;
+  const goAxios = getGoClientForSandbox(sandboxId);
+  if (!goAxios) return res.json({ trades: [], unavailable: true });
+  try {
+    const resp = await goAxios.get('/api/v1/orders?status=all', { timeout: 5000 });
+    const raw = Array.isArray(resp?.data) ? resp.data : [];
+    res.json({ trades: filterEngineTrades(raw) });
+  } catch {
+    res.json({ trades: [], unavailable: true });
   }
 });
 
