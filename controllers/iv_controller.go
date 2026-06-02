@@ -9,22 +9,22 @@ import (
 )
 
 // IVController serves the generic, cross-strategy IV-rank endpoint used by
-// Prophet's options-entry gate. Reuses HarvestIVRService (which now collects
-// daily ATM IV for both Harvest and Prophet underlyings via the broadened
+// Prophet's options-entry gate. Reuses IVRankService (which now collects
+// daily ATM IV for Prophet (and shared index) underlyings via the broadened
 // collection loop in cmd/bot/main.go).
 //
 // When a RealizedVolService is wired in, the response is enriched with
 // realized_vol_20d and iv_minus_rv — the premium-selling edge signal used by
-// the harvest preflight and the Harvest entry rules.
+// Prophet's options-entry gate.
 type IVController struct {
-	ivrSvc *services.HarvestIVRService
+	ivrSvc *services.IVRankService
 	rvSvc  *services.RealizedVolService // optional; nil disables enrichment
 }
 
 // NewIVController returns an IVController. rvSvc may be nil; the resulting
 // IVRData will report RealizedVol20d=0, IVMinusRV=0 and downstream consumers
 // must treat 0 as "no signal" (preflight and rules already do).
-func NewIVController(ivrSvc *services.HarvestIVRService, rvSvc *services.RealizedVolService) *IVController {
+func NewIVController(ivrSvc *services.IVRankService, rvSvc *services.RealizedVolService) *IVController {
 	return &IVController{ivrSvc: ivrSvc, rvSvc: rvSvc}
 }
 

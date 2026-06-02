@@ -258,7 +258,6 @@ func TestGuard_MainCheckBuyFetchesAccountAtMostOnce(t *testing.T) {
 	}
 }
 
-
 // ── Sector aggregation (Item 1: cross-agent sector & beta-bucket cap) ──
 
 func TestGuard_BucketFor_CoversMegaCaps(t *testing.T) {
@@ -386,7 +385,7 @@ func TestGuard_SectorCap_FailsClosedOnFetchError(t *testing.T) {
 }
 
 func TestGuard_SectorCap_IncludesOptionsProviderContribution(t *testing.T) {
-	// A registered OptionsExposureProvider (Harvest, in production) contributes
+	// A registered OptionsExposureProvider contributes
 	// $15K to INDEX_BETA. Cap = 25% × $100K = $25K. A new $11K SPY buy pushes
 	// total to $26K and must be blocked.
 	g := NewTradeGuard(&stubLister{}, &stubTrading{portfolio: 100000, lastEquity: 100000}, sectorConfig())
@@ -497,7 +496,7 @@ func TestGuard_NWayOverlap_BlocksAnyOtherAgent(t *testing.T) {
 
 func TestAgentForStrategy(t *testing.T) {
 	cases := map[string]AgentSource{
-		"v2-options": AgentMain, "unknown-strategy": AgentMain, "harvest": AgentHarvest,
+		"v2-options": AgentMain, "unknown-strategy": AgentMain,
 		"trend": AgentTrend, "mean-rev-rsi2": AgentMeanRev, "earnings-drift": AgentDrift,
 		"": AgentMain, "unknown-xyz": AgentMain,
 	}
@@ -549,7 +548,6 @@ func TestGuard_PositionCaps_DisabledIsNoop(t *testing.T) {
 		t.Fatalf("caps disabled → notional 0 must not block: %v", err)
 	}
 }
-
 
 func TestCheckOptionsOpen_SpreadGate(t *testing.T) {
 	now := time.Date(2026, 5, 24, 14, 30, 0, 0, time.UTC)

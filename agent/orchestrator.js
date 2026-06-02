@@ -309,7 +309,7 @@ export class AgentOrchestrator extends EventEmitter {
   // resolveAgent is injectable for testing; defaults to the real config-store
   // resolver. Agents whose definition sets respondsToEmergencyWakes:false
   // (mechanical / price-only strategies with no provision to act on intraday
-  // news — e.g. TrendProphet, Coil, Drift, Harvest) are skipped, since waking them just
+  // news — e.g. TrendProphet, Coil, Drift) are skipped, since waking them just
   // burns a full LLM beat to conclude the alert is irrelevant.
   triggerEmergencyHeartbeat(reason, resolveAgent = getResolvedAgentForSandbox) {
     for (const [, runtime] of this.runtimes) {

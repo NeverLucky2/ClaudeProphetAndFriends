@@ -199,18 +199,6 @@ test('default agent (Prophet) has additive scheduledBeats and suppresses pre_mar
   assert.deepEqual(prophet.suppressPhaseSnaps, ['pre_market'], 'should suppress 04:00 pre_market snap');
 });
 
-test('harvest agent has additive scheduledBeats and suppresses pre_market snap', async () => {
-  const cfg = await cfgStore.loadConfig();
-  const agents = cfg.agents;
-  const harvest = agents.find(a => a.id === 'harvest');
-  assert.ok(harvest, 'Harvest agent should exist');
-  assert.equal(harvest.heartbeatOverrides?.pre_market, 86400, 'pre_market cadence should be 24h (silenced)');
-  assert.equal(harvest.heartbeatOverrides?.market_open, 900, 'market_open cadence should be unchanged');
-  assert.deepEqual(harvest.scheduledBeats?.times, ['09:15'], 'should have 09:15 scheduled wake');
-  assert.equal(harvest.scheduledBeats?.exclusive, false, 'scheduledBeats should be additive');
-  assert.deepEqual(harvest.suppressPhaseSnaps, ['pre_market'], 'should suppress 04:00 pre_market snap');
-});
-
 test('non-Prophet/Harvest agents do NOT have the new pre-market scheduled-wake fields', async () => {
   const cfg = await cfgStore.loadConfig();
   const agents = cfg.agents;

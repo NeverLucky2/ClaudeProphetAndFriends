@@ -13,7 +13,7 @@ import (
 // v1 limitation: only unrealized P&L from currently-open broker positions
 // is computed. Closed managed positions (where realized P&L lives in
 // DBManagedPosition.UnrealizedPL frozen at exit, filterable by
-// AgentStrategy) and closed iron condors (DBHarvestCondor.RealizedPnL) are
+// AgentStrategy) are
 // not yet summed in. The EOD writer that materializes DBSegmentPnL is the
 // natural place to fold those in — tracked as a follow-up in
 // docs/shared-account-backend-spec.md.

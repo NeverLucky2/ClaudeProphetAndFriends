@@ -4,7 +4,6 @@ import { readFileSync } from 'node:fs';
 
 const ADAPT_SKILLS = [
   '.claude/skills/adapt-strategy/SKILL.md',
-  '.claude/skills/harvest-parameter-review/SKILL.md',
   '.claude/skills/trend-parameter-review/SKILL.md',
 ];
 
@@ -87,7 +86,6 @@ test('.claude/skills/stress-test-friction/SKILL.md: codifies flip-rate threshold
 
 const ADAPT_FOR_GATE = [
   '.claude/skills/adapt-strategy/SKILL.md',
-  '.claude/skills/harvest-parameter-review/SKILL.md',
   '.claude/skills/trend-parameter-review/SKILL.md',
 ];
 

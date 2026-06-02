@@ -3,7 +3,6 @@
  *
  * Time-based (while server is running):
  *   6:00 AM ET weekdays            → daily_briefing
- *   6:00 AM ET 1st of each month   → harvest_parameter_review (monthly)
  *   6:00 AM ET 1st of Jan/Apr/Jul/Oct → trend_parameter_review (quarterly)
  *   6:05 AM ET Mondays             → review_performance (if not done this week) → adapt_strategy
  *   4:30 PM ET weekdays            → loss checks: Prophet (≥-4% latest) → postmortem + adapt_strategy
@@ -16,7 +15,6 @@
  *   scenario_analysis            → no data/reports/scenario_*_YYYYMMDD.md today
  *   review_performance           → not run this ISO week  → then adapt_strategy
  *   postmortem                   → last Prophet session had ≥-4% loss and not yet run → adapt_strategy
- *   harvest_parameter_review     → not run this calendar month
  *   trend_parameter_review       → not run this calendar quarter
  *   adapt_strategy               → after review or postmortem, or 3 consecutive losing days
  *
@@ -293,7 +291,6 @@ export class AnalysisScheduler extends EventEmitter {
     this._lastPostmortemDate = null;
     this._lastAdaptDate = null;
     this._lastLossCheckDate = null;
-    this._lastHarvestParamReviewMonth = null;   // YYYY-MM
     this._lastTrendParamReviewQuarter = null;   // YYYY-Q
     this._lastRegimeGateDate = null;            // YYYY-MM-DD (daily regime gate compute)
     this._lastBreadthDate = null;       // YYYY-MM-DD (daily breadth-chart-analyst run)
@@ -333,7 +330,6 @@ export class AnalysisScheduler extends EventEmitter {
       lastReviewWeek: this._lastReviewWeek,
       lastPostmortemDate: this._lastPostmortemDate,
       lastAdaptDate: this._lastAdaptDate,
-      lastHarvestParamReviewMonth: this._lastHarvestParamReviewMonth,
       lastTrendParamReviewQuarter: this._lastTrendParamReviewQuarter,
       lastRegimeGateDate: this._lastRegimeGateDate,
       lastBreadthDate: this._lastBreadthDate,
@@ -348,7 +344,7 @@ export class AnalysisScheduler extends EventEmitter {
     const validJobs = [
       'daily_briefing', 'weekly_screeners', 'scenario_analysis',
       'review_performance', 'postmortem', 'adapt_strategy',
-      'harvest_parameter_review', 'trend_parameter_review',
+      'trend_parameter_review',
       'regime_gate_compute',
       'macro_regime_skill', 'breadth_skill', 'market_top_skill', 'bubble_skill',
       'trade_reconciliation',
@@ -385,15 +381,6 @@ export class AnalysisScheduler extends EventEmitter {
       } else if (jobName === 'adapt_strategy') {
         this._lastAdaptDate = isoDate;
         await this._runAdaptStrategy(isoDate);
-        await this._saveState();
-      } else if (jobName === 'harvest_parameter_review') {
-        this._lastHarvestParamReviewMonth = this._getMonth(isoDate);
-        await this._runSkill('harvest-parameter-review', isoDate, null, 15 * 60 * 1000, this._automatedRunAppendix({
-          confirmStep: 'Step 8 (user confirmation)',
-          targetFile: 'TRADING_RULES_HARVEST.md',
-          changeNoun: 'parameter',
-          guardNote: 'If the Step 3 sample-size guard fires, exit with the INSUFFICIENT_SAMPLE block as instructed and do NOT edit any file. If Step 7 structural escalation fires, write STRUCTURAL_REVIEW_NEEDED.md and do NOT edit TRADING_RULES_HARVEST.md.',
-        }));
         await this._saveState();
       } else if (jobName === 'regime_gate_compute') {
         // State-advance AFTER the runner: if it throws (spawn error, non-zero
@@ -621,16 +608,6 @@ export class AnalysisScheduler extends EventEmitter {
       }
     }
 
-    // 6. Monthly Harvest parameter review (state-based)
-    if (this._lastHarvestParamReviewMonth !== this._getMonth(isoDate)) {
-      if (await this._isLocked(this._getLockKey('harvest_parameter_review', isoDate))) {
-        this._log('Harvest parameter review already running in another process — skipping startup trigger.', 'info');
-      } else {
-        this._log('No Harvest parameter review this month — triggering now...', 'info');
-        await this.triggerJob('harvest_parameter_review').catch(() => {});
-      }
-    }
-
     // 7. Quarterly Trend parameter review (state-based)
     if (this._lastTrendParamReviewQuarter !== this._getQuarter(isoDate)) {
       if (await this._isLocked(this._getLockKey('trend_parameter_review', isoDate))) {
@@ -776,7 +753,6 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
       case 'review_performance': return `review_performance_${this._getISOWeek(date).replace(/[^a-z0-9]/gi, '_')}`;
       case 'postmortem':        return `postmortem_${(target || date || '').replace(/-/g, '')}`;
       case 'adapt_strategy':    return `adapt_strategy_${dateSlug}`;
-      case 'harvest_parameter_review': return `harvest_parameter_review_${this._getMonth(date).replace(/[^a-z0-9]/gi, '_')}`;
       case 'trend_parameter_review':   return `trend_parameter_review_${this._getQuarter(date).replace(/[^a-z0-9]/gi, '_')}`;
       case 'macro_regime_skill': return `macro_regime_skill_${dateSlug}`;
       case 'breadth_skill':      return `breadth_skill_${dateSlug}`;
@@ -886,7 +862,6 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
       this._lastAdaptDate = s.lastAdaptDate || null;
       this._lastLossCheckDate = s.lastLossCheckDate || null;
       this._lastScenarioDate = s.lastScenarioDate || null;
-      this._lastHarvestParamReviewMonth = s.lastHarvestParamReviewMonth || null;
       this._lastTrendParamReviewQuarter = s.lastTrendParamReviewQuarter || null;
       this._lastRegimeGateDate = s.lastRegimeGateDate || null;
       this._lastBreadthDate = s.lastBreadthDate || null;
@@ -915,7 +890,6 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
         lastAdaptDate: this._lastAdaptDate,
         lastLossCheckDate: this._lastLossCheckDate,
         lastScenarioDate: this._lastScenarioDate,
-        lastHarvestParamReviewMonth: this._lastHarvestParamReviewMonth,
         lastTrendParamReviewQuarter: this._lastTrendParamReviewQuarter,
         lastRegimeGateDate: this._lastRegimeGateDate,
         lastBreadthDate: this._lastBreadthDate,
@@ -1035,11 +1009,6 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
 
     if (isWeekday && hour === 6 && minute === 0 && this._lastDailyBriefDate !== isoDate) {
       await this.triggerJob('daily_briefing').catch(() => {});
-    }
-
-    // Monthly Harvest parameter review — 1st of each month at 6:00 AM ET (any day-of-week).
-    if (dayOfMonth === 1 && hour === 6 && minute === 0 && this._lastHarvestParamReviewMonth !== currentMonth) {
-      await this.triggerJob('harvest_parameter_review').catch(() => {});
     }
 
     // Quarterly Trend parameter review — 1st of Jan/Apr/Jul/Oct at 6:00 AM ET.

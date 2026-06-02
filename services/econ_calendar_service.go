@@ -38,9 +38,7 @@ const (
 	EconCoreRetail EconEventKind = "CoreRetail"
 )
 
-// Window constants for the shared blackout. The 24h pre-FOMC ban for Harvest
-// condor entries lives separately in TRADING_RULES_HARVEST.md / harvest_service.go
-// and is unaffected.
+// Window constants for the shared blackout.
 const (
 	econWindowBefore = 30 * time.Minute
 	econWindowAfter  = 15 * time.Minute

@@ -47,8 +47,7 @@ func NewLocalStorage(dbPath string) (*LocalStorage, error) {
 		&models.DBAccountSnapshot{},
 		&models.DBSignal{},
 		&models.DBManagedPosition{},
-		&models.DBHarvestCondor{},
-		&models.DBHarvestIVSnapshot{},
+		&models.DBIVSnapshot{},
 		&models.DBSegmentPnL{},
 		&models.DBTrendLedgerEntry{},
 		&models.DBTurtleSession{},
@@ -447,44 +446,6 @@ func (s *LocalStorage) DeleteManagedPosition(positionID string) error {
 	return nil
 }
 
-// ── Harvest condor storage ─────────────────────────────────────────
-
-func (s *LocalStorage) SaveHarvestCondor(c *models.DBHarvestCondor) error {
-	return s.db.Save(c).Error
-}
-
-// UpdateHarvestCondor applies partial updates to a condor by condorID.
-// Map keys must be GORM column names (e.g. "realized_pnl", "status"), not Go field names.
-func (s *LocalStorage) UpdateHarvestCondor(condorID string, updates map[string]interface{}) error {
-	return s.db.Model(&models.DBHarvestCondor{}).
-		Where("condor_id = ?", condorID).
-		Updates(updates).Error
-}
-
-func (s *LocalStorage) GetHarvestCondorByID(condorID string) (*models.DBHarvestCondor, error) {
-	var c models.DBHarvestCondor
-	if err := s.db.Where("condor_id = ?", condorID).First(&c).Error; err != nil {
-		return nil, err
-	}
-	return &c, nil
-}
-
-func (s *LocalStorage) ListOpenHarvestCondors() ([]*models.DBHarvestCondor, error) {
-	var condors []*models.DBHarvestCondor
-	err := s.db.Where("status IN ?", []string{"OPEN", "CLOSING"}).Find(&condors).Error
-	return condors, err
-}
-
-// GetHarvestClosedPnL sums realized P&L for condors closed within [start, end].
-func (s *LocalStorage) GetHarvestClosedPnL(start, end time.Time) (float64, error) {
-	var total float64
-	err := s.db.Model(&models.DBHarvestCondor{}).
-		Where("status = ? AND closed_at >= ? AND closed_at <= ?", "CLOSED", start, end).
-		Select("COALESCE(SUM(realized_pnl), 0)").
-		Scan(&total).Error
-	return total, err
-}
-
 // ── Segment P&L storage ────────────────────────────────────────────
 
 // SaveSegmentPnL upserts a daily segment-P&L row on the (strategy, date)
@@ -547,16 +508,16 @@ func (s *LocalStorage) ListManagedStrategies() ([]string, error) {
 	return out, nil
 }
 
-// ── Harvest IV snapshot storage ────────────────────────────────────
+// ── IV snapshot storage ────────────────────────────────────
 
-func (s *LocalStorage) SaveHarvestIVSnapshot(snap *models.DBHarvestIVSnapshot) error {
+func (s *LocalStorage) SaveHarvestIVSnapshot(snap *models.DBIVSnapshot) error {
 	// OnConflict{DoNothing: true} makes duplicate (underlying, date) inserts a no-op,
 	// relying on the DB-level unique index as the idempotency mechanism.
 	return s.db.Clauses(clause.OnConflict{DoNothing: true}).Create(snap).Error
 }
 
-func (s *LocalStorage) GetHarvestIVSnapshots(underlying string, start, end time.Time) ([]*models.DBHarvestIVSnapshot, error) {
-	var snaps []*models.DBHarvestIVSnapshot
+func (s *LocalStorage) GetHarvestIVSnapshots(underlying string, start, end time.Time) ([]*models.DBIVSnapshot, error) {
+	var snaps []*models.DBIVSnapshot
 	// end is an exclusive upper bound (date < end) so callers can use midnight boundaries cleanly.
 	err := s.db.Where("underlying = ? AND date >= ? AND date < ?", underlying, start, end).
 		Order("date ASC").
@@ -656,7 +617,7 @@ func (s *LocalStorage) SaveProphetHedgeSession(sess *models.DBProphetHedgeSessio
 }
 
 // GetProphetHedgeClosedPnL sums RealizedPnL of spreads CLOSED within [start,end)
-// — the realized half the segment writer needs, analogous to GetHarvestClosedPnL.
+// — the realized half the segment writer needs, analogous to the per-strategy realized-PnL readers.
 func (s *LocalStorage) GetProphetHedgeClosedPnL(start, end time.Time) (float64, error) {
 	var total float64
 	err := s.db.Model(&models.DBProphetHedgeSpread{}).

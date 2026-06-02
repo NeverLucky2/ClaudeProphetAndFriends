@@ -76,7 +76,7 @@ catalyst.
 
 **Rule:** Maximum 34% of portfolio deployed in V2 positions at any time (segment cap)
 - Calculate: sum of `position_value` across all V2 positions / `portfolio_value` ≤ 0.34
-- This is the V2 strategy's lane in the reconciled multi-agent capital model (2026-05-25). The five lanes are V2 (34%), COIL (24%), TREND (20%), DRIFT (12%), and HARVEST (10%) — total = 100%. V2 is the largest single lane by design — the operator's deliberate high-conviction allocation for the paper-trading phase.
+- This is the V2 strategy's lane in the reconciled multi-agent capital model (2026-06-02). The four lanes are V2 (34%), COIL (24%), TREND (30%), DRIFT (12%) — total = 100%. V2 is the largest single lane by design — the operator's deliberate high-conviction allocation for the paper-trading phase.
 - The lanes are maximum shares, not simultaneous mandates; the whole-account deploy ceiling (`MAX_DEPLOYED_PCT`) is the real simultaneous governor and always leaves a cash buffer.
 - If a candidate trade would push V2 deployed above 34%, skip the entry (or close an existing V2 position first to make room)
 - This cap applies regardless of conviction; high-conviction setups do not override it
@@ -98,8 +98,7 @@ catalyst.
 > for a few minutes after you place any order on a symbol
 > (`PROPHET_OPTIONS_STOP_COOLOFF_MIN`, default 7). The flatten is a marketable-limit
 > sell that escalates to a wide limit bounded by a sanity floor (never a naked
-> market order). It is scoped strictly to v2-options long positions and **never
-> touches a Harvest condor leg**. Default OFF (observe before enforcing).
+> market order). It is scoped strictly to v2-options long positions. Default OFF (observe before enforcing).
 
 ---
 
@@ -417,7 +416,7 @@ Agents are **advisory, not required**. Use them when you want:
 The guard sums dollar exposure to each sector bucket (TECH, INDEX_BETA, FINANCIALS, ENERGY, HEALTHCARE, etc.) **across all agents' positions** and rejects a buy that would push any bucket above its per-bucket cap (TECH 20%, INDEX_BETA 25%, others 15% default).
 
 If you see `guard: sector cap — {BUCKET} bucket would reach $X ...`:
-- The buy was blocked because Prophet + Harvest + TrendProphet combined hold too much in that bucket already. This is intentional — it is *not* a transient API error.
+- The buy was blocked because Prophet + TrendProphet combined hold too much in that bucket already. This is intentional — it is *not* a transient API error.
 - Do not retry the same trade. Pick a setup in a different bucket, or wait for an existing bucket position to close.
 - The operator can inspect live bucket exposure at `GET /api/v1/guard/status` (`sector_exposure_dollars`, `sector_max_by_bucket_dollars`). An MCP tool surfacing this to the agent directly is a planned follow-up.
 

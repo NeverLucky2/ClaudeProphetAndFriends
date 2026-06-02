@@ -13,7 +13,7 @@ func TestParseStrategyFromClientOrderID(t *testing.T) {
 		{"leading colon", ":no-strategy-prefix", ""},
 		{"trend tagged", "trend:8f3a1c-de4f-1234", "trend"},
 		{"v2 tagged", "v2-options:abcd-efgh", "v2-options"},
-		{"harvest tagged", "harvest:0001", "harvest"},
+		{"drift tagged", "drift:0001", "drift"},
 		{"multi-colon (only first split counts)", "trend:abc:def", "trend"},
 	}
 	for _, tc := range cases {

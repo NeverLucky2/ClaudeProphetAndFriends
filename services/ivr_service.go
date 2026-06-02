@@ -8,10 +8,10 @@ import (
 	"prophet-trader/models"
 )
 
-// harvestIVStore is the subset of storage used by the IVR service.
-type harvestIVStore interface {
-	SaveHarvestIVSnapshot(snap *models.DBHarvestIVSnapshot) error
-	GetHarvestIVSnapshots(underlying string, start, end time.Time) ([]*models.DBHarvestIVSnapshot, error)
+// ivSnapshotStore is the subset of storage used by the IVR service.
+type ivSnapshotStore interface {
+	SaveHarvestIVSnapshot(snap *models.DBIVSnapshot) error
+	GetHarvestIVSnapshots(underlying string, start, end time.Time) ([]*models.DBIVSnapshot, error)
 }
 
 // IVRData contains the result of an IVR calculation, optionally enriched
@@ -29,18 +29,18 @@ type IVRData struct {
 	IVMinusRV      float64 `json:"iv_minus_rv"`      // CurrentIV - RealizedVol20d; 0 when RV not computed
 }
 
-// HarvestIVRService collects and calculates IV rank for Harvest underlyings.
-type HarvestIVRService struct {
-	store harvestIVStore
+// IVRankService collects and calculates IV rank for the tracked underlyings.
+type IVRankService struct {
+	store ivSnapshotStore
 }
 
-// NewHarvestIVRService creates a new IVR service.
-func NewHarvestIVRService(store harvestIVStore) *HarvestIVRService {
-	return &HarvestIVRService{store: store}
+// NewIVRankService creates a new IVR service.
+func NewIVRankService(store ivSnapshotStore) *IVRankService {
+	return &IVRankService{store: store}
 }
 
 // RecordDailyIV stores today's ATM IV for the given underlying if not already stored today.
-func (s *HarvestIVRService) RecordDailyIV(underlying string, atmIV float64) error {
+func (s *IVRankService) RecordDailyIV(underlying string, atmIV float64) error {
 	today := time.Now().UTC().Truncate(24 * time.Hour)
 	// tomorrow is the exclusive upper bound: GetHarvestIVSnapshots uses date < end,
 	// so this captures the full calendar day without risking a 23h59m gap.
@@ -52,7 +52,7 @@ func (s *HarvestIVRService) RecordDailyIV(underlying string, atmIV float64) erro
 	if len(existing) > 0 {
 		return nil // already recorded today
 	}
-	return s.store.SaveHarvestIVSnapshot(&models.DBHarvestIVSnapshot{
+	return s.store.SaveHarvestIVSnapshot(&models.DBIVSnapshot{
 		Underlying: underlying,
 		Date:       today,
 		ATMIV:      atmIV,
@@ -61,7 +61,7 @@ func (s *HarvestIVRService) RecordDailyIV(underlying string, atmIV float64) erro
 
 // GetIVRData returns the IVR for an underlying given its current ATM IV.
 // currentIV should be the ATM implied volatility from live quotes.
-func (s *HarvestIVRService) GetIVRData(underlying string, currentIV float64) (*IVRData, error) {
+func (s *IVRankService) GetIVRData(underlying string, currentIV float64) (*IVRData, error) {
 	snaps, err := s.fetchTrailingYearSnaps(underlying)
 	if err != nil {
 		return nil, err
@@ -75,9 +75,9 @@ func (s *HarvestIVRService) GetIVRData(underlying string, currentIV float64) (*I
 // IVR=-1, IVPercentile=-1 when there is no history for the symbol yet.
 //
 // Data freshness is bounded by the daily collection cadence in
-// startHarvestIVCollection (6h). For IV-rank purposes that is acceptable —
+// startIVCollection (6h). For IV-rank purposes that is acceptable —
 // IV rank is a slow-moving metric.
-func (s *HarvestIVRService) GetIVRDataLatest(underlying string) (*IVRData, error) {
+func (s *IVRankService) GetIVRDataLatest(underlying string) (*IVRData, error) {
 	snaps, err := s.fetchTrailingYearSnaps(underlying)
 	if err != nil {
 		return nil, err
@@ -94,7 +94,7 @@ func (s *HarvestIVRService) GetIVRDataLatest(underlying string) (*IVRData, error
 	return computeIVRData(underlying, latest.ATMIV, snaps), nil
 }
 
-func (s *HarvestIVRService) fetchTrailingYearSnaps(underlying string) ([]*models.DBHarvestIVSnapshot, error) {
+func (s *IVRankService) fetchTrailingYearSnaps(underlying string) ([]*models.DBIVSnapshot, error) {
 	end := time.Now().UTC()
 	start := end.AddDate(-1, 0, 0) // up to 52 weeks back
 	snaps, err := s.store.GetHarvestIVSnapshots(underlying, start, end)
@@ -106,7 +106,7 @@ func (s *HarvestIVRService) fetchTrailingYearSnaps(underlying string) ([]*models
 
 // computeIVRData builds IVRData from a current IV value and a snapshot slice.
 // Pure function; no I/O.
-func computeIVRData(underlying string, currentIV float64, snaps []*models.DBHarvestIVSnapshot) *IVRData {
+func computeIVRData(underlying string, currentIV float64, snaps []*models.DBIVSnapshot) *IVRData {
 	data := &IVRData{
 		Underlying:    underlying,
 		CurrentIV:     currentIV,

@@ -74,7 +74,7 @@ const (
 //   - Price > $20
 //   - 30-day average dollar volume > $50M
 //   - Single-class plain tickers (no BRK.B, no preferreds)
-//   - No ETFs (avoids overlap with Harvest/Turtle), no sub-$5 microcaps
+//   - No ETFs (avoids overlap with Turtle), no sub-$5 microcaps
 //
 // Universe expansion is a v2 concern; for v1 the list is intentionally a
 // small, stable set so the candidate scan is fast and deterministic.

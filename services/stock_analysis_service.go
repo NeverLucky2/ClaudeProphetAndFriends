@@ -13,7 +13,7 @@ import (
 // IVProvider is the narrow interface StockAnalysisService uses to enrich
 // analyses with IV-rank context. Set via SetIVProvider; when nil, IV fields
 // are omitted from the response. In production this is wired to
-// HarvestIVRService (the daily collection now covers both Harvest and Prophet
+// IVRankService (the daily collection now covers SPY/QQQ + Prophet
 // underlyings).
 type IVProvider interface {
 	GetIVRDataLatest(underlying string) (*IVRData, error)

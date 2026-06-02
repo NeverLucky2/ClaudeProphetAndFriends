@@ -23,7 +23,6 @@ const STOP_OUT_SUBSTRINGS = [
 ];
 
 export function detectAssetClass(action, agentId) {
-  if (agentId === 'harvest') return 'iron_condor';
   const symbol = action?.symbol;
   if (typeof symbol !== 'string' || symbol.length === 0) return null;
 

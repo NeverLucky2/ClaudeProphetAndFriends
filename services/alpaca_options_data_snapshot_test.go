@@ -11,7 +11,7 @@ import (
 
 // TestGetOptionSnapshot_UsesSymbolsQueryParam locks the single-contract
 // snapshot request shape for AlpacaOptionsDataService (used by the Prophet
-// auto-stop monitor and the Harvest pricer). Same constraint as
+// auto-stop monitor). Same constraint as
 // GetOptionsQuote: the OCC symbol must go in the `?symbols=` QUERY param, not
 // the path (the path segment is the UNDERLYING ticker; Alpaca 400s on a full
 // option symbol there). The path-form bug silently disabled the auto-stop

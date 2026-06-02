@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"prophet-trader/interfaces"
-	"prophet-trader/models"
 )
 
 // --- fakes ---
@@ -18,15 +17,6 @@ type fakeOptPositions struct {
 
 func (f *fakeOptPositions) ListOptionsPositions(_ context.Context) ([]*interfaces.OptionsPosition, error) {
 	return f.positions, f.err
-}
-
-type fakeCondorLegs struct {
-	condors []*models.DBHarvestCondor
-	err     error
-}
-
-func (f *fakeCondorLegs) ListOpenHarvestCondors() ([]*models.DBHarvestCondor, error) {
-	return f.condors, f.err
 }
 
 type fakeQuoter struct {
@@ -69,8 +59,8 @@ func (f *recordingFlattener) CancelOrder(_ context.Context, id string) error {
 	return nil
 }
 
-func newTestMonitor(pos *fakeOptPositions, legs *fakeCondorLegs, q *fakeQuoter, fl *recordingFlattener) *ProphetOptionsStopMonitor {
-	m := NewProphetOptionsStopMonitor(pos, legs, q, fl, ProphetOptionsStopConfig{
+func newTestMonitor(pos *fakeOptPositions, q *fakeQuoter, fl *recordingFlattener) *ProphetOptionsStopMonitor {
+	m := NewProphetOptionsStopMonitor(pos, q, fl, ProphetOptionsStopConfig{
 		StopPct:         0.50,
 		Cooloff:         7 * time.Minute,
 		Escalation:      60 * time.Second,
@@ -87,19 +77,12 @@ func longPos(sym string, qty, entry, current, costBasis, unrealized float64) *in
 	}
 }
 
-func TestMonitor_Scoping_ExcludesCondorLegsAndShorts(t *testing.T) {
-	condor := &models.DBHarvestCondor{
-		CondorID: "c1", Status: "OPEN",
-		ShortPutSymbol: "SPY_sp", LongPutSymbol: "SPY_lp",
-		ShortCallSymbol: "SPY_sc", LongCallSymbol: "SPY_lc",
-	}
+func TestMonitor_Scoping_ExcludesShorts(t *testing.T) {
 	pos := &fakeOptPositions{positions: []*interfaces.OptionsPosition{
 		longPos("NVDA_C", 10, 5, 2, 5000, -3000), // Prophet long, down 60%
-		longPos("SPY_lp", 10, 1, 1, 1000, 0),      // Harvest long leg — must be excluded
 		{Symbol: "SPY_sc", Qty: -10, Side: "short", CostBasis: -500, UnrealizedPL: 0}, // short — excluded
 	}}
-	legs := &fakeCondorLegs{condors: []*models.DBHarvestCondor{condor}}
-	m := newTestMonitor(pos, legs, &fakeQuoter{}, &recordingFlattener{})
+	m := newTestMonitor(pos, &fakeQuoter{}, &recordingFlattener{})
 
 	got, err := m.prophetPositions(context.Background())
 	if err != nil {
@@ -107,18 +90,6 @@ func TestMonitor_Scoping_ExcludesCondorLegsAndShorts(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].Symbol != "NVDA_C" {
 		t.Fatalf("got %v, want only [NVDA_C]", symsOf(got))
-	}
-}
-
-func TestMonitor_Scoping_KeepsLegsOfClosedCondor(t *testing.T) {
-	condor := &models.DBHarvestCondor{CondorID: "c1", Status: "CLOSED", LongPutSymbol: "SPY_lp"}
-	pos := &fakeOptPositions{positions: []*interfaces.OptionsPosition{longPos("SPY_lp", 10, 1, 1, 1000, 0)}}
-	legs := &fakeCondorLegs{condors: []*models.DBHarvestCondor{condor}}
-	m := newTestMonitor(pos, legs, &fakeQuoter{}, &recordingFlattener{})
-
-	got, _ := m.prophetPositions(context.Background())
-	if len(got) != 1 {
-		t.Fatalf("CLOSED condor legs should not be excluded; got %v", symsOf(got))
 	}
 }
 
@@ -168,7 +139,7 @@ func TestMonitor_PlacesRung0OnTrigger(t *testing.T) {
 	}}
 	q := &fakeQuoter{snaps: map[string]*interfaces.OptionContract{"NVDA_C": snap(1.90, 2.10)}}
 	fl := &recordingFlattener{}
-	m := newTestMonitor(pos, &fakeCondorLegs{}, q, fl)
+	m := newTestMonitor(pos, q, fl)
 	m.SetBeatObserver(beatObserved(now.Add(-time.Minute))) // grace satisfied
 	m.EvaluateTick(context.Background(), now)
 
@@ -198,7 +169,7 @@ func TestMonitor_NoDoubleSendWhenWorkingOrderExists(t *testing.T) {
 		{ID: "w1", Symbol: "NVDA_C", Side: "sell", Status: "new",
 			ClientOrderID: "v2-options-stop:NVDA_C:111", SubmittedAt: now.Add(-10 * time.Second)},
 	}}
-	m := newTestMonitor(pos, &fakeCondorLegs{}, q, fl)
+	m := newTestMonitor(pos, q, fl)
 	m.SetBeatObserver(beatObserved(now.Add(-time.Minute)))
 	m.EvaluateTick(context.Background(), now)
 
@@ -220,7 +191,7 @@ func TestMonitor_EscalatesAfterWindow_CancelConfirmThenWideLimit(t *testing.T) {
 		orders: []*interfaces.Order{working},
 		byID:   map[string]*interfaces.Order{"w1": {ID: "w1", Status: "canceled", FilledQty: 0}},
 	}
-	m := newTestMonitor(pos, &fakeCondorLegs{}, q, fl)
+	m := newTestMonitor(pos, q, fl)
 	m.SetBeatObserver(beatObserved(now.Add(-time.Minute)))
 	m.EvaluateTick(context.Background(), now)
 
@@ -246,7 +217,7 @@ func TestMonitor_EscalationSizesAgainstRemainingQty(t *testing.T) {
 		orders: []*interfaces.Order{working},
 		byID:   map[string]*interfaces.Order{"w1": {ID: "w1", Status: "canceled", FilledQty: 4}},
 	}
-	m := newTestMonitor(pos, &fakeCondorLegs{}, q, fl)
+	m := newTestMonitor(pos, q, fl)
 	m.SetBeatObserver(beatObserved(now.Add(-time.Minute)))
 	m.EvaluateTick(context.Background(), now)
 
@@ -263,7 +234,7 @@ func TestMonitor_SanityFloorRestsWhenBidBelowFloor(t *testing.T) {
 	working := &interfaces.Order{ID: "w1", Symbol: "NVDA_C", Side: "sell", Status: "new",
 		ClientOrderID: "v2-options-stop:NVDA_C:111", SubmittedAt: now.Add(-120 * time.Second)}
 	fl := &recordingFlattener{orders: []*interfaces.Order{working}, byID: map[string]*interfaces.Order{"w1": {ID: "w1", Status: "canceled"}}}
-	m := newTestMonitor(pos, &fakeCondorLegs{}, q, fl)
+	m := newTestMonitor(pos, q, fl)
 	m.SetBeatObserver(beatObserved(now.Add(-time.Minute)))
 	m.EvaluateTick(context.Background(), now)
 
@@ -288,7 +259,7 @@ func TestMonitor_CancelNotConfirmed_NoReplacement(t *testing.T) {
 		orders: []*interfaces.Order{working},
 		byID:   map[string]*interfaces.Order{"w1": {ID: "w1", Status: "new"}},
 	}
-	m := newTestMonitor(pos, &fakeCondorLegs{}, q, fl)
+	m := newTestMonitor(pos, q, fl)
 	m.SetBeatObserver(beatObserved(now.Add(-time.Minute)))
 	m.EvaluateTick(context.Background(), now)
 
@@ -305,7 +276,7 @@ func TestMonitor_GraceSuppressesUntilBeatObserved(t *testing.T) {
 	pos := &fakeOptPositions{positions: []*interfaces.OptionsPosition{longPos("NVDA_C", 10, 5, 2, 5000, -3000)}}
 	q := &fakeQuoter{snaps: map[string]*interfaces.OptionContract{"NVDA_C": snap(1.90, 2.10)}}
 	fl := &recordingFlattener{}
-	m := newTestMonitor(pos, &fakeCondorLegs{}, q, fl)
+	m := newTestMonitor(pos, q, fl)
 	m.SetBootTime(now.Add(-30 * time.Second))
 
 	// No beats observed at all → suppressed.
@@ -337,7 +308,7 @@ func TestMonitor_NoBeatObserverMeansGraceOff(t *testing.T) {
 	pos := &fakeOptPositions{positions: []*interfaces.OptionsPosition{longPos("NVDA_C", 10, 5, 2, 5000, -3000)}}
 	q := &fakeQuoter{snaps: map[string]*interfaces.OptionContract{"NVDA_C": snap(1.90, 2.10)}}
 	fl := &recordingFlattener{}
-	m := newTestMonitor(pos, &fakeCondorLegs{}, q, fl) // no SetBeatObserver
+	m := newTestMonitor(pos, q, fl) // no SetBeatObserver
 	m.EvaluateTick(context.Background(), now)
 	if len(fl.placed) != 1 {
 		t.Fatalf("no observer wired: want 1 placement (grace off), got %d", len(fl.placed))
@@ -353,7 +324,7 @@ func TestMonitor_CooloffSuppressesWhenLLMActedRecently(t *testing.T) {
 		{ID: "llm1", Symbol: "NVDA_C", Side: "buy", Status: "filled",
 			ClientOrderID: "v2-options:abc", SubmittedAt: now.Add(-2 * time.Minute)},
 	}}
-	m := newTestMonitor(pos, &fakeCondorLegs{}, q, fl)
+	m := newTestMonitor(pos, q, fl)
 	m.SetBeatObserver(beatObserved(now.Add(-time.Minute)))
 	m.EvaluateTick(context.Background(), now)
 	if len(fl.placed) != 0 {
@@ -369,7 +340,7 @@ func TestMonitor_CooloffStaleActionDoesNotSuppress(t *testing.T) {
 		{ID: "llm1", Symbol: "NVDA_C", Side: "buy", Status: "filled",
 			ClientOrderID: "v2-options:abc", SubmittedAt: now.Add(-30 * time.Minute)}, // stale
 	}}
-	m := newTestMonitor(pos, &fakeCondorLegs{}, q, fl)
+	m := newTestMonitor(pos, q, fl)
 	m.SetBeatObserver(beatObserved(now.Add(-time.Minute)))
 	m.EvaluateTick(context.Background(), now)
 	if len(fl.placed) != 1 {
@@ -385,7 +356,7 @@ func TestMonitor_MonitorOwnFlattenDoesNotTripCooloff(t *testing.T) {
 	working := &interfaces.Order{ID: "w1", Symbol: "NVDA_C", Side: "sell", Status: "new",
 		ClientOrderID: "v2-options-stop:NVDA_C:111", SubmittedAt: now.Add(-2 * time.Minute)}
 	fl := &recordingFlattener{orders: []*interfaces.Order{working}, byID: map[string]*interfaces.Order{"w1": {ID: "w1", Status: "canceled"}}}
-	m := newTestMonitor(pos, &fakeCondorLegs{}, q, fl)
+	m := newTestMonitor(pos, q, fl)
 	m.SetBeatObserver(beatObserved(now.Add(-time.Minute)))
 	m.EvaluateTick(context.Background(), now)
 	// If the monitor's own order tripped the cool-off, it would suppress and not
@@ -398,7 +369,7 @@ func TestMonitor_MonitorOwnFlattenDoesNotTripCooloff(t *testing.T) {
 func TestMonitor_StartTicksWhileOpenAndStops(t *testing.T) {
 	pos := &fakeOptPositions{} // no positions → no orders
 	fl := &recordingFlattener{}
-	m := newTestMonitor(pos, &fakeCondorLegs{}, &fakeQuoter{}, fl)
+	m := newTestMonitor(pos, &fakeQuoter{}, fl)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	open := func() bool { return true }

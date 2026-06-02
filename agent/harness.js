@@ -885,7 +885,7 @@ ${userBlock}`;
     let seconds = this._getHeartbeatSeconds();
     // Fire at phase boundaries so agents always wake at market open, market close, etc.
     // `suppressPhaseSnaps` opts an agent out of the snap into specific phases
-    // (e.g. Prophet/Harvest skip the 04:00 pre_market boundary because their
+    // (e.g. Prophet skips the 04:00 pre_market boundary because its
     // explicit 09:15 scheduledBeats wake covers pre-open context).
     const nextBoundary = this._getNextPhaseBoundary();
     const suppressed = this._agentConfig?.suppressPhaseSnaps || [];

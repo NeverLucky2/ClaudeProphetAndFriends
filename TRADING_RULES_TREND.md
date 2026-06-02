@@ -30,7 +30,7 @@ You do not:
 - Produce free-form market commentary or directional opinions
 - Override exit rules because a position "looks like it might recover"
 - Enter without a confirmed Donchian breakout, even if the chart "looks bullish"
-- Look at V2 or HARVEST positions when making decisions
+- Look at V2 positions when making decisions
 - Suggest improvements to your own rules during a session
 - Adjust signals based on macro headlines, FOMC, earnings, or news
 
@@ -79,7 +79,6 @@ No other instruments. No leveraged or inverse ETFs (decay destroys trend systems
 
 A basket member with insufficient Alpaca history is dropped for that beat with a logged skip (never fails the run).
 
-**Note on overlap with HARVEST:** HARVEST sells iron condors on GLD and TLT (short vol, range-bound thesis). Turtle may go directionally long these same underlyings. This is allowed — the strategies have different return drivers. Combined notional exposure is bounded by the segment caps in each strategy's rules.
 
 ---
 
@@ -194,7 +193,7 @@ After the first heartbeat with at least one filled position, Cold Start mode is 
 
 ## Signal Definitions
 
-Signal computation is performed by the backend `get_trend_signal` endpoint, not by the agent. This matches the architecture pattern used by HARVEST (`get_harvest_state`, `get_harvest_ivr`) and Coil (`get_mean_reversion_candidates`): deterministic Go-side computation with unit tests as the auditable source of truth.
+Signal computation is performed by the backend `get_trend_signal` endpoint, not by the agent. This matches the architecture pattern used by Coil (`get_mean_reversion_candidates`): deterministic Go-side computation with unit tests as the auditable source of truth.
 
 `get_trend_signal(ticker)` must return:
 ```
@@ -259,7 +258,7 @@ For every entry:
 
 **Rule:** Maximum 4% of portfolio per single trend position (hard cap, regardless of computed size)
 
-**Rule:** Maximum 20% of portfolio deployed in trend positions at any time
+**Rule:** Maximum 30% of portfolio deployed in trend positions at any time
 - Position notional × count cannot exceed this. If a new entry would breach, skip and log
 
 **Rule:** Maximum 0.5% portfolio risk per position at entry (sized by stop distance)
@@ -267,13 +266,13 @@ For every entry:
 **Rule:** Maximum 2.5% aggregate portfolio risk across all open trend positions
 - Sum of `(stop_distance × shares)` across all open positions cannot exceed 2.5% of portfolio value
 
-**Daily Circuit Breaker:** If trend-segment P&L ≤ −2% intraday on any single day, exit all trend positions at next heartbeat and cease entries until the next session. Trend-segment P&L is scoped to positions tagged `strategy: "trend"` only and is independent of V2 and HARVEST.
+**Daily Circuit Breaker:** If trend-segment P&L ≤ −2% intraday on any single day, exit all trend positions at next heartbeat and cease entries until the next session. Trend-segment P&L is scoped to positions tagged `strategy: "trend"` only and is independent of V2.
 
 To check this on each heartbeat, call `get_segment_pnl()` (no args needed — strategy is auto-resolved). The response field `unrealized_pnl_percent` is the metric to compare against the −2.0 threshold. If `unrealized_pnl_percent` ≤ −2.0, halt new entries for the rest of the session; existing positions still receive trailing-stop evaluation but no new entries are opened.
 
 **v1 limitation acknowledged in rules:** `get_segment_pnl` currently returns unrealized P&L only (intraday realized closes not yet included). For Turtle this is acceptable because the strategy rarely closes and re-opens within a single session — the trailing stop fires once per day, and realized residue is small relative to the unrealized exposure being measured.
 
-**Cross-strategy coordination — operator note:** Turtle's 20% cap is its lane in the reconciled 100% capital model (2026-05-25): V2 (34%), COIL (24%), TREND (20%), DRIFT (12%), HARVEST (10%) = 100%. Turtle does not coordinate capital with other agents at runtime; it stays within its 20% lane and assumes the other strategies do the same.
+**Cross-strategy coordination — operator note:** Turtle's 30% cap is its lane in the reconciled 100% capital model (2026-06-02): V2 (34%), COIL (24%), TREND (30%), DRIFT (12%) = 100%. Turtle does not coordinate capital with other agents at runtime; it stays within its 30% lane and assumes the other strategies do the same.
 
 ---
 
@@ -281,7 +280,7 @@ To check this on each heartbeat, call `get_segment_pnl()` (no args needed — st
 
 Turtle's universe (TLT, GLD, USO, DBC, UUP, EEM) sits mostly outside the equity sector buckets, but two cross-cutting concerns apply:
 
-- **INDEX_BETA bucket:** Harvest's short-put book contributes delta-adjusted notional to INDEX_BETA. Turtle does not currently trade SPY/QQQ/IWM, so this rarely binds on entry, but the bucket cap is shared.
+- **INDEX_BETA bucket:** the bucket cap is shared across agents (e.g. a DefensiveProphet hedge spread, if enabled). Turtle does not currently trade SPY/QQQ/IWM, so this rarely binds on entry.
 - **OTHER bucket:** Tickers in the trend universe that don't map to a known ETF (e.g. DBC) fall to OTHER, which has a 15% default cap. With max 5 trend positions × ~3% sizing each, the trend segment is already structurally under that cap.
 
 If a buy is rejected with `guard: sector cap — {BUCKET} bucket would reach $X ...`, treat it as a hard skip for that heartbeat. Trend entries do not retry within the same beat — log the rejection in the heartbeat summary and move on.
@@ -429,7 +428,7 @@ Before every trend entry:
 - [ ] If Cold Start mode active: `(donchian_100_high − last_close) ≤ atr_20`?
 - [ ] No existing ledger entry for this ticker?
 - [ ] Total open trend positions < 5?
-- [ ] Total trend-deployed capital < 20%?
+- [ ] Total trend-deployed capital < 30%?
 - [ ] Aggregate trend risk + new position risk ≤ 2.5%?
 - [ ] Daily circuit breaker not triggered?
 - [ ] Heartbeat is within scheduled window?
@@ -446,7 +445,7 @@ Before every trend entry:
 - No averaging down on losing positions
 - No re-entry into a ticker on the same day it was stopped out (wait for the next breakout signal on a future heartbeat)
 - No adjustments to open positions other than the trailing-stop or initial-hard-stop exits
-- No coordination with V2 or HARVEST (the segment caps are enforced per-strategy; that is the only coordination)
+- No coordination with V2 (the segment caps are enforced per-strategy; that is the only coordination)
 - No reading of market news or social signals; price is the only input
 - No retroactive rule changes mid-session
 - No internal arithmetic on bar data (Donchian, ATR, SMA computation lives in `get_trend_signal`)

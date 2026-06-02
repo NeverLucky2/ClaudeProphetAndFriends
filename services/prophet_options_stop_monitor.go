@@ -10,7 +10,6 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"prophet-trader/interfaces"
-	"prophet-trader/models"
 )
 
 const (
@@ -22,10 +21,6 @@ const (
 
 type optionsPositionLister interface {
 	ListOptionsPositions(ctx context.Context) ([]*interfaces.OptionsPosition, error)
-}
-
-type condorLegLister interface {
-	ListOpenHarvestCondors() ([]*models.DBHarvestCondor, error)
 }
 
 type optionsQuoter interface {
@@ -76,7 +71,6 @@ type stopAttempt struct {
 // docs/superpowers/specs/2026-05-21-prophet-options-auto-stop-monitor-design.md.
 type ProphetOptionsStopMonitor struct {
 	positions optionsPositionLister
-	condors   condorLegLister
 	quoter    optionsQuoter
 	flattener optionsFlattener
 	rawOwner  rawOwnershipChecker // optional
@@ -89,7 +83,6 @@ type ProphetOptionsStopMonitor struct {
 
 func NewProphetOptionsStopMonitor(
 	positions optionsPositionLister,
-	condors condorLegLister,
 	quoter optionsQuoter,
 	flattener optionsFlattener,
 	cfg ProphetOptionsStopConfig,
@@ -98,7 +91,6 @@ func NewProphetOptionsStopMonitor(
 	logger.SetFormatter(&logrus.TextFormatter{FullTimestamp: true})
 	return &ProphetOptionsStopMonitor{
 		positions: positions,
-		condors:   condors,
 		quoter:    quoter,
 		flattener: flattener,
 		logger:    logger,
@@ -129,34 +121,16 @@ func lossFraction(p *interfaces.OptionsPosition) (float64, bool) {
 }
 
 // prophetPositions returns the long single-leg options positions that belong to
-// Prophet — i.e. broker long us_option positions minus every leg of any
-// non-CLOSED Harvest condor.
+// Prophet — i.e. broker long us_option positions (shorts excluded). The retired
+// Harvest condors left no legs to exclude.
 func (m *ProphetOptionsStopMonitor) prophetPositions(ctx context.Context) ([]*interfaces.OptionsPosition, error) {
 	all, err := m.positions.ListOptionsPositions(ctx)
 	if err != nil {
 		return nil, err
 	}
-	condors, err := m.condors.ListOpenHarvestCondors()
-	if err != nil {
-		return nil, err // fail the whole tick: cannot scope safely without the exclusion set
-	}
-	exclude := map[string]struct{}{}
-	for _, c := range condors {
-		if c.Status == "CLOSED" {
-			continue
-		}
-		for _, leg := range []string{c.ShortPutSymbol, c.LongPutSymbol, c.ShortCallSymbol, c.LongCallSymbol} {
-			if leg != "" {
-				exclude[leg] = struct{}{}
-			}
-		}
-	}
 	var out []*interfaces.OptionsPosition
 	for _, p := range all {
 		if p.Side != "long" {
-			continue
-		}
-		if _, isLeg := exclude[p.Symbol]; isLeg {
 			continue
 		}
 		out = append(out, p)

@@ -10,10 +10,10 @@ import (
 )
 
 // RealizedVolService computes trailing annualized realized volatility from
-// daily closes. Used by Harvest's premium-selling edge filter (block condor
+// daily closes. Used by Prophet's IV-RV edge filter (block options
 // entries when implied <= realized — no premium-selling edge to capture).
 //
-// Pulled into its own service rather than tacked onto HarvestIVRService so
+// Pulled into its own service rather than tacked onto IVRankService so
 // the IVR service can remain context-free (the IV snapshot store is
 // synchronous; this fetches via DataService which needs a context).
 
@@ -40,7 +40,7 @@ func NewRealizedVolService(data rvDataSource) *RealizedVolService {
 //
 // Returns 0 (no error) when the data source returns < 2 closes — there are
 // not enough returns to compute stddev. Callers must treat 0 as "no signal"
-// rather than "low volatility" (Harvest's preflight gate already does).
+// rather than "low volatility" (as the consuming preflight gates do).
 func (s *RealizedVolService) GetAnnualizedRealizedVol(ctx context.Context, symbol string, lookbackDays int) (float64, error) {
 	if lookbackDays < 2 {
 		lookbackDays = 2

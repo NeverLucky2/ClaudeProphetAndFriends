@@ -30,8 +30,7 @@ async function liveCatalog() {
 const STRATEGY_IDS = Object.keys(STRATEGY_TOOL_ALLOWLISTS);
 
 // Owner -> the signal/order endpoints that must appear on exactly that agent.
-const EXCLUSIVE = {
-  'harvest': _internals.HARVEST_TOOLS,
+const EXCLUSIVE = {
   'trend': _internals.TREND_SIGNALS,
   'mean-rev-rsi2': _internals.MEANREV_SIGNALS,
   'earnings-drift': _internals.DRIFT_SIGNALS,
@@ -125,8 +124,8 @@ test('Prophet (v2-options) is broad but excludes other strategies signals + mana
   }
   // Size sanity: catalog - 11 exclusive - 8 manager - PROPHET_TRIM. Computed off
   // ALL_TOOLS.length so it tracks catalog growth (e.g. a new generic Prophet tool).
-  // (11 = harvest 6 + trend 1 + meanrev 2 + drift 2)
-  assert.equal(STRATEGY_TOOL_ALLOWLISTS['v2-options'].length, ALL_TOOLS.length - 11 - MANAGER_TOOLS.length - _internals.PROPHET_TRIM.length);
+  // (5 = trend 1 + meanrev 2 + drift 2)
+  assert.equal(STRATEGY_TOOL_ALLOWLISTS['v2-options'].length, ALL_TOOLS.length - 5 - MANAGER_TOOLS.length - _internals.PROPHET_TRIM.length);
 });
 
 test('resolveAllowedTools: non-empty sandbox override wins', () => {

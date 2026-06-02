@@ -15,11 +15,10 @@ import (
 type AgentSource string
 
 const (
-	AgentMain            AgentSource = "main"
-	AgentHarvest         AgentSource = "harvest"
-	AgentTrend           AgentSource = "trend"
-	AgentMeanRev         AgentSource = "meanrev"
-	AgentDrift           AgentSource = "drift"
+	AgentMain             AgentSource = "main"
+	AgentTrend            AgentSource = "trend"
+	AgentMeanRev          AgentSource = "meanrev"
+	AgentDrift            AgentSource = "drift"
 	AgentProphetDefensive AgentSource = "prophet-defensive"
 )
 
@@ -44,8 +43,6 @@ func AgentTag(agent AgentSource) string {
 // right agent. Unknown/empty → main (legacy default).
 func AgentForStrategy(strategyId string) AgentSource {
 	switch strategyId {
-	case "harvest":
-		return AgentHarvest
 	case "trend":
 		return AgentTrend
 	case "mean-rev-rsi2":
@@ -219,7 +216,7 @@ type positionLister interface {
 }
 
 // OptionsExposureProvider supplies delta-adjusted options exposure by sector
-// bucket so that options-only services (e.g. Harvest) can contribute to the
+// bucket so that options-only services can contribute to the
 // cross-agent sector concentration limit without their positions appearing
 // in ManagedPositions. Implementations return notional × effective delta —
 // a short SPY put at $50K notional with 0.30 delta proxy contributes
@@ -264,7 +261,6 @@ func NewTradeGuard(positions positionLister, ts interfaces.TradingService, cfg T
 		cfg:            cfg,
 		rawSymbols: map[AgentSource]map[string]struct{}{
 			AgentMain:    {},
-			AgentHarvest: {},
 			AgentTrend:   {},
 			AgentMeanRev: {},
 			AgentDrift:   {},
@@ -294,7 +290,7 @@ func (g *TradeGuard) CheckBuy(ctx context.Context, agent AgentSource, symbol str
 	// Lazily fetch account at most once per CheckBuy. Both the value and any
 	// fetch error are cached so each downstream helper can apply its own policy:
 	//   - checkDailyLoss treats fetch errors as "data missing, fail-open"
-	
+
 	var acct *interfaces.Account
 	var acctErr error
 	var acctFetched bool
@@ -423,7 +419,7 @@ func (g *TradeGuard) CheckSell(_ context.Context, agent AgentSource, symbol stri
 }
 
 // SetOptionsExposureProvider registers a provider for options-based exposure
-// (e.g. Harvest's short-put book). Pass nil to clear. Safe to call at any time;
+// Pass nil to clear. Safe to call at any time;
 // the provider is read only during CheckBuy and Status().
 func (g *TradeGuard) SetOptionsExposureProvider(p OptionsExposureProvider) {
 	g.mu.Lock()
@@ -472,8 +468,8 @@ func (g *TradeGuard) RecordRawSell(agent AgentSource, symbol string) {
 
 // GuardStatus is the payload returned by the status endpoint.
 type GuardStatus struct {
-	Config    TradeGuardConfig `json:"config"`
-	MainSymbols     []string         `json:"main_symbols"`
+	Config      TradeGuardConfig `json:"config"`
+	MainSymbols []string         `json:"main_symbols"`
 
 	// SectorExposure reports per-bucket dollar exposure (managed positions +
 	// any registered OptionsExposureProvider). Useful for observation-mode
@@ -541,7 +537,7 @@ func (g *TradeGuard) sectorMaxByBucket(portfolioValue float64, exposure map[stri
 // "" if none. Replaces binary opponentOf so all five strategies are checked.
 // Exact-symbol-string match (OCC option symbols never collide with tickers).
 func (g *TradeGuard) heldByAnyOtherAgent(self AgentSource, symbol string) AgentSource {
-	for _, other := range []AgentSource{AgentMain, AgentHarvest, AgentTrend, AgentMeanRev, AgentDrift} {
+	for _, other := range []AgentSource{AgentMain, AgentTrend, AgentMeanRev, AgentDrift} {
 		if other == self {
 			continue
 		}

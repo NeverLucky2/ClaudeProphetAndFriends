@@ -56,7 +56,7 @@ func shouldWriteSegmentMarks(now time.Time, lastWriteDay string) bool {
 // WriteDailyMarks computes and upserts one DBSegmentPnL row per known strategy
 // for the ET trading day containing now. Idempotent: a (strategy, day) that
 // already has a row is skipped. Realized = frozen P&L of managed positions
-// closed today (+ closed condors for harvest); unrealized/deployed/count/
+// closed today; unrealized/deployed/count/
 // portfolio come from the live SegmentPnLService (current broker marks, valid
 // for equity and options alike).
 func (w *SegmentPnLWriter) WriteDailyMarks(ctx context.Context, now time.Time) error {
@@ -105,11 +105,6 @@ func (w *SegmentPnLWriter) WriteDailyMarks(ctx context.Context, now time.Time) e
 		if err != nil {
 			w.logger.WithError(err).WithField("strategy", strat).Warn("segment-pnl: realized sum failed — skipping strategy this tick")
 			continue
-		}
-		if strat == "harvest" {
-			if h, herr := w.storage.GetHarvestClosedPnL(dayStart, dayEnd); herr == nil {
-				realized += h
-			}
 		}
 		if strat == "prophet-defensive" {
 			if h, herr := w.storage.GetProphetHedgeClosedPnL(dayStart, dayEnd); herr == nil {

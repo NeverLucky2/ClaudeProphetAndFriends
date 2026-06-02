@@ -47,7 +47,7 @@ func TestStuckExit_PlacesMarketableFlattenWhenLLMStuck(t *testing.T) {
 		llmSell("b", "MSFT_C", "canceled", 0, 200, now),
 		llmSell("c", "MSFT_C", "canceled", 0, 90, now),
 	}}
-	m := enableStuck(newTestMonitor(pos, &fakeCondorLegs{}, q, fl))
+	m := enableStuck(newTestMonitor(pos, q, fl))
 	m.SetBeatObserver(beatObserved(now.Add(-time.Minute)))
 	m.EvaluateTick(context.Background(), now)
 
@@ -77,7 +77,7 @@ func TestStuckExit_BelowRepriceThresholdNoAction(t *testing.T) {
 		llmSell("a", "MSFT_C", "canceled", 0, 200, now),
 		llmSell("b", "MSFT_C", "canceled", 0, 90, now),
 	}}
-	m := enableStuck(newTestMonitor(pos, &fakeCondorLegs{}, q, fl))
+	m := enableStuck(newTestMonitor(pos, q, fl))
 	m.SetBeatObserver(beatObserved(now.Add(-time.Minute)))
 	m.EvaluateTick(context.Background(), now)
 
@@ -96,7 +96,7 @@ func TestStuckExit_DisabledNoAction(t *testing.T) {
 		llmSell("c", "MSFT_C", "canceled", 0, 90, now),
 	}}
 	// NOTE: enableStuck NOT called → flag default OFF.
-	m := newTestMonitor(pos, &fakeCondorLegs{}, q, fl)
+	m := newTestMonitor(pos, q, fl)
 	m.SetBeatObserver(beatObserved(now.Add(-time.Minute)))
 	m.EvaluateTick(context.Background(), now)
 
@@ -116,7 +116,7 @@ func TestStuckExit_RecentFillMeansProgressNoAction(t *testing.T) {
 		// A recent partial fill: the LLM IS making progress → not stuck.
 		llmSell("d", "MSFT_C", "partially_filled", 1, 30, now),
 	}}
-	m := enableStuck(newTestMonitor(pos, &fakeCondorLegs{}, q, fl))
+	m := enableStuck(newTestMonitor(pos, q, fl))
 	m.SetBeatObserver(beatObserved(now.Add(-time.Minute)))
 	m.EvaluateTick(context.Background(), now)
 
@@ -135,7 +135,7 @@ func TestStuckExit_MonitorOwnOrdersDoNotCount(t *testing.T) {
 		{ID: "s2", Symbol: "MSFT_C", Side: "sell", Status: "canceled", ClientOrderID: "v2-options-stop:MSFT_C:2", SubmittedAt: now.Add(-200 * time.Second)},
 		{ID: "s3", Symbol: "MSFT_C", Side: "sell", Status: "canceled", ClientOrderID: "v2-options-stop:MSFT_C:3", SubmittedAt: now.Add(-90 * time.Second)},
 	}}
-	m := enableStuck(newTestMonitor(pos, &fakeCondorLegs{}, q, fl))
+	m := enableStuck(newTestMonitor(pos, q, fl))
 	m.SetBeatObserver(beatObserved(now.Add(-time.Minute)))
 	m.EvaluateTick(context.Background(), now)
 
@@ -157,7 +157,7 @@ func TestStuckExit_LossPathTakesPrecedenceAndCooloffStillApplies(t *testing.T) {
 		llmSell("b", "MSFT_C", "canceled", 0, 200, now),
 		llmSell("c", "MSFT_C", "canceled", 0, 90, now),
 	}}
-	m := enableStuck(newTestMonitor(pos, &fakeCondorLegs{}, q, fl))
+	m := enableStuck(newTestMonitor(pos, q, fl))
 	m.SetBeatObserver(beatObserved(now.Add(-time.Minute)))
 	m.EvaluateTick(context.Background(), now)
 
@@ -183,7 +183,7 @@ func TestStuckExit_CancelsWorkingLLMSellThenPlaces(t *testing.T) {
 		},
 		byID: map[string]*interfaces.Order{"w": {ID: "w", Status: "canceled", FilledQty: 0}},
 	}
-	m := enableStuck(newTestMonitor(pos, &fakeCondorLegs{}, q, fl))
+	m := enableStuck(newTestMonitor(pos, q, fl))
 	m.SetBeatObserver(beatObserved(now.Add(-time.Minute)))
 	m.EvaluateTick(context.Background(), now)
 
@@ -209,7 +209,7 @@ func TestStuckExit_NoDoubleSendWhenMonitorOrderWorking(t *testing.T) {
 		llmSell("c", "MSFT_C", "canceled", 0, 90, now),
 		monitorWorking,
 	}}
-	m := enableStuck(newTestMonitor(pos, &fakeCondorLegs{}, q, fl))
+	m := enableStuck(newTestMonitor(pos, q, fl))
 	m.SetBeatObserver(beatObserved(now.Add(-time.Minute)))
 	m.EvaluateTick(context.Background(), now)
 

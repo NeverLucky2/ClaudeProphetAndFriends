@@ -52,8 +52,7 @@ type Config struct {
 	MaxDeployedPct     float64 // whole-account deployed ceiling (0.50 = 50%)
 
 	// Per-agent (non-Prophet) tradable-universe gate. Flag-gated, default OFF
-	// (observe-first). One flag covers Coil/Drift equity buys (via CheckBuy)
-	// and Harvest condor underlyings (via the condor-open endpoint).
+	// (observe-first). One flag covers Coil/Drift equity buys (via CheckBuy).
 	EnableAgentUniverseGate bool
 
 	// Drift continuation entry path. Flag-gated, default OFF (shadow: backend

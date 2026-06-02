@@ -590,7 +590,7 @@ func (s *EarningsCalendarService) refresh(now time.Time) {
 }
 
 // StaticMarketPhase returns the current market phase: "pre", "open", "after", or "closed".
-// Used by Harvest and other services to determine if the market is currently open.
+// Used by various services to determine if the market is currently open.
 func StaticMarketPhase(now time.Time, loc *time.Location) string {
 	return staticMarketPhase(now, loc)
 }

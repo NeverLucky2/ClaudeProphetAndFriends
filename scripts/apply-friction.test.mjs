@@ -4,11 +4,6 @@ import * as defaultFs from 'node:fs';
 
 import { detectAssetClass, isStopOut } from './apply-friction.mjs';
 
-test('detectAssetClass: harvest agent always returns iron_condor', () => {
-  assert.equal(detectAssetClass({ symbol: 'SPY', reasoning: '' }, 'harvest'), 'iron_condor');
-  assert.equal(detectAssetClass({ symbol: 'QQQ260515C00712000', reasoning: '' }, 'harvest'), 'iron_condor');
-});
-
 test('detectAssetClass: OCC + IC marker in reasoning -> iron_condor', () => {
   const action = { symbol: 'SPY260620P00400000', reasoning: 'opened iron condor on SPY' };
   assert.equal(detectAssetClass(action, 'default'), 'iron_condor');
@@ -259,16 +254,6 @@ test('applyFriction: option uses single_leg_options profile (close_was_losing su
   const result = applyFriction(action, 'default', FULL_CONFIG);
   assert.equal(result.action.friction_meta.profile_applied, 'single_leg_options');
   assert.equal(result.action.friction_meta.close_was_losing, true);
-});
-
-test('applyFriction: harvest agent forces iron_condor profile even on non-OCC symbol', () => {
-  const action = {
-    symbol: 'SPY',
-    reasoning: '',
-    market_data: { entry_price: 2.0, exit_price: 0.5, size: 10, theoretical_credit: 2000, unrealized_pl: 1500 },
-  };
-  const result = applyFriction(action, 'harvest', FULL_CONFIG);
-  assert.equal(result.action.friction_meta.profile_applied, 'iron_condor');
 });
 
 test('applyFriction: sign-flip warning surfaced when small winner becomes loser', () => {

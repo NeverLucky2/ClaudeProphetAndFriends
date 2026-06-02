@@ -57,7 +57,7 @@ test('v4→v5: 4 duplicate accounts dedup to 1 survivor, sandbox pointers rewrit
   await cfgStore.loadConfig();
   const cfg = cfgStore.getConfig();
 
-  assert.equal(cfg.schemaVersion, 9);
+  assert.equal(cfg.schemaVersion, 10);
   assert.equal(cfg.accounts.length, 1, 'deduped to one account');
   const survivorId = cfg.accounts[0].id;
   assert.equal(cfg.accounts[0].name, 'Paper (from .env)', 'env-seeded account is survivor by name match');
@@ -107,8 +107,8 @@ test('v4→v5: idempotent — re-running on v5 config is a no-op', async () => {
   await cfgStore.loadConfig();
   const afterSecond = await fs.readFile(configPath, 'utf-8');
 
-  assert.equal(JSON.parse(afterFirst).schemaVersion, 9);
-  assert.equal(JSON.parse(afterSecond).schemaVersion, 9);
+  assert.equal(JSON.parse(afterFirst).schemaVersion, 10);
+  assert.equal(JSON.parse(afterSecond).schemaVersion, 10);
 
   // No second backup file written on the no-op migration
   const backups = await fs.readdir(backupDir);
@@ -253,8 +253,8 @@ test('v5→v7: mechanical agents get respondsToEmergencyWakes=false, reactive ag
   const cfg = cfgStore.getConfig();
   const byId = Object.fromEntries(cfg.agents.map(a => [a.id, a]));
 
-  assert.equal(cfg.schemaVersion, 9, 'schemaVersion bumped to 9');
-  assert.equal(byId['harvest'].respondsToEmergencyWakes, false);
+  assert.equal(cfg.schemaVersion, 10, 'schemaVersion bumped to 10');
+  assert.equal(byId['harvest'], undefined, 'harvest retired by v10');
   assert.equal(byId['mean-rev'].respondsToEmergencyWakes, false);
   assert.equal(byId['trend-prophet'].respondsToEmergencyWakes, false);
   // Drift is absent from the v5 fixture → merged from defaults, which now carry
@@ -269,15 +269,16 @@ test('v5→v6: a user-set respondsToEmergencyWakes value is not clobbered', asyn
   const fixture = {
     ...v5AgentsFixture,
     agents: [
-      // User deliberately re-enabled emergency wakes for Harvest.
-      { id: 'harvest', name: 'Harvest', strategyId: 'harvest', respondsToEmergencyWakes: true },
+      // User deliberately re-enabled emergency wakes for Turtle (a surviving
+      // mechanical agent). Harvest would also exercise this path but is retired by v10.
+      { id: 'trend-prophet', name: 'Turtle', strategyId: 'trend', respondsToEmergencyWakes: true },
       { id: 'mean-rev', name: 'Coil', strategyId: 'mean-rev-rsi2' },
     ],
   };
   await fs.writeFile(configPath, JSON.stringify(fixture));
   await cfgStore.loadConfig();
   const byId = Object.fromEntries(cfgStore.getConfig().agents.map(a => [a.id, a]));
-  assert.equal(byId['harvest'].respondsToEmergencyWakes, true, 'user value preserved');
+  assert.equal(byId['trend-prophet'].respondsToEmergencyWakes, true, 'user value preserved');
   assert.equal(byId['mean-rev'].respondsToEmergencyWakes, false, 'unset mechanical agent still defaulted');
 });
 
@@ -303,10 +304,10 @@ test('v6→v7: Drift, omitted from the v6 exempt set, is backfilled to respondsT
   const cfg = cfgStore.getConfig();
   const byId = Object.fromEntries(cfg.agents.map(a => [a.id, a]));
 
-  assert.equal(cfg.schemaVersion, 9, 'schemaVersion bumped to 9');
+  assert.equal(cfg.schemaVersion, 10, 'schemaVersion bumped to 10');
   assert.equal(byId['drift'].respondsToEmergencyWakes, false, 'Drift backfilled exempt');
   // Already-exempt agents stay exempt; news-reactive agents stay reactive.
-  assert.equal(byId['harvest'].respondsToEmergencyWakes, false);
+  assert.equal(byId['harvest'], undefined, 'harvest retired by v10');
   assert.notEqual(byId['default'].respondsToEmergencyWakes, false);
   assert.equal(byId['penny-prophet'], undefined, 'penny-prophet retired by v9');
 });
@@ -367,11 +368,8 @@ test('v7→v8 backfills pre-market scheduledBeats and suppressPhaseSnaps on Prop
   assert.equal(prophet.scheduledBeats?.exclusive, false, 'Prophet scheduledBeats is additive');
   assert.deepEqual(prophet.suppressPhaseSnaps, ['pre_market'], 'Prophet suppressPhaseSnaps backfilled');
 
-  const harvest = cfg.agents.find(a => a.id === 'harvest');
-  assert.equal(harvest.heartbeatOverrides?.pre_market, 86400, 'Harvest pre_market upgraded from 3600 to 86400');
-  assert.equal(harvest.heartbeatOverrides?.market_open, 900, 'Harvest market_open preserved');
-  assert.deepEqual(harvest.scheduledBeats?.times, ['09:15'], 'Harvest scheduledBeats backfilled');
-  assert.deepEqual(harvest.suppressPhaseSnaps, ['pre_market'], 'Harvest suppressPhaseSnaps backfilled');
+  // Harvest is backfilled at v7→v8 but retired at v10 — it does not survive a full load.
+  assert.equal(cfg.agents.find(a => a.id === 'harvest'), undefined, 'harvest retired by v10');
 
   // Penny agent retired by v9 migration
   assert.equal(cfg.agents.find(a => a.id === 'penny-prophet'), undefined, 'penny-prophet retired by v9');
@@ -380,7 +378,7 @@ test('v7→v8 backfills pre-market scheduledBeats and suppressPhaseSnaps on Prop
   assert.equal(coil.scheduledBeats?.exclusive, true, 'Coil exclusive scheduledBeats preserved');
   assert.equal(coil.suppressPhaseSnaps, undefined, 'Coil not touched');
 
-  assert.equal(cfg.schemaVersion, 9, 'schemaVersion bumped to 9');
+  assert.equal(cfg.schemaVersion, 10, 'schemaVersion bumped to 10');
 });
 
 test('v7→v8 preserves user customizations on Prophet/Harvest pre_market fields', async () => {
@@ -415,8 +413,6 @@ test('v7→v8 preserves user customizations on Prophet/Harvest pre_market fields
   assert.deepEqual(prophet.scheduledBeats?.times, ['09:15'], 'Prophet scheduledBeats backfilled (was undefined)');
   assert.deepEqual(prophet.suppressPhaseSnaps, ['pre_market'], 'Prophet suppressPhaseSnaps backfilled (was undefined)');
 
-  const harvest = cfg.agents.find(a => a.id === 'harvest');
-  assert.equal(harvest.heartbeatOverrides?.pre_market, 7200, 'Harvest user-set pre_market preserved');
-  assert.deepEqual(harvest.scheduledBeats?.times, ['10:00'], 'Harvest user-set scheduledBeats preserved');
-  assert.deepEqual(harvest.suppressPhaseSnaps, ['pre_market'], 'Harvest suppressPhaseSnaps backfilled (was undefined)');
+  // Harvest is retired by v10 — its customizations don't survive a full load.
+  assert.equal(cfg.agents.find(a => a.id === 'harvest'), undefined, 'harvest retired by v10');
 });

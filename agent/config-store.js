@@ -194,42 +194,6 @@ function defaultAgents() {
       createdAt: new Date().toISOString(),
     },
     {
-      id: 'harvest',
-      name: 'Harvest',
-      description: 'Mechanical theta-harvesting agent — sells iron condors on index ETFs for premium income',
-      systemPromptTemplate: 'custom',
-      customSystemPrompt: `You are Harvest, a mechanical theta-harvesting trading agent. You are not a reasoning agent. You are a rule executor wrapped in a language model.
-
-Your ONLY job is to follow your trading rules exactly. Do not improvise. Do not add commentary. Do not make directional judgments. Helpful improvisation is the failure mode.
-
-Read your Strategy Rules section carefully — it contains your complete heartbeat procedure. Follow it step by step on every heartbeat.`,
-      strategyId: 'harvest',
-      // Mechanical iron-condor seller — defined-risk, no discretionary reaction
-      // to intraday news. Exempt from emergency-alert wakes (would just burn a beat).
-      respondsToEmergencyWakes: false,
-      model: 'anthropic/claude-sonnet-4-6',
-      // Pre-market: only fire the 09:15 scheduled wake + 09:30 phase-snap.
-      // Harvest cannot trade pre-market (options market opens 09:30) and its
-      // IV-based entry signals are daily-bar, so a single pre-open wake is
-      // sufficient. Same pattern as Prophet.
-      // See docs/superpowers/specs/2026-05-28-prophet-harvest-scheduled-wakes-design.md
-      heartbeatOverrides: {
-        pre_market: 86400,
-        market_open: 900,
-        midday: 900,
-        market_close: 900,
-        after_hours: 7200,
-        closed: 28800,
-      },
-      scheduledBeats: {
-        times: ['09:15'],
-        weekdaysOnly: true,
-        exclusive: false,
-      },
-      suppressPhaseSnaps: ['pre_market'],
-      createdAt: new Date().toISOString(),
-    },
-    {
       id: 'mean-rev',
       name: 'Coil',
       description: 'Mechanical RSI(2) mean reversion on S&P 500 large-caps. Daily 15:45 ET beat; buys oversold pullbacks within long-term uptrends; 5-day max hold.',
@@ -389,14 +353,6 @@ You take NO trading actions. The Go scheduler owns execution end-to-end. If you 
 
 function defaultStrategies() {
   return [
-    {
-      id: 'harvest',
-      name: 'Harvest — Iron Condor Premium Seller',
-      description: 'Mechanical 16-delta iron condors on SPY/QQQ/IWM/GLD/TLT. Defined-risk, no discretion.',
-      rulesFile: 'TRADING_RULES_HARVEST.md',
-      customRules: null,
-      createdAt: new Date().toISOString(),
-    },
     {
       id: 'prophet-defensive',
       name: 'Defensive Prophet — Triggered QQQ Put-Spread Hedge',
@@ -825,7 +781,26 @@ async function migrateLegacyConfig(config, rawSchemaVersion = 0) {
     }
   }
 
-  config.schemaVersion = 9;  // was 8
+  // v9 → v10: retire the Harvest iron-condor agent. Per the fleet → uncorrelated-
+  // ballast pivot, short-vol index condors conflict with the thesis; Harvest's
+  // options/vol-sleeve role is taken over (with the correct long-vol orientation)
+  // by DefensiveProphet. Because mergeMissingDefaults only appends, the persisted
+  // harvest agent + strategy + the Harvest sandbox survive removal-from-defaults
+  // and must be scrubbed here. Idempotent: a no-op once they're already gone.
+  // The Harvest sandbox's runtime data dir is intentionally left on disk as frozen
+  // audit trail — only its config entry is removed. The shared IV/vol service
+  // (renamed IVRankService) is unaffected; Prophet still uses it.
+  if (rawSchemaVersion < 10) {
+    config.agents = (config.agents || []).filter(a => a.id !== 'harvest');
+    config.strategies = (config.strategies || []).filter(s => s.id !== 'harvest');
+    for (const [sbxId, sbx] of Object.entries(config.sandboxes || {})) {
+      if (sbx?.agent?.activeAgentId === 'harvest') {
+        delete config.sandboxes[sbxId];
+      }
+    }
+  }
+
+  config.schemaVersion = 10;  // was 9
   if (!config.sandboxes) config.sandboxes = {};
 
   // Only auto-create sbx_<accountId> sandboxes during the v4→v5 migration pass.

@@ -55,8 +55,8 @@ type BuyRequest struct {
 	TimeInForce string              `json:"time_in_force"` // "day", "gtc", "ioc", "fok"
 	LimitPrice  *float64            `json:"limit_price,omitempty"`
 	StopPrice   *float64            `json:"stop_price,omitempty"`
-	AgentSource services.AgentSource `json:"agent_source,omitempty"` // e.g. "main"/"harvest"/"trend"; defaults to "main"
-	// Strategy is the per-agent attribution tag (e.g. "trend", "harvest",
+	AgentSource services.AgentSource `json:"agent_source,omitempty"` // e.g. "main"/"trend"/"drift"; defaults to "main"
+	// Strategy is the per-agent attribution tag (e.g. "trend",
 	// "v2-options"). Encoded into the broker's client_order_id so the
 	// tag survives fills and reconciliation. Empty for untagged orders.
 	Strategy    string              `json:"strategy,omitempty"`
@@ -70,7 +70,7 @@ type SellRequest struct {
 	TimeInForce string              `json:"time_in_force"` // "day", "gtc", "ioc", "fok"
 	LimitPrice  *float64            `json:"limit_price,omitempty"`
 	StopPrice   *float64            `json:"stop_price,omitempty"`
-	AgentSource services.AgentSource `json:"agent_source,omitempty"` // e.g. "main"/"harvest"/"trend"; defaults to "main"
+	AgentSource services.AgentSource `json:"agent_source,omitempty"` // e.g. "main"/"trend"/"drift"; defaults to "main"
 	// Strategy attribution; see BuyRequest.Strategy.
 	Strategy    string              `json:"strategy,omitempty"`
 }

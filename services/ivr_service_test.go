@@ -8,18 +8,18 @@ import (
 	"prophet-trader/models"
 )
 
-// stubIVStore satisfies the harvestIVStore interface for testing.
+// stubIVStore satisfies the ivSnapshotStore interface for testing.
 type stubIVStore struct {
-	saved  []*models.DBHarvestIVSnapshot
-	stored []*models.DBHarvestIVSnapshot
+	saved  []*models.DBIVSnapshot
+	stored []*models.DBIVSnapshot
 }
 
-func (s *stubIVStore) SaveHarvestIVSnapshot(snap *models.DBHarvestIVSnapshot) error {
+func (s *stubIVStore) SaveHarvestIVSnapshot(snap *models.DBIVSnapshot) error {
 	s.saved = append(s.saved, snap)
 	return nil
 }
-func (s *stubIVStore) GetHarvestIVSnapshots(underlying string, start, end time.Time) ([]*models.DBHarvestIVSnapshot, error) {
-	var out []*models.DBHarvestIVSnapshot
+func (s *stubIVStore) GetHarvestIVSnapshots(underlying string, start, end time.Time) ([]*models.DBIVSnapshot, error) {
+	var out []*models.DBIVSnapshot
 	for _, sn := range s.stored {
 		// Matches storage semantics: start <= date < end (end is exclusive)
 		if sn.Underlying == underlying && !sn.Date.Before(start) && sn.Date.Before(end) {
@@ -29,10 +29,10 @@ func (s *stubIVStore) GetHarvestIVSnapshots(underlying string, start, end time.T
 	return out, nil
 }
 
-func makeSnaps(underlying string, ivValues []float64, startDate time.Time) []*models.DBHarvestIVSnapshot {
-	snaps := make([]*models.DBHarvestIVSnapshot, len(ivValues))
+func makeSnaps(underlying string, ivValues []float64, startDate time.Time) []*models.DBIVSnapshot {
+	snaps := make([]*models.DBIVSnapshot, len(ivValues))
 	for i, iv := range ivValues {
-		snaps[i] = &models.DBHarvestIVSnapshot{
+		snaps[i] = &models.DBIVSnapshot{
 			Underlying: underlying,
 			Date:       startDate.AddDate(0, 0, i),
 			ATMIV:      iv,
@@ -83,7 +83,7 @@ func TestGetIVRData_SufficientHistory(t *testing.T) {
 		return vals
 	}(), start)
 
-	svc := NewHarvestIVRService(store)
+	svc := NewIVRankService(store)
 	data, err := svc.GetIVRData("SPY", 0.20)
 	if err != nil {
 		t.Fatalf("GetIVRData failed: %v", err)
@@ -98,7 +98,7 @@ func TestGetIVRData_SufficientHistory(t *testing.T) {
 
 func TestGetIVRData_NoHistory(t *testing.T) {
 	store := &stubIVStore{}
-	svc := NewHarvestIVRService(store)
+	svc := NewIVRankService(store)
 	data, err := svc.GetIVRData("TLT", 0.15)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -165,7 +165,7 @@ func TestGetIVRData_PopulatesIVPercentile(t *testing.T) {
 	start := time.Now().AddDate(0, 0, -10)
 	store.stored = makeSnaps("SPY", []float64{0.10, 0.12, 0.15, 0.18, 0.20, 0.22, 0.25, 0.28, 0.30, 0.32}, start)
 
-	svc := NewHarvestIVRService(store)
+	svc := NewIVRankService(store)
 	data, err := svc.GetIVRData("SPY", 0.18)
 	if err != nil {
 		t.Fatalf("GetIVRData failed: %v", err)
@@ -182,7 +182,7 @@ func TestGetIVRData_PopulatesIVPercentile(t *testing.T) {
 
 func TestGetIVRData_IVPercentileMinusOneOnEmptyHistory(t *testing.T) {
 	store := &stubIVStore{}
-	svc := NewHarvestIVRService(store)
+	svc := NewIVRankService(store)
 	data, err := svc.GetIVRData("XYZ", 0.20)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -200,7 +200,7 @@ func TestGetIVRDataLatest_UsesMostRecentSnapshot(t *testing.T) {
 	// Five days: 0.10, 0.15, 0.20, 0.25, 0.30. Latest (i=4) is 0.30.
 	store.stored = makeSnaps("SPY", []float64{0.10, 0.15, 0.20, 0.25, 0.30}, start)
 
-	svc := NewHarvestIVRService(store)
+	svc := NewIVRankService(store)
 	data, err := svc.GetIVRDataLatest("SPY")
 	if err != nil {
 		t.Fatalf("GetIVRDataLatest failed: %v", err)
@@ -221,7 +221,7 @@ func TestGetIVRDataLatest_UsesMostRecentSnapshot(t *testing.T) {
 
 func TestGetIVRDataLatest_NoHistoryReturnsSentinels(t *testing.T) {
 	store := &stubIVStore{}
-	svc := NewHarvestIVRService(store)
+	svc := NewIVRankService(store)
 	data, err := svc.GetIVRDataLatest("XYZ")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -236,7 +236,7 @@ func TestGetIVRDataLatest_NoHistoryReturnsSentinels(t *testing.T) {
 
 func TestRecordDailyIV_FirstCall_WritesSnapshot(t *testing.T) {
 	store := &stubIVStore{}
-	svc := NewHarvestIVRService(store)
+	svc := NewIVRankService(store)
 	err := svc.RecordDailyIV("SPY", 0.185)
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
@@ -253,11 +253,11 @@ func TestRecordDailyIV_Idempotent(t *testing.T) {
 	today := time.Now().UTC().Truncate(24 * time.Hour)
 	store := &stubIVStore{
 		// Pre-populate stored so the service sees an existing snapshot for today
-		stored: []*models.DBHarvestIVSnapshot{
+		stored: []*models.DBIVSnapshot{
 			{Underlying: "SPY", Date: today, ATMIV: 0.185},
 		},
 	}
-	svc := NewHarvestIVRService(store)
+	svc := NewIVRankService(store)
 	err := svc.RecordDailyIV("SPY", 0.200) // different IV, same day
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
@@ -270,7 +270,7 @@ func TestRecordDailyIV_Idempotent(t *testing.T) {
 
 func TestRecordDailyIV_StoreError_Propagates(t *testing.T) {
 	store := &stubGetErrorIVStore{}
-	svc := NewHarvestIVRService(store)
+	svc := NewIVRankService(store)
 	err := svc.RecordDailyIV("SPY", 0.185)
 	if err == nil {
 		t.Fatal("expected error from store, got nil")
@@ -280,9 +280,9 @@ func TestRecordDailyIV_StoreError_Propagates(t *testing.T) {
 // stubGetErrorIVStore returns an error on GetHarvestIVSnapshots.
 type stubGetErrorIVStore struct{}
 
-func (s *stubGetErrorIVStore) SaveHarvestIVSnapshot(snap *models.DBHarvestIVSnapshot) error {
+func (s *stubGetErrorIVStore) SaveHarvestIVSnapshot(snap *models.DBIVSnapshot) error {
 	return nil
 }
-func (s *stubGetErrorIVStore) GetHarvestIVSnapshots(underlying string, start, end time.Time) ([]*models.DBHarvestIVSnapshot, error) {
+func (s *stubGetErrorIVStore) GetHarvestIVSnapshots(underlying string, start, end time.Time) ([]*models.DBIVSnapshot, error) {
 	return nil, fmt.Errorf("DB unavailable")
 }

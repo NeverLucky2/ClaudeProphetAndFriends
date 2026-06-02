@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -282,86 +281,21 @@ func main() {
 		logger.Warn("earnings calendar first refresh did not complete within timeout — universe will start in fail-open mode")
 	}
 
-	// Initialize Harvest services
-	harvestIVRSvc := services.NewHarvestIVRService(storageService)
-	harvestSvc := services.NewHarvestService(storageService)
-	// Harvest underlying allowlist (SPY/QQQ/IWM/GLD/TLT), same flag as the
-	// Coil/Drift equity gate. Default off; checked in the condor-open endpoint.
-	harvestSvc.SetEnforceUniverse(cfg.EnableAgentUniverseGate)
+	// IV-rank service (shared infra — Prophet's options-entry gate). Collects ATM
+	// IV daily for SPY/QQQ + Prophet's mega-caps; persists to harvest_iv_snapshots.
+	ivRankSvc := services.NewIVRankService(storageService)
 
 	// Wire the IV provider into StockAnalysisService so analyze_stocks
 	// responses include per-symbol IV rank / percentile / days_of_history.
 	// Safe to set after construction; the field is read inside AnalyzeStock.
-	stockAnalysisService.SetIVProvider(harvestIVRSvc)
+	stockAnalysisService.SetIVProvider(ivRankSvc)
 
-	getPortfolioValue := func() (float64, error) {
-		acct, err := orderController.GetAccount()
-		if err != nil {
-			return 0, err
-		}
-		return acct.PortfolioValue, nil
-	}
-
-	placeMLegFn := services.PlaceMultiLegOrderFn(func(ctx context.Context, order services.MultiLegOrder) (string, error) {
-		if tradingService == nil {
-			return "", fmt.Errorf("trading service unavailable")
-		}
-		return tradingService.PlaceMultiLegOrder(ctx, order)
-	})
-
-	// HarvestCloser is the shared close-orchestration service used by both
-	// the HTTP /close endpoint (via HarvestController) and, when enabled,
-	// the HarvestExitMonitor goroutine. Wiring it once here keeps a single
-	// place-and-update path.
-	harvestCloser := services.NewHarvestCloser(storageService, placeMLegFn)
-
-	// Realized-vol service used to compute the IV–RV spread that gates
-	// Harvest condor entries. Wired into both HarvestController (legacy
-	// harvest/ivr route) and IVController (generic iv/:symbol route).
+	// Realized-vol service: computes the IV–RV spread for IVController
+	// (the generic /api/v1/iv/:symbol route consumed by Prophet).
 	realizedVolSvc := services.NewRealizedVolService(dataService)
 
-	harvestController := controllers.NewHarvestController(
-		harvestSvc,
-		harvestIVRSvc,
-		realizedVolSvc,
-		storageService,
-		placeMLegFn,
-		getPortfolioValue,
-		harvestCloser,
-	)
-
-	// Harvest exit monitor (default OFF; operator opts in via env flag).
-	// When enabled, Step 2 of TRADING_RULES_HARVEST.md (exit management) is
-	// handled by this Go goroutine instead of the LLM heartbeat. The LLM
-	// continues to own Step 3 (entries) — preflight relaxation in Task 6.
-	harvestMonitorEnabled := os.Getenv("HARVEST_EXIT_MONITOR_ENABLED") == "true"
-	harvestSvc.SetMonitorEnabled(harvestMonitorEnabled)
-	if harvestMonitorEnabled {
-		optionsDataService := services.NewAlpacaOptionsDataService(cfg.AlpacaAPIKey, cfg.AlpacaSecretKey)
-		harvestPricer := services.NewHarvestPricer(optionsDataService)
-		harvestMonitor := services.NewHarvestExitMonitor(storageService, harvestPricer, harvestCloser)
-		harvestMonitor.SetUpdater(storageService)
-		harvestMonitor.SetOrderTracker(tradingService)
-		nyLoc, _ := time.LoadLocation("America/New_York") // local var keeps the closure self-contained; services.nyLoc is the package-level equivalent
-		marketIsOpen := func() bool {
-			return services.StaticMarketPhase(time.Now().UTC(), nyLoc) == "open"
-		}
-		go harvestMonitor.Start(ctx, 1*time.Minute, 5*time.Minute, marketIsOpen)
-		logger.Info("Harvest exit monitor started (HARVEST_EXIT_MONITOR_ENABLED=true)")
-	} else {
-		logger.Info("Harvest exit monitor disabled (HARVEST_EXIT_MONITOR_ENABLED!=true)")
-	}
-
-	// Start daily IV collection goroutine for Harvest
-	go startHarvestIVCollection(ctx, harvestIVRSvc, tradingService, logger)
-
-	// Wire Harvest's short-put book into the cross-agent sector cap as an
-	// OptionsExposureProvider — each open condor on an index ETF contributes
-	// ShortPutStrike × Contracts × 100 × delta_proxy to the INDEX_BETA bucket.
-	// Until this is registered the INDEX_BETA bucket reads artificially low
-	// and the 25% cap can't fire when Harvest stacks on top of equity exposure.
-	tradeGuard.SetOptionsExposureProvider(harvestSvc)
-	logger.Debug("Harvest service initialized")
+	// Start the daily IV collection goroutine (feeds Prophet's IV-rank gate).
+	go startIVCollection(ctx, ivRankSvc, tradingService, logger)
 
 	// Initialize Trend signal service (used by TrendProphet for daily-bar signals)
 	trendSignalSvc := services.NewTrendSignalService(dataService)
@@ -499,14 +433,13 @@ func main() {
 	// Prophet options auto-stop monitor (default OFF; operator opts in).
 	// A deep catastrophic loss floor on Prophet's long single-leg options that
 	// the LLM heartbeat can't react to fast enough (esp. an overnight gap at the
-	// open). Scoped to v2-options long positions; never touches Harvest legs.
+	// open). Scoped to v2-options long positions.
 	if cfg.EnableProphetOptionsStop {
 		prophetBeatObserver := services.NewProphetBeatObserver()
 		beatCtxController.SetProphetBeatRecorder(prophetBeatObserver)
 		optDataSvc := services.NewAlpacaOptionsDataService(cfg.AlpacaAPIKey, cfg.AlpacaSecretKey)
 		stopMonitor := services.NewProphetOptionsStopMonitor(
 			tradingService, // ListOptionsPositions
-			storageService, // ListOpenHarvestCondors
 			optDataSvc,     // GetOptionSnapshot
 			tradingService, // PlaceOptionsOrder / ListOrders / GetOrder / CancelOrder
 			services.ProphetOptionsStopConfig{
@@ -530,9 +463,9 @@ func main() {
 		logger.Info("Prophet options stop monitor disabled (ENABLE_PROPHET_OPTIONS_STOP!=true)")
 	}
 
-	// Generic IV-rank controller (shared by Harvest and Prophet via /api/v1/iv/:symbol).
+	// Generic IV-rank controller (Prophet, via /api/v1/iv/:symbol).
 	// rvSvc enriches the response with realized_vol_20d + iv_minus_rv.
-	ivController := controllers.NewIVController(harvestIVRSvc, realizedVolSvc)
+	ivController := controllers.NewIVController(ivRankSvc, realizedVolSvc)
 	logger.Debug("IV controller initialized")
 
 	// Intraday signal service + controller (auto-pushed into Prophet beats,
@@ -556,7 +489,6 @@ func main() {
 		activityController,
 		economicFeedsController,
 		guardController,
-		harvestController,
 		trendController,
 		meanRevController,
 		driftController,
@@ -625,7 +557,6 @@ func setupRouter(
 	activityController *controllers.ActivityController,
 	economicFeedsController *controllers.EconomicFeedsController,
 	guardController *controllers.GuardController,
-	harvestController *controllers.HarvestController,
 	trendController *controllers.TrendController,
 	meanRevController *controllers.MeanRevController,
 	driftController *controllers.DriftController,
@@ -738,19 +669,6 @@ func setupRouter(
 		// status; agents consume tier/sizing_multiplier/block_new_entries.
 		api.GET("/regime-gate/status", regimeGateController.HandleGetStatus)
 
-		// Harvest premium seller endpoints
-		harvest := api.Group("/harvest")
-		{
-			harvest.GET("/state", harvestController.HandleGetState)
-			harvest.GET("/fomc", harvestController.HandleGetFOMC)
-			harvest.GET("/expirations/:symbol", harvestController.HandleGetExpirations)
-			harvest.GET("/ivr/:symbol", harvestController.HandleGetIVR)
-			harvest.GET("/condors", harvestController.HandleListCondors)
-			harvest.POST("/condors", harvestController.HandleOpenCondor)
-			harvest.POST("/condors/:id/close", harvestController.HandleCloseCondor)
-			harvest.POST("/iv", harvestController.HandleRecordIV)
-		}
-
 		trend := api.Group("/trend")
 		{
 			trend.GET("/signal/:symbol", trendController.HandleGetSignal)
@@ -821,16 +739,16 @@ func startDataCleanup(ctx context.Context, storage interfaces.StorageService, re
 	}
 }
 
-// startHarvestIVCollection records ATM IV for Harvest + Prophet underlyings
-// every 6h. Despite the name, the universe now spans both strategies: SPY/QQQ
-// are shared, IWM/GLD/TLT are Harvest-specific, and NVDA/AMD/TSLA/MSTR are
-// Prophet-specific. The function name is unchanged to keep this diff small;
-// the IV data is consumed by both HarvestIVRService.GetIVRData (for Harvest's
-// IVR ≥ 30 entry filter) and StockAnalysisService (for Prophet's IV-rank gate).
-func startHarvestIVCollection(ctx context.Context, ivrSvc *services.HarvestIVRService, tradingService *services.AlpacaTradingService, logger *logrus.Logger) {
+// startIVCollection records ATM IV for Prophet's IV-rank gate every 6h. The
+// universe is SPY/QQQ (shared index underlyings) plus Prophet's mega-cap
+// watchlist (NVDA/AMD/TSLA/MSTR). The IV data is consumed by
+// IVRankService.GetIVRData and StockAnalysisService (Prophet's IV-rank gate).
+// The table name (harvest_iv_snapshots) is retained for historical-data
+// continuity.
+func startIVCollection(ctx context.Context, ivrSvc *services.IVRankService, tradingService *services.AlpacaTradingService, logger *logrus.Logger) {
 	ivUniverse := []string{
-		"SPY", "QQQ", "IWM", "GLD", "TLT", // Harvest condor underlyings
-		"NVDA", "AMD", "TSLA", "MSTR", // Prophet-specific watchlist
+		"SPY", "QQQ", // shared index underlyings
+		"NVDA", "AMD", "TSLA", "MSTR", // Prophet mega-cap watchlist
 	}
 	ticker := time.NewTicker(6 * time.Hour)
 	defer ticker.Stop()
@@ -842,7 +760,7 @@ func startHarvestIVCollection(ctx context.Context, ivrSvc *services.HarvestIVRSe
 			}
 			chain, err := tradingService.GetOptionsChain(ctx, symbol, time.Now().AddDate(0, 0, 30))
 			if err != nil {
-				logger.WithError(err).Warnf("harvest IV collection: failed to get chain for %s", symbol)
+				logger.WithError(err).Warnf("IV collection: failed to get chain for %s", symbol)
 				continue
 			}
 			atmIV := calcATMIV(chain)
@@ -850,7 +768,7 @@ func startHarvestIVCollection(ctx context.Context, ivrSvc *services.HarvestIVRSe
 				continue
 			}
 			if err := ivrSvc.RecordDailyIV(symbol, atmIV); err != nil {
-				logger.WithError(err).Warnf("harvest IV collection: failed to record IV for %s", symbol)
+				logger.WithError(err).Warnf("IV collection: failed to record IV for %s", symbol)
 			}
 		}
 	}

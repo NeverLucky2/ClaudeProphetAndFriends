@@ -26,7 +26,6 @@ export const ALL_TOOLS = [
   'apply_heartbeat_profile',
   'assign_agent_to_sandbox',
   'cancel_order',
-  'close_iron_condor',
   'close_managed_position',
   'create_agent',
   'create_strategy',
@@ -43,11 +42,7 @@ export const ALL_TOOLS = [
   'get_economic_indicators',
   'get_global_events',
   'get_global_trade_flows',
-  'get_guard_status',
-  'get_harvest_expirations',
-  'get_harvest_fomc',
-  'get_harvest_ivr',
-  'get_harvest_state',
+  'get_guard_status',
   'get_heartbeat_phases',
   'get_heartbeat_profiles',
   'get_historical_bars',
@@ -84,7 +79,6 @@ export const ALL_TOOLS = [
   'list_news_summaries',
   'log_activity',
   'log_decision',
-  'open_iron_condor',
   'openprophet',
   'place_buy_order',
   'place_managed_position',
@@ -142,7 +136,6 @@ const MANAGED = [
 // Strategy-signal/order endpoints exclusive to a single agent. Each set must
 // appear on exactly one strategy's allowlist (enforced by tests) and is removed
 // from the discretionary Prophet list below.
-const HARVEST_TOOLS = ['get_harvest_state', 'get_harvest_ivr', 'get_harvest_fomc', 'get_harvest_expirations', 'open_iron_condor', 'close_iron_condor'];
 const TREND_SIGNALS = ['get_trend_signal'];
 const MEANREV_SIGNALS = ['get_mean_reversion_candidates', 'get_mean_reversion_signal'];
 const DRIFT_SIGNALS = ['get_earnings_drift_candidates', 'get_earnings_drift_signal'];
@@ -204,7 +197,6 @@ function uniq(list) {
 // tools, and the PROPHET_TRIM cost redundancies. Computed (not enumerated) so any
 // new generic server tool added to ALL_TOOLS still flows to Prophet automatically.
 const NON_PROPHET = new Set([
-  ...HARVEST_TOOLS,
   ...TREND_SIGNALS,
   ...MEANREV_SIGNALS,
   ...DRIFT_SIGNALS,
@@ -215,13 +207,6 @@ const NON_PROPHET = new Set([
 export const STRATEGY_TOOL_ALLOWLISTS = {
   'mean-rev-rsi2': uniq([...BASE, ...MEANREV_SIGNALS, ...MANAGED]),
   'earnings-drift': uniq([...BASE, ...DRIFT_SIGNALS, ...MANAGED]),
-  'harvest': uniq([
-    ...BASE,
-    ...HARVEST_TOOLS,
-    'get_options_chain',
-    'get_options_positions',
-    'get_options_position',
-  ]),
   // analyze_stocks: trend reads its cross_asset block (5-day DXY/rate/credit
   // proxies) to confirm or pause a Donchian breakout (TRADING_RULES_TREND.md
   // "Cross-Asset Context"). Without it the agent silently loses macro confluence.
@@ -242,7 +227,6 @@ export function resolveAllowedTools(sandboxAllow, strategyId) {
 export const _internals = {
   BASE,
   MANAGED,
-  HARVEST_TOOLS,
   TREND_SIGNALS,
   MEANREV_SIGNALS,
   DRIFT_SIGNALS,
