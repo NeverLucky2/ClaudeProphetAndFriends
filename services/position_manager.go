@@ -144,6 +144,17 @@ type PositionManager struct {
 	// Default 300s (env MANAGED_PENDING_TIMEOUT_SEC).
 	pendingTimeout time.Duration
 
+	// cancelSettlePoll and cancelSettleMax bound waitForBracketReleased. After
+	// cancelling a position's protective bracket to free the shares it reserved,
+	// the close path polls the cancelled orders up to cancelSettleMax times,
+	// sleeping cancelSettlePoll between polls, until the broker reports them
+	// terminal. Alpaca processes cancels asynchronously (pending_cancel →
+	// canceled) and does not release the reserved shares until the order is
+	// actually canceled, so liquidating before this settles races the cancel.
+	// Defaults ~200ms × 15 ≈ 3s. Tests set cancelSettlePoll to 0.
+	cancelSettlePoll time.Duration
+	cancelSettleMax  int
+
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -169,6 +180,8 @@ func NewPositionManager(
 		reconcileMissCount: make(map[string]int),
 		orphanAlerted:      make(map[string]bool),
 		pendingTimeout:     pendingEntryTimeout(),
+		cancelSettlePoll:   200 * time.Millisecond,
+		cancelSettleMax:    15,
 		logger:             logger,
 		ctx:                ctx,
 		cancel:             cancel,
@@ -1144,39 +1157,43 @@ func (pm *PositionManager) CloseManagedPosition(ctx context.Context, positionID 
 
 	switch position.Status {
 	case "ACTIVE", "PARTIAL":
-		// Exit FIRST, before touching the protective bracket, so a transient
-		// failure (429/outage) leaves the position ACTIVE and still protected.
+		// Liquidate via the broker's atomic close-position endpoint, and try it
+		// FIRST, before touching the protective bracket, so a transient failure
+		// (429/outage) leaves the position ACTIVE and still protected.
 		//
-		// The one exception is the resting protective stop itself: it is a sell
-		// order for the full quantity, so the broker reserves those shares
-		// (Alpaca held_for_orders) and a full-quantity exit is rejected for
-		// "insufficient qty available" — the exit can NEVER be placed while the
-		// stop rests. When (and only when) we see that specific rejection, cancel
-		// the bracket to free the shares and retry the exit once. If the retry
-		// still fails the stop is now gone, so re-place it to restore protection
-		// before bailing. This was the regression that stranded Coil's WMT on
-		// 2026-06-01 (the stop reserved all 42 shares, so the time-stop exit
-		// could never be placed).
+		// The one exception is the resting protective bracket itself: its sell
+		// orders reserve the full quantity (Alpaca held_for_orders), so a
+		// full-quantity liquidation is rejected for "insufficient qty available"
+		// while the bracket rests. When (and only when) we see that specific
+		// rejection, cancel the bracket to free the shares, WAIT for the cancel
+		// to actually settle at the broker, then liquidate again. The wait is
+		// essential: Alpaca processes cancels asynchronously (pending_cancel →
+		// canceled) and does not release the reserved shares until the order is
+		// canceled, so an immediate retry races the cancel and hits the same
+		// rejection — the 2026-06-03 race that left Coil's LIN and MO
+		// ACTIVE-but-unprotected. If the retry still fails the stop is now gone,
+		// so re-place it to restore protection before bailing (NEVER CLOSED).
 		if position.RemainingQty > 0 {
-			if err := pm.placeAndSaveExit(ctx, position); err != nil {
+			if err := pm.closeAndSavePosition(ctx, position); err != nil {
 				if !isInsufficientQtyErr(err) {
 					pm.logger.WithError(err).WithFields(logrus.Fields{
 						"position_id":              position.ID,
 						"symbol":                   position.Symbol,
 						"operator_review_required": true,
-					}).Error("Close failed: exit order placement failed — position left open and protected (NOT marked CLOSED)")
-					return fmt.Errorf("close %s: exit order placement failed, position remains open: %w", position.Symbol, err)
+					}).Error("Close failed: liquidation failed — position left open and protected (NOT marked CLOSED)")
+					return fmt.Errorf("close %s: liquidation failed, position remains open: %w", position.Symbol, err)
 				}
 
-				// Shares are reserved by the resting protective bracket. Free them
-				// and retry the exit once.
+				// Shares are reserved by the resting protective bracket. Free
+				// them, wait for the cancel to settle, then retry the liquidation.
 				pm.logger.WithFields(logrus.Fields{
 					"position_id": position.ID,
 					"symbol":      position.Symbol,
-				}).Warn("Exit rejected for insufficient available qty — cancelling protective bracket to free reserved shares, retrying exit")
+				}).Warn("Liquidation rejected for insufficient available qty — cancelling protective bracket, waiting for the cancel to settle, retrying")
 				pm.cancelBracketOrders(ctx, position)
+				pm.waitForBracketReleased(ctx, position)
 
-				if retryErr := pm.placeAndSaveExit(ctx, position); retryErr != nil {
+				if retryErr := pm.closeAndSavePosition(ctx, position); retryErr != nil {
 					// Retry still failed and the bracket is now cancelled, so the
 					// position is unprotected. Re-place the stop to restore
 					// protection; leave ACTIVE and return the error (NEVER CLOSED).
@@ -1184,7 +1201,7 @@ func (pm *PositionManager) CloseManagedPosition(ctx context.Context, positionID 
 						"position_id":              position.ID,
 						"symbol":                   position.Symbol,
 						"operator_review_required": true,
-					}).Error("Close failed: exit retry failed after freeing reserved shares — re-placing stop to restore protection")
+					}).Error("Close failed: liquidation retry failed after freeing reserved shares — re-placing stop to restore protection")
 					if reErr := pm.placeStopLossOrder(ctx, position); reErr != nil {
 						pm.logger.WithError(reErr).WithFields(logrus.Fields{
 							"position_id":              position.ID,
@@ -1192,12 +1209,12 @@ func (pm *PositionManager) CloseManagedPosition(ctx context.Context, positionID 
 							"operator_review_required": true,
 						}).Error("Failed to re-place stop after a failed close — position is UNPROTECTED, manual intervention required")
 					}
-					return fmt.Errorf("close %s: exit rejected for reserved shares and retry failed, position remains open: %w", position.Symbol, retryErr)
+					return fmt.Errorf("close %s: liquidation rejected for reserved shares and retry failed, position remains open: %w", position.Symbol, retryErr)
 				}
 				// Retry succeeded; bracket already cancelled — fall through to CLOSED.
 			} else {
-				// Exit accepted on the first try — tear down the now-redundant
-				// protective/partial orders.
+				// Liquidation accepted on the first try — tear down the
+				// now-redundant protective/partial orders.
 				pm.cancelBracketOrders(ctx, position)
 			}
 		}
@@ -1268,44 +1285,105 @@ func (pm *PositionManager) cancelBracketOrders(ctx context.Context, position *Ma
 	}
 }
 
-// placeAndSaveExit places a market order that flattens the position's remaining
-// quantity and best-effort persists the resulting DBOrder for attribution. It
-// returns the broker error verbatim so callers can classify it (see
-// isInsufficientQtyErr) and does NOT mutate position status.
-func (pm *PositionManager) placeAndSaveExit(ctx context.Context, position *ManagedPosition) error {
-	exitSide := "sell"
-	if position.Side == "sell" {
-		exitSide = "buy"
-	}
-	exitOrder := &interfaces.Order{
-		Symbol:      position.Symbol,
-		Qty:         position.RemainingQty,
-		Side:        exitSide,
-		Type:        "market",
-		TimeInForce: "day",
-		Status:      "pending",
-		SubmittedAt: time.Now(),
-		// Tag with the owning agent's strategy so the resulting DBOrder is
-		// attributable (matches placeEntryOrder / flattenUnprotected).
-		Strategy: position.AgentStrategy,
-	}
-	result, err := pm.tradingService.PlaceOrder(ctx, exitOrder)
+// closeAndSavePosition liquidates the position's remaining quantity via the
+// broker's atomic close-position endpoint and best-effort persists the
+// resulting DBOrder for attribution. It returns the broker error verbatim so
+// callers can classify it (see isInsufficientQtyErr) and does NOT mutate
+// position status.
+func (pm *PositionManager) closeAndSavePosition(ctx context.Context, position *ManagedPosition) error {
+	result, err := pm.tradingService.ClosePosition(ctx, position.Symbol, position.RemainingQty)
 	if err != nil {
 		return err
 	}
-	exitOrder.ID = result.OrderID
-	exitOrder.Status = result.Status
 	if pm.storageService != nil {
-		if saveErr := pm.storageService.SaveOrder(exitOrder); saveErr != nil {
-			pm.logger.WithError(saveErr).WithField("order_id", result.OrderID).Warn("Failed to save exit order to database")
+		exitSide := "sell"
+		if position.Side == "sell" {
+			exitSide = "buy"
+		}
+		closeOrder := &interfaces.Order{
+			ID:          result.OrderID,
+			Symbol:      position.Symbol,
+			Qty:         position.RemainingQty,
+			Side:        exitSide,
+			Type:        "market",
+			Status:      result.Status,
+			SubmittedAt: time.Now(),
+			// Tag with the owning agent's strategy so the resulting DBOrder is
+			// attributable (matches placeEntryOrder / flattenUnprotected).
+			Strategy: position.AgentStrategy,
+		}
+		if saveErr := pm.storageService.SaveOrder(closeOrder); saveErr != nil {
+			pm.logger.WithError(saveErr).WithField("order_id", result.OrderID).Warn("Failed to save close order to database")
 		}
 	}
 	pm.logger.WithFields(logrus.Fields{
 		"position_id": position.ID,
 		"order_id":    result.OrderID,
 		"quantity":    position.RemainingQty,
-	}).Info("Placed market exit order")
+	}).Info("Liquidated position via broker close-position endpoint")
 	return nil
+}
+
+// waitForBracketReleased blocks until every cancelled bracket leg reaches a
+// terminal broker state — the point at which the broker releases the shares
+// those resting sell orders reserved — or a bounded poll budget is exhausted.
+// Alpaca processes cancels asynchronously (pending_cancel → canceled) and does
+// not free the reserved shares until the order is actually canceled, so a
+// liquidation fired immediately after cancelBracketOrders races the cancel and
+// hits the same "insufficient qty" rejection (the 2026-06-03 Coil LIN/MO close
+// failure). Best-effort: a poll error or an exhausted budget just falls through
+// — the caller's retry surfaces any block that remains.
+func (pm *PositionManager) waitForBracketReleased(ctx context.Context, position *ManagedPosition) {
+	ids := make([]string, 0, 2+len(position.PartialExitOrders))
+	if position.StopLossOrderID != "" {
+		ids = append(ids, position.StopLossOrderID)
+	}
+	if position.TakeProfitOrderID != "" {
+		ids = append(ids, position.TakeProfitOrderID)
+	}
+	ids = append(ids, position.PartialExitOrders...)
+	if len(ids) == 0 {
+		return
+	}
+
+	for i := 0; i < pm.cancelSettleMax; i++ {
+		if pm.bracketReleased(ctx, ids) {
+			return
+		}
+		if pm.cancelSettlePoll > 0 {
+			time.Sleep(pm.cancelSettlePoll)
+		}
+	}
+	pm.logger.WithFields(logrus.Fields{
+		"position_id": position.ID,
+		"symbol":      position.Symbol,
+	}).Warn("Protective bracket cancel did not settle within the wait budget — retrying liquidation anyway")
+}
+
+// bracketReleased reports whether every given order is in a terminal broker
+// state (its reserved shares released). A read error or a still-pending order
+// (e.g. pending_cancel) means not-yet-released.
+func (pm *PositionManager) bracketReleased(ctx context.Context, ids []string) bool {
+	for _, id := range ids {
+		ord, err := pm.tradingService.GetOrder(ctx, id)
+		if err != nil || ord == nil || !isTerminalBrokerOrderStatus(ord.Status) {
+			return false
+		}
+	}
+	return true
+}
+
+// isTerminalBrokerOrderStatus reports whether an Alpaca order status is terminal
+// — the order will not transition further and any shares it reserved have been
+// released. Notably pending_cancel / pending_replace are NOT terminal: the
+// shares stay reserved until the order actually reaches canceled.
+func isTerminalBrokerOrderStatus(status string) bool {
+	switch strings.ToLower(status) {
+	case "canceled", "cancelled", "filled", "expired", "rejected", "replaced", "done_for_day":
+		return true
+	default:
+		return false
+	}
 }
 
 // isInsufficientQtyErr reports whether a broker PlaceOrder error indicates the

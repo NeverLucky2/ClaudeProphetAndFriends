@@ -244,6 +244,31 @@ func (s *AlpacaTradingService) CancelOrder(ctx context.Context, orderID string) 
 	return nil
 }
 
+// ClosePosition liquidates qty shares of the symbol at market via Alpaca's
+// DELETE /v2/positions/{symbol}?qty=N endpoint. The broker assembles and
+// submits the closing order server-side and returns it. Unlike a self-built
+// market sell, this is the canonical "flatten this position" primitive.
+func (s *AlpacaTradingService) ClosePosition(ctx context.Context, symbol string, qty float64) (*interfaces.OrderResult, error) {
+	s.logger.WithFields(logrus.Fields{
+		"symbol": symbol,
+		"qty":    qty,
+	}).Info("Closing position via broker close-position endpoint")
+
+	order, err := s.client.ClosePosition(symbol, alpaca.ClosePositionRequest{
+		Qty: decimal.NewFromFloat(qty),
+	})
+	if err != nil {
+		s.logger.WithError(err).WithField("symbol", symbol).Error("Failed to close position")
+		return nil, fmt.Errorf("failed to close position %s: %w", symbol, err)
+	}
+
+	return &interfaces.OrderResult{
+		OrderID: order.ID,
+		Status:  string(order.Status),
+		Message: fmt.Sprintf("Close order placed: %v shares of %s", qty, symbol),
+	}, nil
+}
+
 // GetOrder retrieves a specific order
 func (s *AlpacaTradingService) GetOrder(ctx context.Context, orderID string) (*interfaces.Order, error) {
 	alpacaOrder, err := s.client.GetOrder(orderID)

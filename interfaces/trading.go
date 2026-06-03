@@ -32,6 +32,12 @@ type TradingService interface {
 	GetPositions(ctx context.Context) ([]*Position, error)
 	GetAccount(ctx context.Context) (*Account, error)
 
+	// ClosePosition liquidates qty shares of the symbol at market via the
+	// broker's atomic close-position endpoint (Alpaca DELETE
+	// /v2/positions/{symbol}?qty=N). Used by the managed-close path so the
+	// liquidation does not have to be assembled as a separate market order.
+	ClosePosition(ctx context.Context, symbol string, qty float64) (*OrderResult, error)
+
 	// Options trading methods
 	PlaceOptionsOrder(ctx context.Context, order *OptionsOrder) (*OrderResult, error)
 	GetOptionsChain(ctx context.Context, underlying string, expiration time.Time) ([]*OptionContract, error)

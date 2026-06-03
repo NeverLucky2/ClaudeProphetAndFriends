@@ -51,6 +51,9 @@ func (r *recordingTradingService) ListOrders(_ context.Context, _ string) ([]*in
 func (r *recordingTradingService) GetPositions(_ context.Context) ([]*interfaces.Position, error) {
 	return nil, nil
 }
+func (r *recordingTradingService) ClosePosition(_ context.Context, _ string, _ float64) (*interfaces.OrderResult, error) {
+	return &interfaces.OrderResult{}, nil
+}
 func (r *recordingTradingService) GetAccount(_ context.Context) (*interfaces.Account, error) {
 	return &interfaces.Account{PortfolioValue: r.portfolio, Cash: r.cash, LastEquity: r.portfolio}, nil
 }

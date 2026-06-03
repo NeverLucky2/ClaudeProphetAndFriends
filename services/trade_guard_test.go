@@ -56,6 +56,9 @@ func (s *stubTrading) ListOrders(_ context.Context, _ string) ([]*interfaces.Ord
 func (s *stubTrading) GetPositions(_ context.Context) ([]*interfaces.Position, error) {
 	return nil, nil
 }
+func (s *stubTrading) ClosePosition(_ context.Context, _ string, _ float64) (*interfaces.OrderResult, error) {
+	return &interfaces.OrderResult{}, nil
+}
 func (s *stubTrading) PlaceOptionsOrder(_ context.Context, _ *interfaces.OptionsOrder) (*interfaces.OrderResult, error) {
 	return nil, nil
 }
