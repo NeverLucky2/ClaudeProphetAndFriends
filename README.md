@@ -72,6 +72,24 @@ The agent controls its own heartbeat interval via the `set_heartbeat` MCP tool �
 
 ---
 
+## The Fleet
+
+OpenProphet runs as a fleet of independent agents — that's the "& Friends." Each agent has its own sandbox, account, and strategy, but they share the same harness, MCP tools, and Go backend. They trade different instruments on deliberately uncorrelated edges, so the book as a whole is sturdier than any single agent. Prophet is the discretionary flagship; the rest are mechanical rule-executors, and two of them run entirely inside the Go backend.
+
+| Agent (`id`) | Strategy (rules file) | Instruments | Edge / role |
+|------|------------------------|-------------|-------------|
+| **Prophet** (`default`) | Aggressive Options v2 (`TRADING_RULES_V2.md`) | Options | Discretionary, long-biased options scalping. The flagship LLM agent and lead lab for new ideas. |
+| **Coil** (`mean-rev`) | Mean Reversion — Connors RSI(2) (`TRADING_RULES_MEANREV.md`) | S&P 500 stocks | Mechanical: buys 2-day RSI extremes on names trading above their 200-day SMA. Short-hold counter-correlation sleeve. |
+| **Turtle** (`trend-prophet`) | Multi-Asset Trend Following (`TRADING_RULES_TREND.md`) | Multi-asset ETFs | Mechanical Donchian breakout / trailing-exit across rates, metals, energy, FX, and EM. Crisis-alpha ballast. |
+| **Drift** (`drift`) | Earnings Drift — PEAD (`TRADING_RULES_DRIFT.md`) | $2B+ large-cap stocks | Mechanical post-earnings drift: enters strong beats (gap ≥ 3%, A/B grade) trending above the 50/200-day MAs, multi-week holds. |
+| **DefensiveProphet** (`defensive-prophet`) | Defensive QQQ Put-Spread Hedge (`TRADING_RULES_DEFENSIVE_PROPHET.md`) | QQQ options | Flag-gated, defined-risk put-debit-spread hedge. Uncorrelated tail ballast, graded on drawdown contribution rather than standalone P&L. |
+
+**Execution models differ.** Prophet, Coil, and Drift run as LLM agents on the heartbeat loop. **Turtle** and **DefensiveProphet** are executed entirely by deterministic schedulers in the Go backend (`TURTLE_SCHEDULER_ENABLED=true` and `ENABLE_PROPHET_DEFENSIVE=true`, respectively). When those flags are on, the matching LLM agent's preflight skips every beat, and the rules file becomes the auditable spec of what the scheduler does. DefensiveProphet is OFF by default.
+
+Switch the active agent from the dashboard **Agents** tab or via `POST /api/agents/:id/activate`. Each agent points at a strategy via `strategyId`, and each strategy maps to a `rulesFile` that is injected into the agent's prompt — see [Configuration](#configuration).
+
+---
+
 ## Architecture
 
 ```
@@ -821,8 +839,20 @@ All runtime config is stored in `data/agent-config.json`. The dashboard provides
   },
 
   "accounts": [{ "id": "...", "name": "Paper", "publicKey": "...", "secretKey": "...", "paper": true }],
-  "agents": [{ "id": "default", "name": "Prophet", "strategyId": "v2-options", "model": "..." }],
-  "strategies": [{ "id": "v2-options", "name": "Aggressive Options v2", "rulesFile": "TRADING_RULES_V2.md" }],
+  "agents": [
+    { "id": "default", "name": "Prophet", "strategyId": "v2-options", "model": "..." },
+    { "id": "mean-rev", "name": "Coil", "strategyId": "mean-rev-rsi2", "model": "..." },
+    { "id": "trend-prophet", "name": "Turtle", "strategyId": "trend", "model": "..." },
+    { "id": "drift", "name": "Drift", "strategyId": "earnings-drift", "model": "..." },
+    { "id": "defensive-prophet", "name": "DefensiveProphet", "strategyId": "prophet-defensive", "model": "..." }
+  ],
+  "strategies": [
+    { "id": "v2-options", "name": "Aggressive Options v2", "rulesFile": "TRADING_RULES_V2.md" },
+    { "id": "mean-rev-rsi2", "name": "Mean Reversion (Connors RSI(2))", "rulesFile": "TRADING_RULES_MEANREV.md" },
+    { "id": "trend", "name": "Multi-Asset Trend Following", "rulesFile": "TRADING_RULES_TREND.md" },
+    { "id": "earnings-drift", "name": "Earnings Drift (PEAD)", "rulesFile": "TRADING_RULES_DRIFT.md" },
+    { "id": "prophet-defensive", "name": "Defensive Prophet — Triggered QQQ Put-Spread Hedge", "rulesFile": "TRADING_RULES_DEFENSIVE_PROPHET.md" }
+  ],
 
   "plugins": {
     "slack": {
