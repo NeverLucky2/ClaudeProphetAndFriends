@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -495,5 +496,31 @@ func TestGetSignalForTicker_AppliesEarningsFilter(t *testing.T) {
 	}
 	if got.EntrySignal {
 		t.Errorf("EntrySignal should be false when earnings filter fires")
+	}
+}
+
+func TestGetSignalForTicker_SetsEnterExplanation(t *testing.T) {
+	bars := map[string][]*interfaces.Bar{
+		"AAA": makeMeanRevBars(pullbackCloses()),
+	}
+	sig := NewMeanRevSignalService(&stubBarFetcher{bars: bars})
+	svc := NewMeanRevCandidatesService(sig, nil, []string{"AAA"}, "normal")
+	svc.SetRefreshInterval(-1)
+
+	got, err := svc.GetSignalForTicker(context.Background(), "AAA")
+	if err != nil {
+		t.Fatalf("GetSignalForTicker: %v", err)
+	}
+	if !got.EntrySignal {
+		t.Fatalf("precondition: AAA should be an entry signal with pullbackCloses()")
+	}
+	if got.Explanation == "" {
+		t.Fatal("Explanation should be populated")
+	}
+	if !strings.HasPrefix(got.Explanation, "Coil AAA ") {
+		t.Errorf("Explanation = %q, want prefix \"Coil AAA \"", got.Explanation)
+	}
+	if !strings.Contains(got.Explanation, "ENTER") {
+		t.Errorf("Explanation = %q, want ENTER for a qualifying signal", got.Explanation)
 	}
 }

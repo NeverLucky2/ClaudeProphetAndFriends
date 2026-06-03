@@ -1983,3 +1983,36 @@ func TestRunEntries_InsufficientCorrelationHistoryAllowsEntry(t *testing.T) {
 		t.Errorf("DBC must enter — open EEM history too short to assess correlation")
 	}
 }
+
+func TestRunEntries_PopulatesReasoningForEntry(t *testing.T) {
+	sigs, bars, trader, seg, regime, guard := fullStubs()
+	universeIneligibleExcept(sigs, bars, "TLT")
+	sigs.signals["TLT"] = goodEntrySignal("TLT")
+	bars.bars["TLT"] = &interfaces.Bar{Open: 99, Close: 100}
+	exe, _ := newTestExecutor(t, sigs, bars, trader, seg, regime, guard)
+
+	res, err := exe.RunHeartbeat(context.Background(), at1700(t, "2026-05-15"))
+	if err != nil {
+		t.Fatalf("RunHeartbeat: %v", err)
+	}
+
+	var tlt *TickerRationale
+	for i := range res.Reasoning {
+		if res.Reasoning[i].Ticker == "TLT" {
+			tlt = &res.Reasoning[i]
+			break
+		}
+	}
+	if tlt == nil {
+		t.Fatalf("expected a TLT rationale, got %d entries", len(res.Reasoning))
+	}
+	if !tlt.SetupQualified {
+		t.Error("TLT SetupQualified = false, want true")
+	}
+	if !tlt.Taken {
+		t.Error("TLT Taken = false, want true")
+	}
+	if !strings.Contains(tlt.Line, "ENTER") {
+		t.Errorf("TLT Line = %q, want it to contain ENTER", tlt.Line)
+	}
+}

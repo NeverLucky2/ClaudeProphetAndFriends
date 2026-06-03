@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"prophet-trader/interfaces"
@@ -64,6 +65,18 @@ type turtleGuard interface {
 	CheckBuy(ctx context.Context, agent AgentSource, symbol string, allocationDollars float64) error
 }
 
+// TickerRationale is the per-ticker teaching line for the daily reasoning
+// digest. SetupQualified is the signal-level verdict (evaluateEntry); Taken is
+// whether an order was actually placed; BlockedBy names the portfolio gate that
+// declined a qualified setup (empty when taken or when the setup didn't qualify).
+type TickerRationale struct {
+	Ticker         string `json:"ticker"`
+	Line           string `json:"line"`
+	SetupQualified bool   `json:"setup_qualified"`
+	Taken          bool   `json:"taken"`
+	BlockedBy      string `json:"blocked_by,omitempty"`
+}
+
 // HeartbeatResult is the per-beat outcome returned by RunHeartbeat. Cached
 // by the scheduler and exposed via /api/v1/turtle/status.
 type HeartbeatResult struct {
@@ -75,6 +88,7 @@ type HeartbeatResult struct {
 	Skips          []string       `json:"skips,omitempty"`
 	Errors         []string       `json:"errors,omitempty"`
 	MissedEntries  []MissedEntry  `json:"missed_entries,omitempty"`
+	Reasoning      []TickerRationale `json:"reasoning,omitempty"`
 	CircuitBreaker bool           `json:"circuit_breaker"`
 	SkipEntries    bool           `json:"skip_entries"`
 	// Skipped is the top-level early-return skip reason from preloopCheck
@@ -468,6 +482,14 @@ func (e *TurtleExecutor) runEntries(ctx context.Context, openRows []*models.DBTr
 	// they're placed so a later candidate is checked against earlier ones.
 	openReturns := e.openPositionReturns(ctx, openRows)
 
+	type evaluatedTicker struct {
+		ticker   string
+		sig      *TrendSignal
+		qual     bool
+		evReason string
+	}
+	var evaluated []evaluatedTicker
+
 	for _, inst := range models.TrendUniverse {
 		ticker := inst.Ticker
 		if _, ok := held[ticker]; ok {
@@ -492,6 +514,7 @@ func (e *TurtleExecutor) runEntries(ctx context.Context, openRows []*models.DBTr
 			continue
 		}
 		ev := evaluateEntry(sig, coldStart)
+		evaluated = append(evaluated, evaluatedTicker{ticker: ticker, sig: sig, qual: ev.Eligible, evReason: ev.Reason})
 		if !ev.Eligible {
 			res.Skips = append(res.Skips, fmt.Sprintf("%s: %s", ticker, ev.Reason))
 			continue
@@ -581,6 +604,40 @@ func (e *TurtleExecutor) runEntries(ctx context.Context, openRows []*models.DBTr
 		workingOpen = append(workingOpen, entry)
 		openReturns[ticker] = candReturns
 	}
+
+	// Build the per-ticker teaching lines from the evaluated set + final outcomes.
+	taken := make(map[string]bool, len(res.Entries))
+	for _, tk := range res.Entries {
+		taken[tk] = true
+	}
+	for _, et := range evaluated {
+		wasTaken := taken[et.ticker]
+		blockedBy := ""
+		blockReason := et.evReason
+		if et.qual && !wasTaken {
+			blockedBy = skipReasonFor(et.ticker, res.Skips)
+			blockReason = blockedBy
+		}
+		res.Reasoning = append(res.Reasoning, TickerRationale{
+			Ticker:         et.ticker,
+			Line:           ExplainTrendEntry(*et.sig, wasTaken, blockReason),
+			SetupQualified: et.qual,
+			Taken:          wasTaken,
+			BlockedBy:      blockedBy,
+		})
+	}
+}
+
+// skipReasonFor extracts the reason text for `ticker` from res.Skips entries,
+// which are formatted "TICKER: reason". Returns "" if no matching skip.
+func skipReasonFor(ticker string, skips []string) string {
+	prefix := ticker + ": "
+	for _, s := range skips {
+		if strings.HasPrefix(s, prefix) {
+			return strings.TrimPrefix(s, prefix)
+		}
+	}
+	return ""
 }
 
 // EntryEval is the result of the per-ticker eligibility check before placing

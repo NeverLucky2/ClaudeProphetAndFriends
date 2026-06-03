@@ -1204,6 +1204,7 @@
           <button class="recon-dismiss" id="trades-recon-dismiss" title="Dismiss">&times;</button>
         </div>
         <div class="trades-recon-items" id="trades-recon-items"></div>
+        <div id="reasoning-digest"></div>
         <div id="trades-feed"><div class="no-data">No trades yet. Start the agent to see live activity.</div></div>
       </div>
     </div>
@@ -3151,6 +3152,7 @@ async function seedTodayTrades() {
     console.warn('seedTodayTrades failed:', err);
   }
   loadReconciliationBanner();
+  loadReasoningDigest();
 }
 
 async function loadReconciliationBanner() {
@@ -3180,6 +3182,36 @@ async function loadReconciliationBanner() {
     };
   } catch (err) {
     console.warn('loadReconciliationBanner failed:', err);
+  }
+}
+
+async function loadReasoningDigest() {
+  const host = document.getElementById('reasoning-digest');
+  if (!host) return;
+  try {
+    const date = _todayEt();
+    const rdRes = await fetch('/api/reasoning-digest?date=' + encodeURIComponent(date));
+    if (!rdRes.ok) return;
+    const rd = await rdRes.json();
+    const reports = (rd.items || []).filter((r) => (r.agents || []).some((a) =>
+      a.entered.length + a.declined.length + a.passed.length > 0));
+    if (!reports.length) {
+      host.innerHTML = '';
+    } else {
+      const parts = [`<details class="reasoning-digest"><summary>Reasoning digest — ${rd.date}</summary>`];
+      for (const r of reports) {
+        for (const a of r.agents) {
+          const rows = [...a.entered, ...a.declined, ...a.passed];
+          if (!rows.length) continue;
+          parts.push(`<div class="rd-agent"><strong>${a.agentName}</strong><ul>` +
+            rows.map((i) => `<li>${i.line.replace(/</g, '&lt;')}</li>`).join('') + '</ul></div>');
+        }
+      }
+      parts.push('</details>');
+      host.innerHTML = parts.join('');
+    }
+  } catch (err) {
+    // silent — dashboard never breaks on the digest
   }
 }
 

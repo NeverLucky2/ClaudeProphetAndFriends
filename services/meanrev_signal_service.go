@@ -32,6 +32,7 @@ type MeanRevSignal struct {
 	EarningsWithin5d  bool    `json:"earnings_within_5d"`
 	EntrySignal       bool    `json:"entry_signal"`
 	SignalVersion     string  `json:"signal_version"`
+	Explanation       string  `json:"explanation,omitempty"`
 }
 
 // MeanRevCandidatesResponse is the JSON shape returned by GET /api/v1/meanrev/candidates.
@@ -377,6 +378,7 @@ func (s *MeanRevCandidatesService) computeCandidates(ctx context.Context) *MeanR
 		if sig.AsOf > latestAsOf {
 			latestAsOf = sig.AsOf
 		}
+		sig.Explanation = ExplainMeanRevEntry(*sig)
 		resp.Candidates = append(resp.Candidates, *sig)
 	}
 
@@ -402,6 +404,7 @@ func (s *MeanRevCandidatesService) GetSignalForTicker(ctx context.Context, ticke
 		sig.EarningsWithin5d = s.earnings.HasEarningsWithinTradingDays(ticker, meanRevEarningsHorizonDays, time.Now())
 		sig.EntrySignal = sig.EntrySignal && !sig.EarningsWithin5d
 	}
+	sig.Explanation = ExplainMeanRevEntry(*sig)
 	return sig, nil
 }
 

@@ -275,6 +275,7 @@ export class AnalysisScheduler extends EventEmitter {
     // Returns "http://localhost:<port>" of any goReady sandbox, or null.
     this._getHealthySandboxUrl = options.getHealthySandboxUrl || (() => null);
     this._runTradeReconciliationFn = options.runTradeReconciliation || null;
+    this._runReasoningDigestFn = options.runReasoningDigest || null;
     this._timer = null;
     this._running = false;
     this._activeJob = null;
@@ -298,6 +299,7 @@ export class AnalysisScheduler extends EventEmitter {
     this._lastMarketTopDate = null;     // YYYY-MM-DD (daily market-top-detector run)
     this._lastBubbleDate = null;        // YYYY-MM-DD (daily us-market-bubble-detector run)
     this._lastTradeReconcileDate = null; // YYYY-MM-DD (daily after-close reconciliation)
+    this._lastReasoningDigestDate = null; // YYYY-MM-DD (daily after-close reasoning digest)
     this._lastDailyCostReportDate = null; // YYYY-MM-DD (daily cost report)
   }
 
@@ -348,6 +350,7 @@ export class AnalysisScheduler extends EventEmitter {
       'regime_gate_compute',
       'macro_regime_skill', 'breadth_skill', 'market_top_skill', 'bubble_skill',
       'trade_reconciliation',
+      'reasoning_digest',
     ];
     if (!validJobs.includes(jobName)) {
       return { error: `Unknown job: ${jobName}. Valid: ${validJobs.join(', ')}` };
@@ -419,6 +422,9 @@ export class AnalysisScheduler extends EventEmitter {
       } else if (jobName === 'trade_reconciliation') {
         this._lastTradeReconcileDate = isoDate;
         await this._runTradeReconciliation(isoDate);
+      } else if (jobName === 'reasoning_digest') {
+        this._lastReasoningDigestDate = isoDate;
+        await this._runReasoningDigest(isoDate);
       } else if (jobName === 'trend_parameter_review') {
         this._lastTrendParamReviewQuarter = this._getQuarter(isoDate);
         await this._runSkill('trend-parameter-review', isoDate, null, 15 * 60 * 1000, this._automatedRunAppendix({
@@ -1049,6 +1055,13 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
       }
     }
 
+    // Daily Coil/Turtle reasoning digest — 4:55 PM ET, after reconciliation +
+    // cost report settle. No-op unless REASONING_DIGEST_ENABLED=true (the runner
+    // self-gates). Idempotent per ET day.
+    if (isWeekday && hour === 16 && minute === 55 && this._lastReasoningDigestDate !== isoDate) {
+      await this.triggerJob('reasoning_digest').catch(() => {});
+    }
+
     if (isSunday && hour === 18 && minute === 0 && this._lastWeeklyScreenDate !== isoDate) {
       await this.triggerJob('weekly_screeners').catch(() => {});
     }
@@ -1103,6 +1116,18 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
       await this._runTradeReconciliationFn(isoDate);
     }
     this._log(`trade_reconciliation complete for ${isoDate}.`, 'success');
+  }
+
+  // reasoning_digest: delegates to the injected cross-sandbox runner (it needs
+  // per-sandbox goAxios the scheduler does not hold). Soft-fail: the runner
+  // self-gates on REASONING_DIGEST_ENABLED and reports per-sandbox.
+  async _runReasoningDigest(isoDate) {
+    this._log(`Starting reasoning_digest for ${isoDate}...`, 'info');
+    this.emit('scheduler_job_start', { job: 'reasoning_digest', date: isoDate });
+    if (typeof this._runReasoningDigestFn === 'function') {
+      await this._runReasoningDigestFn(isoDate);
+    }
+    this._log(`reasoning_digest complete for ${isoDate}.`, 'success');
   }
 
   // breadth_skill: pure-python (no LLM). fetch_breadth_csv.py is fully autonomous

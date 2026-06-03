@@ -43,6 +43,7 @@ import { matchTippedTrades } from './tips-scorer.js';
 import { fetchFillsSummary, renderFillsSummaryLine, startOfEtTradingDayIso, claimConnectRecap } from './fills-summary.js';
 import { SSE_KEEPALIVE_MS, sendSseKeepalive } from './sse-keepalive.js';
 import { runReconciliationForSandbox, readReconciliationSummary } from './trade-reconciliation.js';
+import { runReasoningDigestForSandbox, readReasoningDigestSummary } from './reasoning-digest.js';
 import { readRange, buildCostsResponse, _etDate as _etDateCS } from './cost-store.js';
 import nodeFs from 'node:fs/promises';
 
@@ -192,6 +193,31 @@ async function runTradeReconciliationAllSandboxes(isoDate) {
   }
 }
 
+// Cross-sandbox reasoning-digest runner injected into the scheduler. Iterates
+// running sandboxes, resolves each one's strategy + goAxios, and writes a daily
+// teaching digest for the mechanical agents (Turtle, Coil). Other strategies are
+// skipped by runReasoningDigestForSandbox. Gated by REASONING_DIGEST_ENABLED
+// (default OFF). Soft-fail per sandbox.
+async function runReasoningDigestAllSandboxes(isoDate) {
+  if (process.env.REASONING_DIGEST_ENABLED !== 'true') return; // default OFF
+  for (const runtime of orchestrator.runtimes.values()) {
+    try {
+      const sandboxId = runtime?.harness?.sandboxId;
+      if (!sandboxId) continue;
+      const resolved = getResolvedAgentForSandbox(sandboxId);
+      const strategy = resolved?.strategyId;
+      const goAxios = runtime.goAxios;
+      if (!strategy || !goAxios) continue;
+      await runReasoningDigestForSandbox({
+        goAxios, sandboxId, strategy, agentName: resolved?.name,
+        isoDate, projectRoot: PROJECT_ROOT, fsImpl: nodeFs,
+      });
+    } catch {
+      // soft-fail per sandbox — one bot down must not abort the rest
+    }
+  }
+}
+
 // ── Analysis Scheduler ─────────────────────────────────────────────
 const scheduler = new AnalysisScheduler({
   model: getConfig().activeModel || 'anthropic/claude-sonnet-4-6',
@@ -201,6 +227,7 @@ const scheduler = new AnalysisScheduler({
     return runtime ? `http://localhost:${runtime.port}` : null;
   },
   runTradeReconciliation: runTradeReconciliationAllSandboxes,
+  runReasoningDigest: runReasoningDigestAllSandboxes,
 });
 scheduler.on('agent_log', (data) => broadcast('agent_log', data));
 scheduler.on('scheduler_job_start', ({ job, date }) => broadcast('agent_log', {
@@ -968,6 +995,24 @@ app.get('/api/reconciliation', async (req, res) => {
   }
   try {
     const summary = await readReconciliationSummary(PROJECT_ROOT, { date, sandboxId }, { fs: nodeFs });
+    res.json(summary);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/reasoning-digest?date=&sandboxId= — the day's Coil/Turtle teaching
+// digest. Silent (empty items) when no report exists. Report-only.
+app.get('/api/reasoning-digest', async (req, res) => {
+  const _etFmt = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' });
+  const today = _etFmt.format(new Date());
+  const date = String(req.query.date || today);
+  const sandboxId = req.query.sandboxId ? String(req.query.sandboxId) : undefined;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return res.status(400).json({ error: 'date must be YYYY-MM-DD' });
+  }
+  try {
+    const summary = await readReasoningDigestSummary(PROJECT_ROOT, { date, sandboxId }, { fs: nodeFs });
     res.json(summary);
   } catch (err) {
     res.status(500).json({ error: err.message });
