@@ -200,14 +200,22 @@ test('sma includes the current bar', () => {
   assert.equal(sma([1, 2, 3, 4, 5], 4, 5), 3); // mean of all 5 through idx 4
 });
 test('entryFires requires rsi2<5 AND close>sma200 AND close<sma5', () => {
-  // close above its own 200-SMA (uptrend), below its 5-SMA (pulling back), RSI(2) extreme low.
-  // Build 209 flat closes at 100, then a sharp 3-day drop to force RSI(2)<5 while staying >SMA200.
-  const closes = Array(207).fill(100).concat([99, 98, 97]); // idx 209 = 97
-  const i = closes.length - 1;
-  assert.equal(entryFires(closes, i), true);
+  // A genuine uptrend (close > SMA200) pulling back (close < SMA5) with an extreme-low
+  // RSI(2). NOTE: a dip below a FLAT baseline fails close>SMA200, so the series must rally
+  // well above its long-run mean first, then dip into the entry.
+  const closes = new Array(210);
+  for (let i = 0; i < 50; i += 1) closes[i] = 200;
+  for (let i = 50; i < 195; i += 1) closes[i] = 50 + (i - 50) * 0.8;
+  for (let i = 195; i < 205; i += 1) closes[i] = 165;
+  closes[205] = 160; closes[206] = 155; closes[207] = 150; closes[208] = 145; closes[209] = 140;
+  assert.equal(entryFires(closes, 209), true);
 });
 test('enumerateInstances returns firing indices with >=210 bars of history', () => {
-  const closes = Array(207).fill(100).concat([99, 98, 97]);
+  const closes = new Array(210);
+  for (let i = 0; i < 50; i += 1) closes[i] = 200;
+  for (let i = 50; i < 195; i += 1) closes[i] = 50 + (i - 50) * 0.8;
+  for (let i = 195; i < 205; i += 1) closes[i] = 165;
+  closes[205] = 160; closes[206] = 155; closes[207] = 150; closes[208] = 145; closes[209] = 140;
   const bars = closes.map((c, k) => ({ date: `d${k}`, close: c, open: c, high: c, low: c, volume: 1 }));
   const idxs = enumerateInstances(bars).map(x => x.idx);
   assert.deepEqual(idxs, [209]);
@@ -318,9 +326,11 @@ import { features, composite } from './coil-catalyst-features.mjs';
 function bar(o, h, l, c, v) { return { open: o, high: h, low: l, close: c, volume: v }; }
 
 test('features compute gap, prior-day return, 5d drawdown, volume ratio', () => {
-  // 31 flat bars (close 100, vol 1000), then a gap-down high-volume bar at idx 31.
+  // 31 near-flat bars (close 100, vol 1000) with a small alternating high/low so the
+  // trailing true-range distribution has nonzero variance (range_zscore is then finite),
+  // then a gap-down high-volume bar at idx 31.
   const bars = [];
-  for (let i = 0; i < 31; i += 1) bars.push(bar(100, 101, 99, 100, 1000));
+  for (let i = 0; i < 31; i += 1) bars.push(bar(100, 101 + (i % 2), 99 - (i % 2), 100, 1000));
   bars.push(bar(95, 96, 90, 92, 5000)); // idx 31: opens 95 vs prev close 100
   const f = features(bars, 31);
   assert.ok(Math.abs(f.gap_pct - (95 / 100 - 1)) < 1e-9);          // -0.05
@@ -474,13 +484,13 @@ import { features, composite } from './coil-catalyst-features.mjs';
 
 export const HORIZONS = [5, 10, 20];
 
-// Long-only (s=+1) ticker forward return minus SPY's, aligned on the ENTRY date (idx+1).
+// Long-only (s=+1) ticker forward return minus SPY's, aligned on the SIGNAL date (idx) so
+// both legs use the same entry=open[d+1] / exit=close[d+H] convention.
 export function marketAdjustedForward(tickerBars, idx, spyBars, H) {
   const tk = forwardReturn(tickerBars, idx, H, 1);
   if (!tk) return null;
   const spyIdx = indexByDate(spyBars);
-  const entryDate = tickerBars[idx + 1]?.date;
-  const j = spyIdx.get(entryDate);
+  const j = spyIdx.get(tickerBars[idx].date);
   if (j == null) return null;
   const sp = forwardReturn(spyBars, j, H, 1);
   if (!sp) return null;
