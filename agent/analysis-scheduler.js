@@ -300,6 +300,7 @@ export class AnalysisScheduler extends EventEmitter {
     this._lastBubbleDate = null;        // YYYY-MM-DD (daily us-market-bubble-detector run)
     this._lastTradeReconcileDate = null; // YYYY-MM-DD (daily after-close reconciliation)
     this._lastReasoningDigestDate = null; // YYYY-MM-DD (daily after-close reasoning digest)
+    this._lastTradeGradingDate = null; // YYYY-MM-DD (daily after-close trade grading)
     this._lastDailyCostReportDate = null; // YYYY-MM-DD (daily cost report)
   }
 
@@ -351,6 +352,7 @@ export class AnalysisScheduler extends EventEmitter {
       'macro_regime_skill', 'breadth_skill', 'market_top_skill', 'bubble_skill',
       'trade_reconciliation',
       'reasoning_digest',
+      'trade_grading',
     ];
     if (!validJobs.includes(jobName)) {
       return { error: `Unknown job: ${jobName}. Valid: ${validJobs.join(', ')}` };
@@ -425,6 +427,9 @@ export class AnalysisScheduler extends EventEmitter {
       } else if (jobName === 'reasoning_digest') {
         this._lastReasoningDigestDate = isoDate;
         await this._runReasoningDigest(isoDate);
+      } else if (jobName === 'trade_grading') {
+        this._lastTradeGradingDate = isoDate;
+        await this._runTradeGrading(isoDate);
       } else if (jobName === 'trend_parameter_review') {
         this._lastTrendParamReviewQuarter = this._getQuarter(isoDate);
         await this._runSkill('trend-parameter-review', isoDate, null, 15 * 60 * 1000, this._automatedRunAppendix({
@@ -1062,6 +1067,12 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
       await this.triggerJob('reasoning_digest').catch(() => {});
     }
 
+    // Daily per-trade thesis-vs-outcome grading — 5:00 PM ET, after the digest. No-op
+    // unless TRADE_GRADING_ENABLED=true (the method self-gates). Idempotent per ET day.
+    if (isWeekday && hour === 17 && minute === 0 && this._lastTradeGradingDate !== isoDate) {
+      await this.triggerJob('trade_grading').catch(() => {});
+    }
+
     if (isSunday && hour === 18 && minute === 0 && this._lastWeeklyScreenDate !== isoDate) {
       await this.triggerJob('weekly_screeners').catch(() => {});
     }
@@ -1128,6 +1139,32 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
       await this._runReasoningDigestFn(isoDate);
     }
     this._log(`reasoning_digest complete for ${isoDate}.`, 'success');
+  }
+
+  // trade_grading: deterministic Node preprocessor (free) writes cards + a complete
+  // deterministic report for all agents; only if Prophet actually closed a trade do we
+  // invoke the Haiku trade-grader skill to enrich Prophet's narrative grade. Self-gated by
+  // TRADE_GRADING_ENABLED (default OFF). Mirrors _runMacroRegimeSkill's spawn shape.
+  async _runTradeGrading(isoDate) {
+    if (process.env.TRADE_GRADING_ENABLED !== 'true') return; // default OFF
+    this._log(`Starting trade_grading for ${isoDate}...`, 'info');
+    this.emit('scheduler_job_start', { job: 'trade_grading', date: isoDate });
+    let prophetCloses = 0;
+    await new Promise((resolve) => {
+      const child = spawn(process.execPath, ['scripts/trade-grades.mjs', `--date=${isoDate}`], { stdio: ['ignore', 'pipe', 'pipe'] });
+      let out = '';
+      child.stdout.on('data', (c) => { out += c.toString(); });
+      child.on('error', () => resolve());
+      child.on('close', () => {
+        const m = out.match(/PROPHET_CLOSES=(\d+)/);
+        prophetCloses = m ? Number(m[1]) : 0;
+        resolve();
+      });
+    });
+    if (prophetCloses > 0) {
+      await this._runSkill('trade-grader', isoDate, null, 10 * 60 * 1000, null, false, HAIKU_MODEL);
+    }
+    this._log(`trade_grading complete for ${isoDate} (prophet_closes=${prophetCloses}).`, 'success');
   }
 
   // breadth_skill: pure-python (no LLM). fetch_breadth_csv.py is fully autonomous

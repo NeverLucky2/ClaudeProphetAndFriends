@@ -44,6 +44,7 @@ import { fetchFillsSummary, renderFillsSummaryLine, startOfEtTradingDayIso, clai
 import { SSE_KEEPALIVE_MS, sendSseKeepalive } from './sse-keepalive.js';
 import { runReconciliationForSandbox, readReconciliationSummary } from './trade-reconciliation.js';
 import { runReasoningDigestForSandbox, readReasoningDigestSummary } from './reasoning-digest.js';
+import { readTradeGradesSummary } from '../scripts/trade-grades.mjs';
 import { readRange, buildCostsResponse, _etDate as _etDateCS } from './cost-store.js';
 import nodeFs from 'node:fs/promises';
 
@@ -1013,6 +1014,24 @@ app.get('/api/reasoning-digest', async (req, res) => {
   }
   try {
     const summary = await readReasoningDigestSummary(PROJECT_ROOT, { date, sandboxId }, { fs: nodeFs });
+    res.json(summary);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/trade-grades?date=&sandboxId= — per-trade thesis-vs-outcome grades. Silent
+// (empty items) when no report exists. Report-only.
+app.get('/api/trade-grades', async (req, res) => {
+  const _etFmt = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' });
+  const today = _etFmt.format(new Date());
+  const date = String(req.query.date || today);
+  const sandboxId = req.query.sandboxId ? String(req.query.sandboxId) : undefined;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return res.status(400).json({ error: 'date must be YYYY-MM-DD' });
+  }
+  try {
+    const summary = await readTradeGradesSummary(PROJECT_ROOT, { date, sandboxId }, { fs: nodeFs });
     res.json(summary);
   } catch (err) {
     res.status(500).json({ error: err.message });

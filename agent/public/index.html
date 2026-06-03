@@ -1205,6 +1205,7 @@
         </div>
         <div class="trades-recon-items" id="trades-recon-items"></div>
         <div id="reasoning-digest"></div>
+        <div id="trade-grades"></div>
         <div id="trades-feed"><div class="no-data">No trades yet. Start the agent to see live activity.</div></div>
       </div>
     </div>
@@ -3153,6 +3154,7 @@ async function seedTodayTrades() {
   }
   loadReconciliationBanner();
   loadReasoningDigest();
+  loadTradeGrades();
 }
 
 async function loadReconciliationBanner() {
@@ -3213,6 +3215,28 @@ async function loadReasoningDigest() {
   } catch (err) {
     // silent — dashboard never breaks on the digest
   }
+}
+
+async function loadTradeGrades() {
+  const host = document.getElementById('trade-grades');
+  if (!host) return;
+  try {
+    const date = _todayEt();
+    const r = await fetch('/api/trade-grades?date=' + encodeURIComponent(date));
+    if (!r.ok) return;
+    const data = await r.json();
+    const reports = (data.items || []).filter((it) => (it.grades || []).length > 0);
+    if (!reports.length) { host.innerHTML = ''; return; }
+    const cell = (q) => String(q || '').replace(/_/g, ' ');
+    const parts = [`<details class="trade-grades"><summary>Trade grades — ${data.date}</summary>`];
+    for (const it of reports) {
+      parts.push(`<div class="tg-agent"><strong>${it.agentName}</strong><ul>` +
+        it.grades.map((g) => `<li>${(g.symbol || '').replace(/</g, '&lt;')} — <em>${cell(g.quadrant)}</em>: ${(g.lesson || '').replace(/</g, '&lt;')}</li>`).join('') +
+        '</ul></div>');
+    }
+    parts.push('</details>');
+    host.innerHTML = parts.join('');
+  } catch { /* silent — dashboard never breaks on grades */ }
 }
 
 function _wireHistoricControls() {
