@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"testing"
 	"time"
 )
@@ -180,5 +181,38 @@ func TestLoadConfig_ProphetDefensiveOn(t *testing.T) {
 	}
 	if !AppConfig.EnableProphetDefensive {
 		t.Fatal("ENABLE_PROPHET_DEFENSIVE=true must set the flag")
+	}
+}
+
+func TestLoad_ProphetSleeveDefaults(t *testing.T) {
+	for _, k := range []string{
+		"ENABLE_PROPHET_SLEEVE", "PROPHET_SLEEVE_BASELINE_USD",
+		"PROPHET_SLEEVE_MAX_POSITION_FRAC", "PROPHET_SLEEVE_MAX_POSITIONS",
+		"PROPHET_SLEEVE_LOSS_BUDGET_FRAC", "PROPHET_SLEEVE_DEADLINE",
+		"PROPHET_SLEEVE_DISARM_DIR",
+	} {
+		os.Unsetenv(k)
+	}
+	if err := Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	c := AppConfig
+	if c.EnableProphetSleeve {
+		t.Errorf("EnableProphetSleeve should default false")
+	}
+	if c.ProphetSleeveBaselineUSD != 0 {
+		t.Errorf("baseline default = %v, want 0", c.ProphetSleeveBaselineUSD)
+	}
+	if c.ProphetSleeveMaxPositionFrac != 0.25 {
+		t.Errorf("max-position-frac default = %v, want 0.25", c.ProphetSleeveMaxPositionFrac)
+	}
+	if c.ProphetSleeveMaxPositions != 5 {
+		t.Errorf("max-positions default = %v, want 5", c.ProphetSleeveMaxPositions)
+	}
+	if c.ProphetSleeveLossBudgetFrac != 0.50 {
+		t.Errorf("loss-budget-frac default = %v, want 0.50", c.ProphetSleeveLossBudgetFrac)
+	}
+	if c.ProphetSleeveDeadline != "" {
+		t.Errorf("deadline default = %q, want empty", c.ProphetSleeveDeadline)
 	}
 }

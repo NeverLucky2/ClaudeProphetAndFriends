@@ -227,6 +227,26 @@ func main() {
 	orderController.SetGuard(tradeGuard)
 	guardController := controllers.NewGuardController(tradeGuard)
 
+	// Prophet fun-sleeve real-money safety gate (live). Default OFF; flag-gated.
+	sleeveDisarmDir := cfg.ProphetSleeveDisarmDir
+	if sleeveDisarmDir == "" {
+		sleeveDisarmDir = filepath.Dir(cfg.DatabasePath)
+	}
+	sleeveGuard := services.NewProphetSleeveGuard(
+		services.ProphetSleeveConfig{
+			Enabled:         cfg.EnableProphetSleeve,
+			BaselineUSD:     cfg.ProphetSleeveBaselineUSD,
+			MaxPositionFrac: cfg.ProphetSleeveMaxPositionFrac,
+			MaxPositions:    cfg.ProphetSleeveMaxPositions,
+			LossBudgetFrac:  cfg.ProphetSleeveLossBudgetFrac,
+			Deadline:        cfg.ProphetSleeveDeadline,
+			DisarmDir:       sleeveDisarmDir,
+		},
+		tradingService,
+	)
+	orderController.SetSleeveGuard(sleeveGuard)
+	sleeveController := controllers.NewSleeveController(sleeveGuard)
+
 	logger.WithFields(logrus.Fields{
 		"max_daily_loss_pct":          cfg.MaxDailyLossPct,
 		"sector_aggregation_enabled":  cfg.EnableSectorAggregation,
@@ -489,6 +509,7 @@ func main() {
 		activityController,
 		economicFeedsController,
 		guardController,
+		sleeveController,
 		trendController,
 		meanRevController,
 		driftController,
@@ -557,6 +578,7 @@ func setupRouter(
 	activityController *controllers.ActivityController,
 	economicFeedsController *controllers.EconomicFeedsController,
 	guardController *controllers.GuardController,
+	sleeveController *controllers.SleeveController,
 	trendController *controllers.TrendController,
 	meanRevController *controllers.MeanRevController,
 	driftController *controllers.DriftController,
@@ -664,6 +686,10 @@ func setupRouter(
 
 		// Trade guard endpoint
 		api.GET("/guard/status", guardController.HandleGetStatus)
+
+		// Prophet fun-sleeve gate: status + independent manual kill switch.
+		api.GET("/sleeve/status", sleeveController.HandleGetStatus)
+		api.POST("/sleeve/kill", sleeveController.HandleKill)
 
 		// Regime gate endpoint (Item 2). Returns the daily-computed regime
 		// status; agents consume tier/sizing_multiplier/block_new_entries.

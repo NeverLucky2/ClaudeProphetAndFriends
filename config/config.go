@@ -91,6 +91,17 @@ type Config struct {
 	BarCacheEnabled bool
 	BarCacheDir     string
 	BarCacheTTL     time.Duration
+
+	// Prophet fun-sleeve real-money safety gate. Flag-gated, default OFF.
+	// Unlike the other gates, this one FAILS CLOSED on missing config (a money
+	// gate's safe state is "block"). See the 2026-06-03 spec.
+	EnableProphetSleeve          bool
+	ProphetSleeveBaselineUSD     float64 // funded baseline B; <=0 => fail closed when enabled
+	ProphetSleeveMaxPositionFrac float64 // per-position cap as fraction of B (0.25)
+	ProphetSleeveMaxPositions    int     // concurrency cap (5)
+	ProphetSleeveLossBudgetFrac  float64 // permanent-disarm realized-loss threshold as fraction of B (0.50)
+	ProphetSleeveDeadline        string  // off-ramp date YYYY-MM-DD; empty/invalid => fail closed when enabled
+	ProphetSleeveDisarmDir       string  // dir for kill/latch files; empty => derive from DatabasePath dir in main.go
 }
 
 var AppConfig *Config
@@ -160,6 +171,14 @@ func Load() error {
 		BarCacheEnabled: getEnvOrDefault("BAR_CACHE_ENABLED", "true") == "true",
 		BarCacheDir:     getEnvOrDefault("BAR_CACHE_DIR", "./data/bar-cache"),
 		BarCacheTTL:     parseDurationOrDefault("BAR_CACHE_TTL", "5m"),
+
+		EnableProphetSleeve:          getEnvOrDefault("ENABLE_PROPHET_SLEEVE", "false") == "true",
+		ProphetSleeveBaselineUSD:     parseFloat(getEnvOrDefault("PROPHET_SLEEVE_BASELINE_USD", "0")),
+		ProphetSleeveMaxPositionFrac: parseFloat(getEnvOrDefault("PROPHET_SLEEVE_MAX_POSITION_FRAC", "0.25")),
+		ProphetSleeveMaxPositions:    parseIntOrDefault("PROPHET_SLEEVE_MAX_POSITIONS", 5),
+		ProphetSleeveLossBudgetFrac:  parseFloat(getEnvOrDefault("PROPHET_SLEEVE_LOSS_BUDGET_FRAC", "0.50")),
+		ProphetSleeveDeadline:        os.Getenv("PROPHET_SLEEVE_DEADLINE"),
+		ProphetSleeveDisarmDir:       os.Getenv("PROPHET_SLEEVE_DISARM_DIR"),
 	}
 
 	return nil

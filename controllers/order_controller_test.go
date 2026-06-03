@@ -531,3 +531,50 @@ func TestStartOfEtTradingDay(t *testing.T) {
 	}
 }
 
+// newBlockingSleeveGuard returns an enabled sleeve guard pre-armed with a manual
+// kill, so EvaluateOpen blocks every open and never reaches the broker reads
+// (the kill-file check short-circuits before computeMetrics).
+func newBlockingSleeveGuard(t *testing.T, reader services.SleeveAccountReader) *services.ProphetSleeveGuard {
+	t.Helper()
+	cfg := services.ProphetSleeveConfig{
+		Enabled: true, BaselineUSD: 1000, MaxPositionFrac: 0.25,
+		MaxPositions: 5, LossBudgetFrac: 0.50, Deadline: "2099-12-31", DisarmDir: t.TempDir(),
+	}
+	g := services.NewProphetSleeveGuard(cfg, reader)
+	if err := g.EngageManualKill("test"); err != nil {
+		t.Fatalf("EngageManualKill: %v", err)
+	}
+	return g
+}
+
+func TestPlaceOptionsOrder_SleeveBlocksOpen(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := &recordingTradingService{portfolio: 100000, cash: 100000,
+		optionsQuote: &interfaces.OptionsQuote{BidPrice: 1.0, AskPrice: 1.02, Timestamp: time.Now()}}
+	oc := NewOrderController(rec, nil, noopStorage{})
+	oc.SetSleeveGuard(newBlockingSleeveGuard(t, rec))
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	body := `{"symbol":"SPY260116C00500000","underlying":"SPY","qty":1,"side":"buy","position_intent":"buy_to_open","type":"limit","limit_price":1,"strategy":"v2-options"}`
+	c.Request = httptest.NewRequest("POST", "/options/order", bytes.NewBufferString(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	oc.PlaceOptionsOrder(c)
+	if rec.optionsOrdersPlaced != 0 {
+		t.Fatalf("sleeve guard must block the open before placement, placed=%d", rec.optionsOrdersPlaced)
+	}
+}
+
+func TestPlaceOptionsOrder_SleeveNeverBlocksClose(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := &recordingTradingService{portfolio: 100000, cash: 95000}
+	oc := NewOrderController(rec, nil, noopStorage{})
+	oc.SetSleeveGuard(newBlockingSleeveGuard(t, rec)) // would block ANY open
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	body := `{"symbol":"SPY260116C00500000","underlying":"SPY","qty":30,"side":"sell","position_intent":"sell_to_close","type":"market","strategy":"v2-options"}`
+	c.Request = httptest.NewRequest("POST", "/options/order", bytes.NewBufferString(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	oc.PlaceOptionsOrder(c)
+	if rec.optionsOrdersPlaced != 1 {
+		t.Fatalf("a close must never be consulted by the sleeve guard, placed=%d", rec.optionsOrdersPlaced)
+	}
+}
+

@@ -20,6 +20,7 @@ type OrderController struct {
 	dataService    interfaces.DataService
 	storageService interfaces.StorageService
 	guard          *services.TradeGuard
+	sleeveGuard    *services.ProphetSleeveGuard
 	logger         *logrus.Logger
 }
 
@@ -45,6 +46,12 @@ func NewOrderController(
 // SetGuard attaches a trade guard to the controller.
 func (oc *OrderController) SetGuard(guard *services.TradeGuard) {
 	oc.guard = guard
+}
+
+// SetSleeveGuard attaches the Prophet fun-sleeve safety gate (live real-money
+// caps + disarm). Nil = not configured (no-op). See the 2026-06-03 spec.
+func (oc *OrderController) SetSleeveGuard(g *services.ProphetSleeveGuard) {
+	oc.sleeveGuard = g
 }
 
 // BuyRequest represents a buy order request
@@ -612,24 +619,29 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 
 	agent := services.AgentForStrategy(req.Strategy)
 	opening := isOpeningOption(req.PositionIntent, req.Side)
+
+	// For opening buys, fetch the options quote once and compute the premium
+	// notional up front; shared by the trade guard's dollar caps and the Prophet
+	// sleeve gate (avoids a double quote fetch; preserves the single-fetch invariant).
+	var openQuote *interfaces.OptionsQuote
+	var openNotional float64
+	if opening && req.Side == "buy" && oc.tradingService != nil {
+		if q, err := oc.tradingService.GetOptionsQuote(ctx, order.Symbol); err == nil {
+			openQuote = q
+		}
+		openNotional = optionsNotional(order, openQuote)
+	}
+
 	if oc.guard != nil {
 		if opening && req.Side == "buy" {
-			// One quote fetch, reused by both the new gates and the notional cap.
-			var quote *interfaces.OptionsQuote
-			if oc.tradingService != nil {
-				if q, err := oc.tradingService.GetOptionsQuote(ctx, order.Symbol); err == nil {
-					quote = q
-				}
-			}
 			// Universe allowlist + spread/staleness gate (Prophet-scoped, flag-gated).
-			if err := oc.guard.CheckOptionsOpen(agent, order.Underlying, order.Symbol, quote, time.Now()); err != nil {
+			if err := oc.guard.CheckOptionsOpen(agent, order.Underlying, order.Symbol, openQuote, time.Now()); err != nil {
 				oc.logger.WithError(err).Warn("Options open blocked by trade guard (universe/spread)")
 				c.JSON(422, gin.H{"error": err.Error()})
 				return
 			}
 			// Existing dollar caps + daily-loss breaker.
-			notional := optionsNotional(order, quote)
-			if err := oc.guard.CheckBuy(ctx, agent, order.Symbol, notional); err != nil {
+			if err := oc.guard.CheckBuy(ctx, agent, order.Symbol, openNotional); err != nil {
 				oc.logger.WithError(err).Warn("Options buy blocked by trade guard")
 				c.JSON(422, gin.H{"error": err.Error()})
 				return
@@ -643,6 +655,18 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 		}
 		// sell_to_open (short premium) is not size-capped in Phase 1 (out of scope);
 		// ownership is still recorded after a successful placement below.
+	}
+
+	// Prophet fun-sleeve real-money gate (live): exposure/per-position/concurrency
+	// caps + loss-budget disarm + manual kill + deadline + PDT. INDEPENDENT of the
+	// trade guard above (must run even when oc.guard is nil). Opens-only by this
+	// condition, so closes/exits are never consulted.
+	if oc.sleeveGuard != nil && opening && req.Side == "buy" {
+		if err := oc.sleeveGuard.EvaluateOpen(ctx, openNotional, time.Now()); err != nil {
+			oc.logger.WithError(err).Warn("Options open blocked by Prophet sleeve guard")
+			c.JSON(422, gin.H{"error": err.Error()})
+			return
+		}
 	}
 
 	result, err := oc.tradingService.PlaceOptionsOrder(ctx, order)

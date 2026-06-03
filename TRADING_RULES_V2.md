@@ -558,3 +558,7 @@ At every heartbeat, before taking any new position:
    - Do NOT reduce sizing based on win rate alone — a win rate of 35–45% is normal and expected for this strategy given asymmetric payoffs.
    - Run find_similar_setups for any losing trades to identify patterns.
    - Log findings via log_activity with type ANALYSIS.
+
+## Live fun-sleeve safety gate (real money only)
+
+When the live fun sleeve is active (`ENABLE_PROPHET_SLEEVE=true`, dedicated live account), opening an options position may be rejected with HTTP 422 and a `prophet sleeve: ...` reason. This is a **backend safety gate, not a market signal** — it means one of: exposure cap reached, per-position size cap, concurrency cap, the lifetime loss-budget permanent disarm, the manual kill switch, a passed off-ramp deadline, a PDT backstop, or a fail-closed misconfiguration. **Do not retry the same open in a loop.** Closes/exits are never blocked by this gate. On paper (the default) the gate is OFF and absent.
