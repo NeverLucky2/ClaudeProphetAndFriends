@@ -1,0 +1,41 @@
+{
+  "prereg_version": "1.0",
+  "created_utc": "2026-06-03T19:45:51.785Z",
+  "hypothesis": "catalyst-like oversold dips have LOWER market-adjusted forward return than clean dips",
+  "horizons": [
+    5,
+    10,
+    20
+  ],
+  "benchmark": "SPY",
+  "entry": "open[d+1]",
+  "exit": "close[d+H]",
+  "composite": "volume_ratio * abs(gap_pct)",
+  "cut": {
+    "rule": "composite >= top-tercile of TRAIN composites",
+    "threshold": 0.00916155446010096
+  },
+  "effect_size_mde": 0.01,
+  "sd_prior": 0.07,
+  "sided": "one (catalyst worse => diff < 0)",
+  "bootstrap": {
+    "method": "date_block",
+    "block_sessions": 10,
+    "iterations": 10000,
+    "seed": 1234,
+    "ci_pct": [
+      2.5,
+      97.5
+    ]
+  },
+  "verdict_rule": {
+    "SIGNAL": "hi < 0 AND meanDiff <= -effect_size_mde",
+    "NO_EFFECT": "lo >= -effect_size_mde AND hi <= +effect_size_mde (equivalence)",
+    "INSUFFICIENT": "otherwise"
+  },
+  "counts": {
+    "train_n": 1430,
+    "holdout_n": 1431
+  },
+  "artifact_hash": "70a97f0a"
+}
