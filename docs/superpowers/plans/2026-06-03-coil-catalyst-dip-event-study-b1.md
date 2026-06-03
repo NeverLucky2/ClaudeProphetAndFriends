@@ -474,7 +474,7 @@ Expected: FAIL — module not found.
 // scripts/coil-eventstudy-build.mjs
 // Orchestrate: bars -> Coil instances -> features + market-adjusted forward returns
 // at H in {5,10,20} -> chronological 50/50 split + feasibility counts.
-import { writeFileSync, mkdirSync, readFileSync } from 'node:fs';
+import { writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { forwardReturn } from './stage1-bars.mjs';
@@ -483,6 +483,15 @@ import { enumerateInstances } from './coil-meanrev-signal.mjs';
 import { features, composite } from './coil-catalyst-features.mjs';
 
 export const HORIZONS = [5, 10, 20];
+
+// Coil's MeanRevUniverse (services/meanrev_signal_service.go), mirrored to avoid a Go bridge.
+export const MEANREV_UNIVERSE = [
+  'AAPL', 'MSFT', 'NVDA', 'GOOGL', 'AMZN', 'META', 'TSLA', 'AVGO', 'JPM', 'V', 'WMT', 'UNH', 'MA', 'JNJ', 'XOM', 'PG',
+  'ORCL', 'HD', 'COST', 'ABBV', 'MRK', 'KO', 'BAC', 'CVX', 'PEP', 'ADBE', 'CRM', 'NFLX', 'AMD', 'TMO', 'ACN', 'LLY',
+  'MCD', 'ABT', 'CSCO', 'DHR', 'WFC', 'LIN', 'NKE', 'DIS', 'TXN', 'NEE', 'INTU', 'AMGN', 'IBM', 'PM', 'CMCSA', 'RTX',
+  'QCOM', 'CAT', 'BMY', 'GS', 'UNP', 'AXP', 'LOW', 'BLK', 'SCHW', 'NOW', 'GE', 'AMAT', 'DE', 'SPGI', 'BKNG', 'ISRG',
+  'MS', 'ADI', 'TJX', 'MDT', 'BA', 'PLD', 'MMC', 'VRTX', 'ADP', 'LMT', 'GILD', 'MO', 'SYK', 'CI', 'MDLZ', 'SO',
+];
 
 // Long-only (s=+1) ticker forward return minus SPY's, aligned on the SIGNAL date (idx) so
 // both legs use the same entry=open[d+1] / exit=close[d+H] convention.
@@ -536,9 +545,7 @@ export function buildInstances(projectRoot, universe, benchmark = 'SPY') {
     const flag = (n, d) => { const i = args.indexOf(n); return i === -1 ? d : args[i + 1]; };
     const root = process.cwd();
     const out = flag('--out', join(root, 'data', 'lab', 'coil-instances.json'));
-    // Universe read from the Go file's MeanRevUniverse, mirrored here to avoid a Go bridge.
-    const universe = JSON.parse(readFileSync(join(root, 'data', 'lab', 'coil-universe.json'), 'utf8'));
-    const rows = buildInstances(root, universe);
+    const rows = buildInstances(root, MEANREV_UNIVERSE);
     const withComposite = rows.filter(r => r.composite != null);
     const { all } = chronoSplit(withComposite);
     mkdirSync(dirname(out), { recursive: true });
@@ -546,14 +553,14 @@ export function buildInstances(projectRoot, universe, benchmark = 'SPY') {
     const byH = {};
     for (const H of HORIZONS) byH[H] = all.filter(r => r.madj[H] != null).length;
     process.stdout.write(JSON.stringify({
-      out, universe: universe.length, instances: rows.length,
+      out, universe: MEANREV_UNIVERSE.length, instances: rows.length,
       with_composite: withComposite.length, scored_per_horizon: byH,
     }, null, 2) + '\n');
   }
 }
 ```
 
-Note: write the 80-name universe to `data/lab/coil-universe.json` (a JSON array) in this task as a committed fixture, so the build CLI has no Go dependency. Bucketing (`bucket`) is assigned in Task 7 after the prereg threshold is frozen.
+Note: the 80-name universe is embedded as the `MEANREV_UNIVERSE` constant (mirroring the Go `MeanRevUniverse`), so the build CLI has no Go dependency and needs no external fixture — which also avoids a `data/lab/` gitignore snag. Bucketing (`bucket`) is assigned in Task 7 after the prereg threshold is frozen.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -563,7 +570,7 @@ Expected: PASS (4 tests).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add scripts/coil-eventstudy-build.mjs scripts/coil-eventstudy-build.test.mjs data/lab/coil-universe.json
+git add scripts/coil-eventstudy-build.mjs scripts/coil-eventstudy-build.test.mjs
 git commit -m "feat(coil-eventstudy): build orchestrator (instances + market-adjusted forward returns + split)"
 ```
 
