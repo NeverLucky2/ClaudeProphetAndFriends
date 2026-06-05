@@ -1,0 +1,60 @@
+{
+  "prereg_version": "1.0",
+  "created_utc": "2026-06-05T21:13:30.182Z",
+  "hypothesis": "extending Coil 5-day time stop does NOT improve risk-adjusted edge (expected null)",
+  "variants": [
+    5,
+    7,
+    8,
+    10
+  ],
+  "baseline_maxHold": 5,
+  "primary_maxHold": 7,
+  "secondary_maxHold": [
+    8,
+    10
+  ],
+  "exit_model": {
+    "stop_pct": 7,
+    "rsi_exit": 70,
+    "sma5_cross": true,
+    "entry_rsi": 5,
+    "stop": "intraday_gap_honest"
+  },
+  "entry_fill": "signal_day_close",
+  "earnings_filter": "forward 5 trading bars, FMP stable earnings-calendar",
+  "enumeration": "paired on the 5-day schedule (Phase 1); per-variant fresh enumeration (Phase 2)",
+  "friction_bps": {
+    "optimistic": 10,
+    "representative": 20,
+    "stress": 30
+  },
+  "decision_metric": "friction-net per-trade delta (gross delta, friction cancels) at 20bps",
+  "winsorize_pct": 90,
+  "bootstrap": {
+    "method": "date_block",
+    "block_sessions": 15,
+    "iterations": 10000,
+    "seed": 1234,
+    "ci_pct": [
+      2.5,
+      97.5
+    ]
+  },
+  "decision_rule": {
+    "gate1a": "holdout paired Δ (return@7 − return@5) over time_stop@5 trades: 95% CI lo > 0",
+    "gate1b": "gate1a recomputed with upside winsorized at p90: 95% CI lo > 0 (edge not tail-funded)",
+    "gate2": "holdout portfolio net(7) > net(5) AND maxDD(7) <= maxDD(5)*1.1",
+    "verdict": "EXTEND iff gate1a AND gate1b AND gate2; else KEEP (labeled by failing gate); UNDERPOWERED if n_delta@7 < 30",
+    "dd_untested_ratio": 0.5
+  },
+  "power_floor_n": 30,
+  "expected_outcome": "KEEP",
+  "split": "chronological 50/50",
+  "counts": {
+    "paired_n": 261,
+    "train_n": 141,
+    "holdout_n": 120
+  },
+  "artifact_hash": "4b1a6f8e"
+}
