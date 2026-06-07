@@ -36,11 +36,15 @@ export function assembleVerdict(strategyId, m, params) {
 //   verdict = assembleVerdict(strategyId, { ledger, beta, ... }, { N: 20, BETA_BAND: 0.6 });
 // Emit a markdown table of {agent, track, verdict, blocking reason} to docs/lab/graduation-report.md.
 
+// agentId = sandbox activeAgentId (confirmed in data/agent-config.json — resolveSandboxDbPaths
+// matches on it). strategyId = the segment `strategy` column key the Go writer uses (AgentStrategy);
+// inert until the db_segment_pn_ls writer has produced rows (Go rebuild) — confirm against the table
+// once rows exist. Prophet's own 'default' sandbox is intentionally NOT a graduation candidate here.
 const AGENTS = [
-  { agentId: 'default', strategyId: 'sbx_mean_rev', name: 'Coil' },
-  { agentId: 'trend', strategyId: 'trend', name: 'Turtle' },
+  { agentId: 'mean-rev', strategyId: 'mean_rev', name: 'Coil' },
+  { agentId: 'trend-prophet', strategyId: 'trend', name: 'Turtle' },
   { agentId: 'drift', strategyId: 'drift', name: 'Drift' },
-  { agentId: 'prophet-defensive', strategyId: 'prophet-defensive', name: 'DefensiveProphet' },
+  { agentId: 'defensive-prophet', strategyId: 'prophet-defensive', name: 'DefensiveProphet' },
 ];
 
 async function main() {
@@ -54,7 +58,9 @@ async function main() {
 
   for (const { agentId, strategyId, name } of AGENTS) {
     try {
-      const { dbPath } = resolveSandboxDbPaths(projectRoot, agentId);
+      const dbPaths = resolveSandboxDbPaths(projectRoot, agentId);
+      if (dbPaths.length === 0) { rows.push(`| ${name} | — | HOLD | no sandbox DB resolved for agentId '${agentId}' |`); continue; }
+      const dbPath = dbPaths[0];
       const closed = readClosedManagedPositions(dbPath);
       const open = readOpenManagedPositions(dbPath);
       const ledger = buildAgentLedger(closed, open, cutoffMs, agentId, baselineCfg, buildStressConfig(baselineCfg));
