@@ -1,0 +1,66 @@
+{
+  "prereg_version": "1.0",
+  "created_utc": "2026-06-08T18:09:08.126Z",
+  "hypothesis": "tightening Coil -7% stop does NOT cut risk enough to justify the expectancy give-up (expected null: KEEP)",
+  "variants": [
+    0.03,
+    0.04,
+    0.05,
+    0.06
+  ],
+  "baseline_stop_pct": 0.07,
+  "primary_stop_pct": 0.05,
+  "secondary_stop_pct": [
+    0.03,
+    0.04,
+    0.06
+  ],
+  "marginal_probe_pct": 0.03,
+  "exit_model": {
+    "rsi_exit": 70,
+    "sma5_cross": true,
+    "max_hold_days": 5,
+    "entry_rsi": 5,
+    "stop": "intraday_gap_honest"
+  },
+  "entry_fill": "signal_day_close",
+  "earnings_filter": "forward 5 trading bars, FMP stable earnings-calendar",
+  "enumeration": "paired on the 0.07 baseline schedule (Phase 1 marginal subset); per-variant fresh enumeration (Phase 2)",
+  "friction_bps": {
+    "optimistic": 10,
+    "representative": 20,
+    "stress": 30
+  },
+  "stop_slippage_bps": 10,
+  "success_criterion": "cut risk, hold returns",
+  "decision_metric": "friction-net total return + max drawdown at 20bps",
+  "bootstrap": {
+    "method": "date_block",
+    "block_sessions": 15,
+    "iterations": 10000,
+    "seed": 1234,
+    "ci_pct": [
+      2.5,
+      97.5
+    ]
+  },
+  "winsorize_pct": 90,
+  "decision_rule": {
+    "gateA_risk": "holdout |maxDD(0.05)| <= 0.90 * |maxDD(0.07)| (>=10% relative drawdown reduction)",
+    "gateB_returns": "holdout totalNet(0.05) >= 0.90 * totalNet(0.07) (<=10% relative give-up)",
+    "cvar": "trade-level CVaR(5%) reported as corroboration, NOT a hard sub-gate",
+    "verdict": "TIGHTEN iff gateA AND gateB; else KEEP labeled by failing gate; UNDERPOWERED if marginal n@0.05 < 30",
+    "dd_reduction_floor": 0.9,
+    "return_retention_floor": 0.9,
+    "dd_untested_ratio": 0.5
+  },
+  "power_floor_n": 30,
+  "expected_outcome": "KEEP",
+  "split": "chronological 50/50",
+  "counts": {
+    "marginal_n": 400,
+    "train_n": 218,
+    "holdout_n": 182
+  },
+  "artifact_hash": "8a268906"
+}

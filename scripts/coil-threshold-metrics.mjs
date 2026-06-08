@@ -16,6 +16,17 @@ export function profitFactor(returns) {
   return l === 0 ? (g > 0 ? Infinity : null) : g / l;
 }
 
+// Conditional Value-at-Risk at the alpha tail: mean of the worst alpha-fraction of returns
+// (most negative). k = max(1, ceil(alpha*n)) so even a tiny sample reports its single worst
+// trade. Non-finite values are dropped; empty -> null.
+export function cvar(returns, alpha = 0.05) {
+  const xs = returns.filter(Number.isFinite);
+  if (!xs.length) return null;
+  const sorted = [...xs].sort((a, b) => a - b);
+  const k = Math.max(1, Math.ceil(alpha * sorted.length));
+  return mean(sorted.slice(0, k));
+}
+
 // mulberry32 — reproducible PRNG (same idiom as coil-eventstudy-score.mjs).
 function mulberry32(seed) {
   let a = seed >>> 0;
