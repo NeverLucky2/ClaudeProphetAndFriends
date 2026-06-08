@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"sync"
 	"time"
@@ -80,6 +81,10 @@ func (s *ProphetHedgeScheduler) Start(ctx context.Context) {
 				"errors":       res.Errors,
 				"skipped":      res.Skipped,
 			}).Info("hedge-scheduler: heartbeat complete")
+			s.logger.Info(formatHeartbeatLine("Defensive-Prophet",
+				fmt.Sprintf("armed=%t, %d open, %d opened, %d closed, %d skips",
+					res.Armed, res.OpenCount, len(res.Opened), len(res.Closed), len(res.Skips)),
+				s.now().In(nyLoc).Format("15:04")))
 		}
 	}
 }

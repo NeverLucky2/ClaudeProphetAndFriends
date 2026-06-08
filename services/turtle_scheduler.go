@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"sync"
 	"time"
@@ -79,6 +80,9 @@ func (s *TurtleScheduler) Start(ctx context.Context) {
 				"skipped":         res.Skipped,
 				"circuit_breaker": res.CircuitBreaker,
 			}).Info("turtle-scheduler: heartbeat complete")
+			s.logger.Info(formatHeartbeatLine("Turtle",
+				fmt.Sprintf("%d entries, %d exits, %d skips", len(res.Entries), len(res.Exits), len(res.Skips)),
+				s.now().In(nyLoc).Format("15:04")))
 		}
 	}
 }

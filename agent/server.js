@@ -12,6 +12,7 @@ const OPENCODE_BIN = process.platform === 'win32' ? 'cmd.exe' : 'opencode';
 const OPENCODE_WIN_PREFIX = process.platform === 'win32' ? ['/c', 'opencode.cmd'] : [];
 import axios from 'axios';
 import { buildSystemPrompt } from './harness.js';
+import { formatHeartbeatLine } from './heartbeat-line.js';
 import { AnalysisScheduler } from './analysis-scheduler.js';
 import ChatStore from './chat-store.js';
 import AgentOrchestrator from './orchestrator.js';
@@ -372,6 +373,35 @@ function bindOperationalHooks(targetHarness) {
         if (slackEnabled('errors', sandboxId)) notifySlack(`:rotating_light: ${msg}`, sandboxId);
       }
     } catch { /* silently skip if account unavailable */ }
+  });
+
+  // Heartbeat console line — a one-line "heartbeat processed" confirmation in the agent's dashboard
+  // console on each PROCESSED beat (preflight-skipped beats stay quiet; they already log their own
+  // skip line). Tool calls + trades are counted from THIS beat's own events, reset at beat_start —
+  // sidesteps the cumulative-stats double-increment. Default on; HEARTBEAT_CONSOLE=false disables.
+  // Go-scheduled agents (Turtle/def-Prophet) emit their own line from the Go scheduler, carried to
+  // the Go console by the existing stdout→goLog forwarder.
+  let hbToolCalls = 0;
+  let hbTrades = 0;
+  targetHarness.state.on('beat_start', () => { hbToolCalls = 0; hbTrades = 0; });
+  targetHarness.state.on('tool_call', () => { hbToolCalls += 1; });
+  targetHarness.state.on('trade', () => { hbTrades += 1; });
+  targetHarness.state.on('beat_end', (data) => {
+    if (process.env.HEARTBEAT_CONSOLE === 'false') return;
+    if (data?.skipped) return;
+    const sandboxId = targetHarness.sandboxId;
+    const resolved = getResolvedAgentForSandbox(sandboxId);
+    const etTime = new Date().toLocaleTimeString('en-US', {
+      timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false,
+    });
+    broadcast('agent_log', {
+      message: formatHeartbeatLine({
+        agent: resolved?.name, phase: data?.phase, etTime, toolCalls: hbToolCalls, trades: hbTrades,
+      }),
+      level: 'info',
+      sandboxId,
+      timestamp: new Date().toISOString(),
+    });
   });
 
   scheduleDailySummaryForHarness(targetHarness);
