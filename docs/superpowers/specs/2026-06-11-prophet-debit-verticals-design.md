@@ -50,8 +50,8 @@ A new **`prophet_vertical_*` Go quartet**, mirroring the proven `prophet_hedge_*
 
 ## 4. Data flow
 
-1. **Propose** *(read-only)* — LLM calls `propose_debit_vertical(underlying, direction, expiry, target width)`. Go fetches the chain → snaps strikes → dry-run guard check → prices the net debit → sizes by budget → takes an **entry IV snapshot** → returns structure + decision card. No order placed.
-2. **Place** — LLM calls `place_debit_vertical`. Go re-validates through the guard, builds the `MultiLegOrder` (long `buy_to_open` + short `sell_to_open`, debit limit, strategy-tagged), submits via `mleg`, persists `DBProphetVertical` (`OPEN`) with card + entry snapshot, and writes `DBOrder` rows for audit.
+1. **Propose** *(read-only)* — LLM calls `propose_debit_vertical(underlying, direction, expiry, target width)`. Go fetches the chain → snaps strikes → dry-run guard check → prices the net debit (1 contract) → takes an **entry IV snapshot** → **persists a short-lived proposal record** (proposal ID + TTL + the exact snapped OCC legs + quoted net debit + entry snapshot) → returns the proposal ID + structure + decision card. No order placed.
+2. **Place** — LLM calls `place_debit_vertical(proposal_id)`. Go loads the proposal and **re-prices the exact stored OCC legs — it never re-derives the structure** — and **rejects** if the proposal aged past its TTL or the net debit drifted beyond tolerance (re-validation is a *check*, not a re-derivation; this protects the attribution data, since the card must describe the trade that was actually placed). On pass: re-runs the guard, builds the `MultiLegOrder` (long `buy_to_open` + short `sell_to_open`, debit limit, strategy-tagged) from the stored legs, submits via `mleg`, persists `DBProphetVertical` (`OPEN`) with card + entry snapshot, and writes `DBOrder` rows for audit.
 3. **Manage** *(each tick)* — lifecycle fetches current spread value + spot + IV. The LLM may close on its beat; the deterministic backstops fire regardless.
 4. **Close** *(fail-closed)* — atomic `mleg` combo (`buy_to_close` short + `sell_to_close` long). Mark `CLOSED` **only after the broker confirms both legs flat**; a leg mismatch raises an orphan alert.
 5. **Attribute** — on confirmed close, take an **exit IV snapshot** and decompose realized P&L into direction / theta / IV; write to ledger/card.
@@ -60,15 +60,16 @@ A new **`prophet_vertical_*` Go quartet**, mirroring the proven `prophet_hedge_*
 
 **Entry guardrails** (all must pass; no parallel uncapped path):
 - **Universe gate** — underlying ∈ `config/prophet_tradable_universe.txt`.
-- **Spread/liquidity gate on *both* legs** — run `CheckOptionsOpen` per opening leg (it currently takes one symbol+quote).
-- **Per-vertical debit cap** — net debit ≤ a flag-configurable budget (a `sizeSpread`-style cap). Since max loss = debit, this caps per-trade loss directly.
-- **Aggregate caps** — reuse the existing Prophet sleeve guard + hard caps so verticals count against the same options-exposure ceiling.
+- **Spread/liquidity gate on *both* legs** — run `CheckOptionsOpen` per opening leg. *(Verified 2026-06-11: `CheckOptionsOpen` is side-agnostic and stateless — universe allowlist + bid/ask-width check, no buy-specific branch, no per-symbol mutation — so per-leg reuse on the `sell_to_open` short leg is safe, and the short-leg liquidity check is exactly what we want. It gates universe + liquidity ONLY, not exposure.)*
+- **Size = 1 contract per vertical (v1)** — cleaner attribution, smaller numbers, simpler snapper/tests; reject the proposal if even one contract's net debit exceeds the per-vertical debit cap.
+- **Exposure accounting rule** — a vertical's dollar-risk = **net debit = max loss** (used for the per-vertical debit cap and the per-trade notional cap). The delta-adjusted **sector**-exposure provider receives **both legs**, so their deltas net naturally (a spread's net delta < a single leg's). Reuse the existing Prophet sleeve guard + hard caps ([[risk-enforcement-pr-status]]); confirm the sleeve guard's options dollar cap uses net debit, not gross per-leg premium (§10).
 - **Structure validity** — `structure.go` returns `ok=false` (skip, never half-build) when no genuine debit spread exists at snapped strikes.
 
-**Deterministic backstops** (fire regardless of the LLM):
-- **Force-close before expiry** at DTE ≤ N (e.g. 2 trading days).
-- **Assignment defense** — short leg ITM near expiry → close.
+**Deterministic backstops** (fire regardless of the LLM; **precedence: salvage stop → profit-capture → force-close** as the catch-all):
 - **Salvage stop** — close early when residual value ≤ a floor.
+- **Profit-capture / assignment-avoidance** (renamed from "assignment defense") — a short leg going ITM in a debit vertical means the spread is *winning* (the long leg is deeper ITM by construction), so this **captures the win and sidesteps assignment mechanics — it is not loss defense**, and the card must label a fired instance as a capture, not a failure. **Watch dividend-driven early assignment on short ITM calls** → close before ex-dividend.
+- **Force-close before expiry** at DTE ≤ N (default 2 trading days). **Worthless-spread carve-out (for clean attribution):** if the **entire spread is OTM (both legs)** AND residual ≤ expected exit cost, let it **expire** rather than pay a bid/ask round-trip to close ~zero risk. The carve-out requires *both* legs OTM, not just the short leg — if the long leg is ITM, letting it ride auto-exercises into shares at expiry, the exact mess to avoid.
+- **Roll frequency** — the LLM may close and re-propose further out; v1 does **not** cap roll count (YAGNI): every roll pays full friction, counts against the sleeve cap, and shows in the tally, so churn is self-evident (and itself an educational signal).
 
 **Fail-closed exit:**
 - Exit as an atomic `mleg` combo with a marketable limit.
@@ -92,15 +93,21 @@ A new **`prophet_vertical_*` Go quartet**, mirroring the proven `prophet_hedge_*
 
 Components sum to the modeled total; reconcile to the **realized fill P&L** and book the difference as `residual`. A closed trade then reads: *"−$140: −$60 direction, −$35 theta, −$45 IV crush."*
 
-**Honesty caveat (baked into the card):** Black-Scholes is an *instructional approximation* for American-style equity options, and IV snapshots carry noise. The realized fill P&L is the truth; the decomposition is an explanatory model reconciled to it, not a P&L audit.
+**Honesty caveat (baked into the card):** Black-Scholes is an *instructional approximation* for American-style equity options, and IV snapshots carry noise. The realized fill P&L is the truth; the decomposition is an explanatory model reconciled to it, not a P&L audit. **Components are attributed in a fixed sequential order (theta → direction → IV); cross-effects are booked to the *later* step** — gamma (spot-move × time interaction) lands in `direction`, and the vega-spot interaction (net vega shrinks/flips as spot crosses between the strikes — not small for a vertical near the short strike) lands in `IV`. `residual` reconciles the model to realized P&L but does not isolate these cross-terms. Read "−$45 IV" as "≤ ~$45, with some gamma/vega-spot bleed," not a precise vega P&L.
 
-**Surfacing** (within "card + attribution," not a full dashboard): written to the vertical ledger + per-trade JSON, emitted to the activity log, available via `list_debit_verticals`, and feedable to the existing `trade-grader`/reasoning-digest patterns. One in-scope roll-up: a running **sleeve tally** (cumulative P&L, win rate, total lost-to-theta + lost-to-IV) as a summary line — the "is this sustainable income?" signal.
+**Apply attribution to single-legs too — the comparison is the point.** Goal #2 ("right on direction, still lost to theta/IV") lives on the **single-leg** sleeve, which verticals deliberately *mitigate* (bounded debit, reduced net vega). So the attribution engine is a **structure-agnostic shared service** that also runs on **single-leg closes**, and the sleeve tally **compares** single-leg vs vertical outcomes. (The full decision *card* stays vertical-only.) Cost note: single-legs aren't tracked with entry state today, so this needs a persisted **single-leg entry-IV snapshot at open + a close-attribution hook** — modestly more than "two snapshots," but without it the tally answers "are verticals sustainable income" (nobody asked) instead of demonstrating "naked premium into high IV is a poor default."
+
+**Surfacing** (within "card + attribution," not a full dashboard): written to the ledger + per-trade JSON, emitted to the activity log, available via `list_debit_verticals`, feedable to `trade-grader`/reasoning-digest. The running **sleeve tally** (cumulative P&L, win rate, lost-to-theta + lost-to-IV, **single-leg vs vertical**) is the "is this sustainable income?" signal.
+
+**Pre-registered expectation (locked before the first trade):** *long-premium options carry negative expectancy net of spreads over a meaningful N; a positive result at small N is noise, not edge.* Recorded up front so a lucky early run can't retro-fit the opposite lesson.
 
 ## 7. Testing
 
 - **Pure functions — exhaustive unit tests (TDD):** strike-snapper (call & put, `ok=false` cases, width selection), lifecycle rules (take-profit, salvage stop, force-close-before-expiry, assignment-defense), debit cap/sizing, BS pricer + `attributeVerticalPnl`. **Headline test:** a pure-IV-crush case where `direction ≈ 0` yet the trade loses — attribution must book it to `iv`, and components must reconcile to realized P&L.
 - **Executor / I/O with mocks** (mirror hedge-executor + `position_manager_close` tests): inject `PlaceMultiLegOrderFn` + broker reads. **Non-negotiable:** the fail-closed close — combo confirmed → `CLOSED`; partial/failed → stays `OPEN` + orphan alert, **never** `CLOSED` (test the executor, not just the predicate).
-- **Guard integration:** per-leg `CheckOptionsOpen`, universe rejection, debit-cap rejection.
+- **Guard integration:** per-leg `CheckOptionsOpen`, universe rejection, debit-cap rejection, and a **vertical + single-leg together breaching the exposure ceiling** (net-debit accounting).
+- **Identity contract:** a **stale/drifted-proposal rejection** test — `place` rejects when the proposal aged past TTL or the net debit drifted beyond tolerance.
+- **Single-leg attribution:** the structure-agnostic engine runs on a single-leg close and books theta/IV correctly.
 - **JS proxies:** light `node:test` coverage.
 
 ## 8. Rollout
@@ -113,11 +120,12 @@ Components sum to the modeled total; reconcile to the **realized fill P&L** and 
 
 ## 9. Out of scope (YAGNI)
 
-Credit spreads; calendars/diagonals; >2 legs; the full teaching dashboard; real-money sizing automation; orphan **auto**-close (the `ENABLE_ORPHAN_AUTOCLOSE` seam stays future). Strike-snapper v1 is simple nearest-strike; regime/IV-conditional widths are a future drop-in (like the hedge engine's `selectStructure`). One underlying per vertical.
+Credit spreads; calendars/diagonals; >2 legs; the full teaching dashboard; real-money sizing automation; orphan **auto**-close (the `ENABLE_ORPHAN_AUTOCLOSE` seam stays future); **multi-contract sizing** (v1 = 1 contract); an explicit **roll-count cap** (v1 leaves rolls uncapped, friction-taxed + visible). Strike-snapper v1 is simple nearest-strike; regime/IV-conditional widths are a future drop-in (like the hedge engine's `selectStructure`). One underlying per vertical.
 
-## 10. To verify during planning
+## 10. To verify / settle during planning
 
 - Confirm the `prophet_hedge_executor.go` close path's exact failure handling, to decide reuse-vs-extend for the vertical close.
 - `mleg.MultiLegOrder.LimitPrice` is documented as a net **credit** (positive = receive); a debit vertical submits a net **debit** — settle the sign convention.
-- Exact knob names/defaults for the debit cap and backstop DTE thresholds.
+- **Confirm the Prophet sleeve guard's options dollar cap uses net debit (= max loss), not gross per-leg premium.** (The sector-exposure provider already nets via delta; `CheckOptionsOpen` was verified side-agnostic on 2026-06-11 and is no longer open.)
+- **Defaults to lock (pre-registered knobs):** size = **1 contract/vertical**; proposal **TTL** + net-debit **drift tolerance**; per-vertical **debit cap**; backstop **DTE** (default 2); **salvage floor**; worthless-spread **carve-out threshold**.
 - Whether IV-rank/percentile is readily available from `alpaca_options_data` for the card (degrade gracefully if not).
