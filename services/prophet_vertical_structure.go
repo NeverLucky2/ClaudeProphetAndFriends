@@ -1,6 +1,10 @@
 package services
 
-import "math"
+import (
+	"math"
+
+	"prophet-trader/interfaces"
+)
 
 // VerticalDirection identifies a debit vertical's directional bias.
 type VerticalDirection string
@@ -38,4 +42,49 @@ func verticalEconomics(dir VerticalDirection, longStrike, shortStrike, netDebitP
 		breakeven = longStrike - netDebitPerShare
 	}
 	return maxLoss, maxGain, breakeven
+}
+
+// nearestContract returns the listed contract of contractType whose strike is
+// closest to target. Pure: no I/O. Returns nil if no contract of that type.
+func nearestContract(chain map[string]*interfaces.OptionContract, contractType string, target float64) *interfaces.OptionContract {
+	var best *interfaces.OptionContract
+	bestDist := math.MaxFloat64
+	for _, c := range chain {
+		if c.ContractType != contractType {
+			continue
+		}
+		if d := math.Abs(c.StrikePrice - target); d < bestDist {
+			bestDist = d
+			best = c
+		}
+	}
+	return best
+}
+
+// pickVerticalStrikes snaps a long-leg target strike + a target width to real
+// listed strikes for a debit vertical. Returns ok=false (caller skips, never
+// half-builds) unless two distinct contracts form a genuine debit spread:
+// call_debit needs the short strike strictly ABOVE the long; put_debit strictly
+// BELOW. The long leg is always the more expensive (closer-to-money) leg.
+func pickVerticalStrikes(chain map[string]*interfaces.OptionContract, dir VerticalDirection, longTarget, widthTarget float64) (long, short *interfaces.OptionContract, ok bool) {
+	if widthTarget <= 0 {
+		return nil, nil, false
+	}
+	switch dir {
+	case CallDebit:
+		long = nearestContract(chain, "call", longTarget)
+		short = nearestContract(chain, "call", longTarget+widthTarget)
+		if long == nil || short == nil || short.StrikePrice <= long.StrikePrice {
+			return nil, nil, false
+		}
+	case PutDebit:
+		long = nearestContract(chain, "put", longTarget)
+		short = nearestContract(chain, "put", longTarget-widthTarget)
+		if long == nil || short == nil || short.StrikePrice >= long.StrikePrice {
+			return nil, nil, false
+		}
+	default:
+		return nil, nil, false
+	}
+	return long, short, true
 }
