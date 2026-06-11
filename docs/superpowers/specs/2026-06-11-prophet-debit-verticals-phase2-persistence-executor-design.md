@@ -17,11 +17,13 @@ Phase 2 builds **no LLM-facing surface** (no tools, endpoints, or proposal recor
 
 | # | Decision | Choice |
 |---|---|---|
-| 1 | Management trigger | **Go scheduler** (mirror hedge/Turtle) — a `prophet_vertical_scheduler` runs `RunManageTick` on a market-hours cadence; reconcile + deterministic backstops fire **independently of the LLM heartbeat**. Opens are LLM-triggered (Phase 3); the scheduler only manages. |
-| 2 | Engine shape | Mirror `prophet_hedge_*` (ledger façade + executor + scheduler + gorm model). |
-| 3 | Stop-monitor exclusion | **Free** via a distinct strategy tag `"v2-vertical"` — `prophet_options_stop_monitor` only acts on orders tagged exactly `"v2-options"`, so vertical legs are ignored with no new code. |
+| 1 | Management trigger | **Go intraday loop** — a `prophet_vertical_scheduler` runs `RunManageTick` on a market-hours cadence; reconcile + deterministic backstops fire **independently of the LLM heartbeat**. Opens are LLM-triggered (Phase 3); the scheduler only manages. ⚠️ Loop shape mirrors **`ProphetOptionsStopMonitor.Start(ctx, interval, idleInterval, marketIsOpen)`** (see `cmd/bot/main.go:479`: 1m active / 5m idle / `stopMarketOpen` gate) — NOT the hedge scheduler, which is a once-daily 17:00 ET fire (`nextFireTime`) and the wrong shape for intraday management. Keep the hedge scheduler's `LastResult()` caching pattern for a future status endpoint. |
+| 2 | Engine shape | Mirror `prophet_hedge_*` (ledger façade + executor + gorm model + constants file). |
+| 3 | Stop-monitor exclusion | **Free** via a distinct strategy tag `"v2-vertical"` — `prophet_options_stop_monitor` only acts on orders tagged exactly `"v2-options"` (it already ignores `"prophet-defensive"` and `"v2-options-stop"`), so vertical legs are ignored with no new code. |
 | 4 | Flag | `ENABLE_PROPHET_DEBIT_VERTICALS` → `cfg.EnableProphetDebitVerticals`, default **OFF** (mirror `EnableProphetDefensive`). |
-| 5 | Attribution baseline | The **fill-time** snapshot (captured when the open combo fills), not the propose-time reading — so the baseline matches the real entry price. |
+| 5 | Attribution baseline | The **fill-detection** snapshot — captured on the first manage-tick that observes the open combo filled (within one tick of the actual fill; ≤ the active cadence of drift, acceptable for an instructional decomposition). Not the propose-time reading, so the baseline tracks the real entry. |
+| 6 | mleg sign convention — **RESOLVED** | Per [Alpaca's Options Level 3 docs](https://docs.alpaca.markets/docs/options-level-3-trading): **positive `limit_price` = net debit (we pay), negative = net credit (we receive)**; `PlaceMultiLegOrder` passes the value through unmodified, and `LimitPrice == 0` sends a **market** combo (existing code path, used by hedge closes). The `mleg.go` struct comment ("positive = we receive credit") is stale Harvest-era legacy that contradicts both the docs and the hedge engine's actual usage (positive limits on debit opens) — fix the comment during implementation. Consequences: our **open** submits a positive `verticalDebitLimit` (correct as-is); our **close** must NOT use a positive "marketable limit" (a close *receives* credit — positive would mean "willing to pay") → v1 closes at **market** (`LimitPrice 0`), exactly like hedge `closeSpread`. A negative credit-floor limit on closes is future work. |
+| 7 | Session row | **Dropped** (YAGNI). The hedge's `DBProphetHedgeSession` exists only to dedupe its once-daily heartbeat; an idempotent intraday manage-tick needs no daily dedup, and verticals themselves are the durable state. No session model, no session storage methods. |
 
 ## 3. Architecture & components
 
@@ -29,13 +31,14 @@ Each piece mirrors its `prophet_hedge_*` / Turtle counterpart.
 
 | New / changed | Mirrors | Responsibility |
 |---|---|---|
-| `models/prophet_vertical_models.go` | `prophet_hedge_models.go` | `DBProphetVerticalSpread` (gorm.Model + Direction, both legs+strikes, `Contracts`, `NetDebitPerContract`, `TotalDebit`, `MaxGain`, `Breakeven`, entry-snapshot fields `EntrySpot`/`EntryLongVol`/`EntryShortVol`/`EntryTimeToExpiry`, status `pending_fill\|open\|closing\|closed\|failed`, `CloseReason`, `RealizedPnL`, attribution fields `AttribDirection`/`AttribTheta`/`AttribIV`/`AttribResidual`, `CloseRequested bool`, `OpenedAt`/`ClosedAt`) + `DBProphetVerticalSession` singleton; both with `TableName()`. |
-| `database/storage.go` | hedge storage (`:580–623`) + `AutoMigrate` (`:42`) | Register the model in `AutoMigrate(...)`; add `SaveProphetVerticalSpread` / `ListOpenProphetVerticalSpreads` / `GetProphetVerticalSpreadByID` / session getter+setter. |
+| `models/prophet_vertical_models.go` | `prophet_hedge_models.go` | `DBProphetVerticalSpread` (gorm.Model + Direction, both legs+strikes, `Contracts`, `NetDebitPerContract`, `TotalDebit`, `MaxGain`, `Breakeven`, entry-snapshot fields `EntrySpot`/`EntryLongVol`/`EntryShortVol`/`EntryTimeToExpiry`, status `pending_fill\|open\|closing\|closed\|failed`, `CloseReason`, `RealizedPnL`, attribution fields `AttribDirection`/`AttribTheta`/`AttribIV`/`AttribResidual`, `CloseRequested bool`, `OpenedAt`/`ClosedAt`) with `TableName()`. **No session model** (decision #7). |
+| `database/storage.go` | hedge storage (`:580–623`) + `AutoMigrate` (`:42`) | Register the model in `AutoMigrate(...)`; add `SaveProphetVerticalSpread` / `ListOpenProphetVerticalSpreads` / `GetProphetVerticalSpreadByID`. No session methods. |
+| `services/prophet_vertical_constants.go` | `prophet_hedge_constants.go` | Compile-time tuning constants (the established pattern — the hedge engine uses constants, not env knobs): `verticalStrategyTag = "v2-vertical"`, `verticalForceDTE = 2`, `verticalCaptureDTE = 3`, `verticalSalvageFloorFrac = 0.20`, `verticalExpectedExitCost = 5.0` (per-contract $), `verticalTickInterval = 5min` / `verticalIdleInterval = 30min` (gentler than the stop monitor's 1m/5m — day-scale backstops don't need minute-scale polling, and the shared account has 429 history). These are the pre-registered knobs from the feature spec §10. |
 | `services/prophet_vertical_ledger.go` | `prophet_hedge_ledger.go` | Thin façade over a `verticalLedgerStore` interface (implemented by `*database.LocalStorage`, faked in tests). |
-| `services/prophet_vertical_executor.go` | `prophet_hedge_executor.go` | The engine: `Place`, `RunManageTick`, `RequestClose`, plus internal `reconcilePending`/`reconcileClosing`/`closeVertical` (§4). Consumes Phase 1's `verticalDebitLimit`, `selectVerticalExit`, `attributeVerticalPnl`. |
-| `services/prophet_vertical_scheduler.go` | `prophet_hedge_scheduler.go` | Thin loop driving `RunManageTick` on a market-hours cadence (holiday/window-aware like the hedge scheduler). |
+| `services/prophet_vertical_executor.go` | `prophet_hedge_executor.go` | The engine: `Place`, `RunManageTick`, `RequestClose`, plus internal `reconcilePending`/`reconcileClosing`/`closeVertical` (§4). Consumes Phase 1's `verticalDebitLimit`, `selectVerticalExit`, `attributeVerticalPnl`. Depends on small consumer-defined interfaces mirroring the hedge's split (`verticalChainFetcher` for `GetOptionSnapshot`, `verticalBarFetcher` for `GetLatestBar`, `verticalMlegTrader` for `PlaceMultiLegOrder`+`GetOrder`, `verticalGuard` for `CheckOptionsOpen`). |
+| `services/prophet_vertical_scheduler.go` | `ProphetOptionsStopMonitor.Start` loop shape | Timer loop: every `verticalTickInterval` while `marketIsOpen()`, else `verticalIdleInterval`; calls `RunManageTick`; caches a `LastResult()` like the hedge scheduler for a future status endpoint. |
 | `config/config.go` (+ `config_test.go`) | `EnableProphetDefensive` | `EnableProphetDebitVerticals` ← `ENABLE_PROPHET_DEBIT_VERTICALS`, default OFF. |
-| `cmd/bot/main.go` (`~:419`) | hedge scheduler startup | Gated start of the vertical scheduler when the flag is on and `tradingService != nil`. |
+| `cmd/bot/main.go` (stop-monitor wiring at `:479` is the closer anchor; hedge startup at `~:419` for the flag-gate idiom) | both | Gated start of the vertical scheduler when the flag is on and `tradingService != nil`; reuse the same `marketIsOpen`-style gate the stop monitor uses. |
 
 **Falls out for free:** the migration (AutoMigrate creates the table) and the stop-monitor exclusion (the `"v2-vertical"` tag).
 
@@ -48,7 +51,7 @@ Each piece mirrors its `prophet_hedge_*` / Turtle counterpart.
    - `closing` → filled: set `closed`, compute `RealizedPnL`, compute **attribution** via `attributeVerticalPnl(entry, exit, realized)`. Canceled/rejected → **revert to `open`** (retry next tick) — never strand.
 2. **For each `open` vertical:** snapshot current spread value + spot + leg IVs → if `CloseRequested` (set by `RequestClose`) close `llm_requested`; else build `VerticalState`, call `selectVerticalExit` → if `act`, close with that reason; `let_expire` holds.
 
-`closeVertical(sp, reason)` — places the reverse atomic mleg combo (`sell_to_close` long + `buy_to_close` short, marketable limit, `"v2-vertical"` tag), flips the row to `closing`, stores `CloseOrderID`+reason. **Fail-closed: only `reconcileClosing` marks the row `closed`, after the broker confirms the fill** — the carry-forward applied to the options path.
+`closeVertical(sp, reason)` — places the reverse atomic mleg combo (`sell_to_close` long + `buy_to_close` short, **market close: `LimitPrice 0`**, `"v2-vertical"` tag), flips the row to `closing`, stores `CloseOrderID`+reason. Market close mirrors hedge `closeSpread` exactly and sidesteps the sign hazard (decision #6): a close *receives* credit, so a positive "marketable limit" would mean "willing to pay" — wrong. **Fail-closed: only `reconcileClosing` marks the row `closed`, after the broker confirms the fill** — the carry-forward applied to the options path.
 
 `Place(ctx, structure)` (called by Phase 3; tested here with a mock trader) — builds the opening combo (`buy_to_open` long + `sell_to_open` short, debit limit from `verticalDebitLimit`, `"v2-vertical"` tag), runs **per-leg `CheckOptionsOpen`**, submits, persists `pending_fill` + `EntryOrderID`.
 
@@ -61,7 +64,7 @@ Each piece mirrors its `prophet_hedge_*` / Turtle counterpart.
 **Phase 2 does NOT build** (all Phase 3): the proposal record/TTL + identity contract, the MCP tools, the HTTP endpoints, the propose-time decision card.
 
 **Snapshot capture:**
-- **Entry baseline** captured at **fill** (`reconcilePending`→open) from the two leg `GetOptionSnapshot`s (each carries `ImpliedVolatility`) + `GetLatestBar(underlying)` for spot. `EntryTimeToExpiry` = (Expiration − fillTime)/365y.
+- **Entry baseline** captured at **fill-detection** (`reconcilePending`→open, i.e. the first manage-tick that observes the fill — within one `verticalTickInterval` of the actual fill) from the two leg `GetOptionSnapshot`s (each carries `ImpliedVolatility`) + `GetLatestBar(underlying)` for spot. `EntryTimeToExpiry` = (Expiration − detectionTime)/365y. The ≤ one-tick drift is acceptable for an instructional decomposition and is part of why `Residual` exists.
 - **Exit snapshot** captured the same way at the close fill, then fed with the entry snapshot to `attributeVerticalPnl`.
 - *Deliberate split:* Phase 3's propose-time IV reading is for the **card's** "why a vertical" context; the **attribution** uses the fill-time snapshot. Two readings, two purposes.
 - **Graceful degradation:** missing/zero IV → `bsPrice` falls back to intrinsic, so attribution still produces (lower-confidence) numbers rather than failing.
@@ -70,10 +73,10 @@ Each piece mirrors its `prophet_hedge_*` / Turtle counterpart.
 
 Mirror the hedge-executor and `position_manager` fail-closed-close suites.
 - **Ledger:** in-memory fake `verticalLedgerStore` round-trips; a DB-backed `LocalStorage` test mirroring `storage_prophet_hedge_test.go`.
-- **Executor (mocks: mleg trader `PlaceMultiLegOrder`+`GetOrder`, chain `GetOptionSnapshot`/`GetLatestBar`, guard):**
-  - `Place` builds the correct opening combo + runs per-leg guard + persists `pending_fill`; a guard rejection blocks the open.
+- **Executor (mocks implementing the four consumer interfaces: `verticalMlegTrader`, `verticalChainFetcher`, `verticalBarFetcher`, `verticalGuard`):**
+  - `Place` builds the correct opening combo (positive debit `LimitPrice`, `"v2-vertical"` tag) + runs per-leg guard + persists `pending_fill`; a guard rejection blocks the open.
   - `reconcilePending`: filled → `open` with entry snapshot captured; canceled → `failed`.
-  - **Non-negotiable — fail-closed close:** `closeVertical`→`closing`; reconcile filled → `closed` + `RealizedPnL` + attribution; **canceled/rejected close → reverts to `open`, never stranded**.
+  - **Non-negotiable — fail-closed close:** `closeVertical` submits the reverse combo **at market (`LimitPrice == 0`) — assert this in the test** (sign-hazard guard) → `closing`; reconcile filled → `closed` + `RealizedPnL` + attribution; **canceled/rejected close → reverts to `open`, never stranded**.
   - `RunManageTick`: a seeded vertical tripping a backstop (DTE ≤ forceDTE) closes with the right reason; a `CloseRequested` one closes `llm_requested`; a `let_expire` carve-out state holds.
 - **Config:** `config_test` asserts `EnableProphetDebitVerticals` defaults OFF.
 
@@ -89,7 +92,10 @@ The tools / endpoints / proposal record + identity contract (Phase 3); single-le
 
 ## 9. To verify / settle during planning
 
-- The exact `mleg.MultiLegOrder.LimitPrice` sign for the **opening debit** (documented as net "credit"/positive=receive) vs the **closing credit** — confirm both directions against the hedge usage (hedge close uses `LimitPrice 0` = market; opening uses a positive `marketableLimitCapped` debit).
-- The scheduler cadence + market-hours/holiday window (reuse the hedge scheduler's `nyLoc` + `usMarketHolidays2026` helpers vs a vertical-specific window).
-- Whether `DBProphetVerticalSession` is needed at all (the hedge uses it for a once-daily duplicate-heartbeat guard; a manage-tick that runs every N minutes may not need it — decide during planning).
-- Backstop config knob wiring (`VerticalExitConfig` values: `ForceDTE`, `SalvageFloorFrac`, `CaptureDTE`, `ExpectedExitCost`) — source from config/flags with the Phase-1 defaults.
+*(Resolved during spec review 2026-06-11: the mleg sign convention → decision #6, positive=debit/negative=credit per Alpaca docs, close at market; the session-row question → decision #7, dropped; backstop knobs → `prophet_vertical_constants.go`, decision in §3.)*
+
+Remaining:
+- **Fix the stale `mleg.go` comment** while in there: `LimitPrice` is documented in code as "net credit (positive = we receive)" but Alpaca's convention (and the hedge's actual usage) is positive = net **debit**. One-line doc fix, prevents the next reader from inverting a sign.
+- The exact `marketIsOpen` gate to pass the scheduler (reuse the stop monitor's `stopMarketOpen` from `cmd/bot/main.go:479`, or its underlying helper — name it during planning).
+- Confirm `GetOptionSnapshot`'s `ImpliedVolatility` is populated on the paper feed for the legs we trade (the field exists on `interfaces.OptionContract`; degradation path already designed if it's zero).
+- Whether Phase 3 wants the scheduler's `LastResult()` surfaced on a status endpoint now or later (build the method regardless — it's ~10 lines and mirrors the hedge scheduler).
