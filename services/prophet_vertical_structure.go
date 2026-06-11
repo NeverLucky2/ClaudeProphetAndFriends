@@ -88,3 +88,11 @@ func pickVerticalStrikes(chain map[string]*interfaces.OptionContract, dir Vertic
 	}
 	return long, short, true
 }
+
+// verticalDebitLimit prices a marketable net-debit limit for a debit vertical,
+// reusing the hedge pricer (marketableLimitCapped). longMid/shortMid are
+// per-share mids; longBA/shortBA the per-leg bid/ask widths; width the absolute
+// strike distance (the intrinsic ceiling — the spread can't be worth more).
+func verticalDebitLimit(longMid, shortMid, longBA, shortBA, width, bufferFrac float64) float64 {
+	return marketableLimitCapped(longMid, shortMid, longBA, shortBA, bufferFrac, math.Abs(width))
+}

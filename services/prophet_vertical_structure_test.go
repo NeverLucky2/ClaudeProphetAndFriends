@@ -96,3 +96,14 @@ func TestPickVerticalStrikes_Degenerate_NotOK(t *testing.T) {
 		t.Fatal("expected ok=false for non-positive width")
 	}
 }
+
+func TestVerticalDebitLimit_CrossesAndCaps(t *testing.T) {
+	lim := verticalDebitLimit(10, 4, 0.40, 0.40, 20, 0.25)
+	if !almostEqual(lim, 6.20, 1e-9) {
+		t.Fatalf("limit = %v, want 6.20", lim)
+	}
+	capped := verticalDebitLimit(10, 4, 0.40, 0.40, 1, 0.25)
+	if !almostEqual(capped, 1.0, 1e-9) {
+		t.Fatalf("capped limit = %v, want 1.0", capped)
+	}
+}
