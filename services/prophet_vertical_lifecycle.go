@@ -55,3 +55,56 @@ func bothLegsOTM(dir VerticalDirection, spot, longStrike, shortStrike float64) b
 	}
 	return false
 }
+
+// VerticalExitConfig holds the deterministic backstop thresholds.
+type VerticalExitConfig struct {
+	SalvageFloorFrac float64 // salvage-stop at this fraction of the debit paid
+	ForceDTE         int     // force-close at/under this DTE
+	CaptureDTE       int     // capture short-ITM at/under this DTE
+	ExpectedExitCost float64 // per-contract round-trip cost for the carve-out
+}
+
+// VerticalState is the live snapshot a manage-tick evaluates.
+type VerticalState struct {
+	Direction         VerticalDirection
+	Spot              float64
+	LongStrike        float64
+	ShortStrike       float64
+	CurrentValueTotal float64
+	MaxGainTotal      float64
+	TotalDebit        float64
+	DTE               int
+}
+
+// selectVerticalExit applies the deterministic backstops in precedence order
+// (salvage → profit-capture → force-close as the catch-all) and returns the
+// close reason with act=true, or act=false to hold. The worthless-spread
+// carve-out suppresses a force-close (returns "let_expire", act=false) when the
+// ENTIRE spread is OTM and residual ≤ the expected exit cost — letting it expire
+// rather than pay a bid/ask round-trip to close ~zero risk. The carve-out
+// requires BOTH legs OTM (not just the short leg): a still-ITM long leg would
+// auto-exercise into shares at expiry. When both legs are OTM and we're at/under
+// force-close DTE, the carve-out takes precedence over salvage to avoid
+// unnecessary closing costs for near-worthless spreads.
+func selectVerticalExit(s VerticalState, cfg VerticalExitConfig) (reason string, act bool) {
+	// Special case: at/under force-close DTE with both legs OTM, check the worthless
+	// carve-out before salvage to avoid closing near-worthless spreads.
+	if shouldForceCloseBeforeExpiry(s.DTE, cfg.ForceDTE) &&
+		bothLegsOTM(s.Direction, s.Spot, s.LongStrike, s.ShortStrike) {
+		if s.CurrentValueTotal <= cfg.ExpectedExitCost {
+			return "let_expire", false
+		}
+		return "force_close", true
+	}
+
+	if shouldSalvageStop(s.CurrentValueTotal, s.TotalDebit, cfg.SalvageFloorFrac) {
+		return "salvage_stop", true
+	}
+	if s.DTE <= cfg.CaptureDTE && shortLegITM(s.Direction, s.Spot, s.ShortStrike) {
+		return "profit_capture", true
+	}
+	if shouldForceCloseBeforeExpiry(s.DTE, cfg.ForceDTE) {
+		return "force_close", true
+	}
+	return "", false
+}

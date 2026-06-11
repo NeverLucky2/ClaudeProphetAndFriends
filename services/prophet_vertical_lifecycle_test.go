@@ -69,3 +69,67 @@ func TestBothLegsOTM(t *testing.T) {
 		t.Fatal("spot between strikes -> long put ITM, not both-OTM")
 	}
 }
+
+func baseExitCfg() VerticalExitConfig {
+	return VerticalExitConfig{SalvageFloorFrac: 0.20, ForceDTE: 2, CaptureDTE: 3, ExpectedExitCost: 5}
+}
+
+func baseCallState() VerticalState {
+	return VerticalState{
+		Direction: CallDebit, Spot: 250, LongStrike: 240, ShortStrike: 260,
+		CurrentValueTotal: 800, MaxGainTotal: 1300, TotalDebit: 700, DTE: 20,
+	}
+}
+
+func TestSelectVerticalExit_HoldsWhenNoTrigger(t *testing.T) {
+	if reason, act := selectVerticalExit(baseCallState(), baseExitCfg()); act || reason != "" {
+		t.Fatalf("expected hold, got (%q,%v)", reason, act)
+	}
+}
+
+func TestSelectVerticalExit_SalvageWinsOverForceClose(t *testing.T) {
+	s := baseCallState()
+	s.CurrentValueTotal = 100
+	s.DTE = 1
+	if reason, act := selectVerticalExit(s, baseExitCfg()); !act || reason != "salvage_stop" {
+		t.Fatalf("expected salvage_stop, got (%q,%v)", reason, act)
+	}
+}
+
+func TestSelectVerticalExit_ProfitCaptureOnShortITMNearExpiry(t *testing.T) {
+	s := baseCallState()
+	s.Spot = 261
+	s.DTE = 3
+	if reason, act := selectVerticalExit(s, baseExitCfg()); !act || reason != "profit_capture" {
+		t.Fatalf("expected profit_capture, got (%q,%v)", reason, act)
+	}
+}
+
+func TestSelectVerticalExit_ForceCloseCatchAll(t *testing.T) {
+	s := baseCallState()
+	s.Spot = 250
+	s.DTE = 2
+	if reason, act := selectVerticalExit(s, baseExitCfg()); !act || reason != "force_close" {
+		t.Fatalf("expected force_close, got (%q,%v)", reason, act)
+	}
+}
+
+func TestSelectVerticalExit_WorthlessCarveOut_LetsExpire(t *testing.T) {
+	s := baseCallState()
+	s.Spot = 235
+	s.CurrentValueTotal = 4
+	s.DTE = 2
+	if reason, act := selectVerticalExit(s, baseExitCfg()); act || reason != "let_expire" {
+		t.Fatalf("expected let_expire/hold, got (%q,%v)", reason, act)
+	}
+}
+
+func TestSelectVerticalExit_NotWorthlessEnough_ForceCloses(t *testing.T) {
+	s := baseCallState()
+	s.Spot = 235
+	s.CurrentValueTotal = 9
+	s.DTE = 2
+	if reason, act := selectVerticalExit(s, baseExitCfg()); !act || reason != "force_close" {
+		t.Fatalf("expected force_close, got (%q,%v)", reason, act)
+	}
+}
