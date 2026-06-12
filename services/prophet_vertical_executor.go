@@ -219,7 +219,98 @@ func (e *ProphetVerticalExecutor) captureEntrySnapshot(ctx context.Context, sp *
 	sp.EntryTimeToExpiry = sp.Expiration.Sub(now).Hours() / 24 / 365
 }
 
-func (e *ProphetVerticalExecutor) reconcileClosing(ctx context.Context, sp *models.DBProphetVerticalSpread, now time.Time, res *VerticalTickResult) {
+// closeVertical places the reverse atomic combo AT MARKET (LimitPrice 0 —
+// mirrors hedge closeSpread; per Alpaca's sign convention a positive limit on
+// a credit-receiving close would mean "willing to pay") and flips the row to
+// "closing". Fail-closed: ONLY reconcileClosing marks the row closed, after
+// the broker confirms the fill.
+func (e *ProphetVerticalExecutor) closeVertical(ctx context.Context, sp *models.DBProphetVerticalSpread, reason string, res *VerticalTickResult) {
+	id, err := e.trader.PlaceMultiLegOrder(ctx, MultiLegOrder{
+		Underlying: sp.Underlying, Contracts: sp.Contracts, TimeInForce: "day",
+		Strategy: verticalStrategyTag,
+		Legs: []MultiLegOrderLeg{
+			{Symbol: sp.LongSymbol, Side: "sell", PositionIntent: "sell_to_close"},
+			{Symbol: sp.ShortSymbol, Side: "buy", PositionIntent: "buy_to_close"},
+		},
+	})
+	if err != nil {
+		res.Errors = append(res.Errors, fmt.Sprintf("close %s (%s): %v", sp.VerticalID, reason, err))
+		return
+	}
+	sp.Status = "closing"
+	sp.CloseReason = reason
+	sp.CloseOrderID = id
+	if err := e.ledger.Save(sp); err != nil {
+		res.Errors = append(res.Errors, fmt.Sprintf("close %s: save: %v", sp.VerticalID, err))
+		return
+	}
+	res.Closed = append(res.Closed, sp.VerticalID)
 }
+
+// reconcileClosing finalizes a vertical whose close combo filled: realized P&L
+// = close proceeds − TotalDebit, plus the direction/theta/IV attribution from
+// the stored entry snapshot vs the exit snapshot captured now. A canceled/
+// rejected close REVERTS to "open" so manageOpen retries next tick — never
+// strand a position in limbo (the fail-closed carry-forward).
+func (e *ProphetVerticalExecutor) reconcileClosing(ctx context.Context, sp *models.DBProphetVerticalSpread, now time.Time, res *VerticalTickResult) {
+	if sp.CloseOrderID == "" {
+		res.Errors = append(res.Errors, fmt.Sprintf("reconcile-close %s: empty CloseOrderID", sp.VerticalID))
+		return
+	}
+	ord, err := e.trader.GetOrder(ctx, sp.CloseOrderID)
+	if err != nil {
+		res.Errors = append(res.Errors, fmt.Sprintf("reconcile-close %s: GetOrder: %v", sp.VerticalID, err))
+		return
+	}
+	switch ord.Status {
+	case "filled", "partially_filled":
+		if ord.FilledAvgPrice == nil {
+			res.Errors = append(res.Errors, fmt.Sprintf("reconcile-close %s: %s with nil fill — leaving closing", sp.VerticalID, ord.Status))
+			return
+		}
+		proceeds := *ord.FilledAvgPrice * 100 * float64(sp.Contracts)
+		sp.RealizedPnL = proceeds - sp.TotalDebit
+		sp.Status = "closed"
+		t := now
+		sp.ClosedAt = &t
+		e.attributeClose(ctx, sp, now)
+		if err := e.ledger.Save(sp); err != nil {
+			res.Errors = append(res.Errors, fmt.Sprintf("reconcile-close %s: save closed: %v", sp.VerticalID, err))
+		}
+	case "canceled", "expired", "rejected":
+		sp.Status = "open"
+		sp.CloseOrderID = ""
+		if err := e.ledger.Save(sp); err != nil {
+			res.Errors = append(res.Errors, fmt.Sprintf("reconcile-close %s: save revert: %v", sp.VerticalID, err))
+		}
+	default:
+		// still working — leave closing
+	}
+}
+
+// attributeClose computes the teaching decomposition at close-fill detection.
+// Best-effort: degraded inputs produce degraded components; Residual always
+// reconciles the model to the realized fill P&L.
+func (e *ProphetVerticalExecutor) attributeClose(ctx context.Context, sp *models.DBProphetVerticalSpread, now time.Time) {
+	exit := VerticalSnapshot{TimeToExpiry: sp.Expiration.Sub(now).Hours() / 24 / 365}
+	if bar, err := e.bars.GetLatestBar(ctx, sp.Underlying); err == nil && bar != nil {
+		exit.Spot = bar.Close
+	}
+	if long, err := e.chain.GetOptionSnapshot(ctx, sp.LongSymbol); err == nil && long != nil {
+		exit.LongVol = long.ImpliedVolatility
+	}
+	if short, err := e.chain.GetOptionSnapshot(ctx, sp.ShortSymbol); err == nil && short != nil {
+		exit.ShortVol = short.ImpliedVolatility
+	}
+	entry := VerticalSnapshot{
+		Spot: sp.EntrySpot, LongVol: sp.EntryLongVol, ShortVol: sp.EntryShortVol,
+		TimeToExpiry: sp.EntryTimeToExpiry,
+	}
+	a := attributeVerticalPnl(VerticalDirection(sp.Direction), sp.LongStrike, sp.ShortStrike, entry, exit, sp.RealizedPnL, sp.Contracts)
+	sp.AttribDirection, sp.AttribTheta, sp.AttribIV, sp.AttribResidual = a.Direction, a.Theta, a.IV, a.Residual
+}
+
+// manageOpen is a placeholder for Task 6.
 func (e *ProphetVerticalExecutor) manageOpen(ctx context.Context, open []*models.DBProphetVerticalSpread, now time.Time, res *VerticalTickResult) {
 }
+

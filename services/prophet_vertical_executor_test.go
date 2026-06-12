@@ -270,3 +270,117 @@ func TestReconcilePending_DegradedFeedStillOpens(t *testing.T) {
 		t.Fatalf("degraded snapshot fields must stay zero: %+v", sp)
 	}
 }
+
+func openVerticalRow(store *fakeVerticalStore) *models.DBProphetVerticalSpread {
+	sp := &models.DBProphetVerticalSpread{
+		VerticalID: "v1", Underlying: "AMZN", Direction: "call_debit",
+		Expiration:  time.Now().Add(35 * 24 * time.Hour),
+		LongSymbol:  "AMZN260717C00240000", LongStrike: 240,
+		ShortSymbol: "AMZN260717C00260000", ShortStrike: 260,
+		Contracts: 1, NetDebitPerContract: 5.0, TotalDebit: 500, MaxGain: 1500,
+		EntrySpot: 245, EntryLongVol: 0.35, EntryShortVol: 0.32, EntryTimeToExpiry: 35.0 / 365,
+		Status: "open", OpenedAt: time.Now().Add(-48 * time.Hour),
+	}
+	_ = store.SaveProphetVerticalSpread(sp)
+	return sp
+}
+
+func TestCloseVertical_MarketComboAndClosingState(t *testing.T) {
+	store := newFakeVerticalStore()
+	mleg := &vertStubMleg{}
+	ex, _ := newVertExec(store, vertStubChain{snaps: amznCallSnaps()}, vertStubBars{}, mleg, &vertStubGuard{})
+	sp := openVerticalRow(store)
+
+	ex.closeVertical(context.Background(), sp, "force_close", &VerticalTickResult{})
+
+	if len(mleg.placed) != 1 {
+		t.Fatalf("want 1 close combo, got %d", len(mleg.placed))
+	}
+	o := mleg.placed[0].order
+	// SIGN-HAZARD GUARD: a close RECEIVES credit; per Alpaca (positive=debit)
+	// a positive limit here would mean "willing to pay". v1 closes at MARKET.
+	if o.LimitPrice != 0 {
+		t.Fatalf("close must be a market combo (LimitPrice==0), got %v", o.LimitPrice)
+	}
+	if len(o.Legs) != 2 ||
+		o.Legs[0].Symbol != sp.LongSymbol || o.Legs[0].Side != "sell" || o.Legs[0].PositionIntent != "sell_to_close" ||
+		o.Legs[1].Symbol != sp.ShortSymbol || o.Legs[1].Side != "buy" || o.Legs[1].PositionIntent != "buy_to_close" {
+		t.Fatalf("close legs wrong: %+v", o.Legs)
+	}
+	if o.Strategy != verticalStrategyTag {
+		t.Fatalf("close must carry the vertical tag, got %q", o.Strategy)
+	}
+	if sp.Status != "closing" || sp.CloseOrderID != "mleg-vert" || sp.CloseReason != "force_close" {
+		t.Fatalf("row not flipped to closing: %+v", sp)
+	}
+}
+
+func TestReconcileClosing_FilledClosesWithPnLAndAttribution(t *testing.T) {
+	store := newFakeVerticalStore()
+	avg := 8.0 // close proceeds 8.00/share → realized = 800 − 500 = +300
+	mleg := &vertStubMleg{orders: map[string]*interfaces.Order{
+		"c1": {ID: "c1", Status: "filled", FilledQty: 1, FilledAvgPrice: &avg},
+	}}
+	bars := vertStubBars{bars: map[string]*interfaces.Bar{"AMZN": {Close: 258.0}}}
+	ex, _ := newVertExec(store, vertStubChain{snaps: amznCallSnaps()}, bars, mleg, &vertStubGuard{})
+	sp := openVerticalRow(store)
+	sp.Status = "closing"
+	sp.CloseOrderID = "c1"
+	sp.CloseReason = "llm_requested"
+
+	ex.RunManageTick(context.Background(), time.Now(), &VerticalTickResult{})
+
+	if sp.Status != "closed" {
+		t.Fatalf("filled close must finalize closed, got %s", sp.Status)
+	}
+	if !almostEqual(sp.RealizedPnL, 300, 1e-9) {
+		t.Fatalf("realized = %v, want 300", sp.RealizedPnL)
+	}
+	if sp.ClosedAt == nil {
+		t.Fatal("ClosedAt must be set")
+	}
+	sum := sp.AttribDirection + sp.AttribTheta + sp.AttribIV + sp.AttribResidual
+	if !almostEqual(sum, sp.RealizedPnL, 1e-6) {
+		t.Fatalf("attribution components must reconcile to realized P&L: sum=%v realized=%v", sum, sp.RealizedPnL)
+	}
+	if sp.AttribDirection == 0 && sp.AttribTheta == 0 && sp.AttribIV == 0 {
+		t.Fatal("attribution must be computed (non-degenerate inputs)")
+	}
+}
+
+func TestReconcileClosing_CanceledRevertsToOpen_NeverStranded(t *testing.T) {
+	// THE fail-closed test: a canceled/rejected close must revert to open
+	// (retry next tick) — NEVER closed, NEVER stuck in closing.
+	store := newFakeVerticalStore()
+	mleg := &vertStubMleg{orders: map[string]*interfaces.Order{
+		"c1": {ID: "c1", Status: "canceled"},
+	}}
+	ex, _ := newVertExec(store, vertStubChain{}, vertStubBars{}, mleg, &vertStubGuard{})
+	sp := openVerticalRow(store)
+	sp.Status = "closing"
+	sp.CloseOrderID = "c1"
+
+	ex.RunManageTick(context.Background(), time.Now(), &VerticalTickResult{})
+
+	if sp.Status != "open" {
+		t.Fatalf("canceled close must revert to open (never closed/stranded), got %s", sp.Status)
+	}
+	if sp.CloseOrderID != "" {
+		t.Fatal("CloseOrderID must be cleared on revert")
+	}
+}
+
+func TestReconcileClosing_NilFillPriceStaysClosing(t *testing.T) {
+	store := newFakeVerticalStore()
+	mleg := &vertStubMleg{orders: map[string]*interfaces.Order{
+		"c1": {ID: "c1", Status: "filled", FilledQty: 1, FilledAvgPrice: nil},
+	}}
+	ex, _ := newVertExec(store, vertStubChain{}, vertStubBars{}, mleg, &vertStubGuard{})
+	sp := openVerticalRow(store)
+	sp.Status = "closing"
+	sp.CloseOrderID = "c1"
+	ex.RunManageTick(context.Background(), time.Now(), &VerticalTickResult{})
+	if sp.Status != "closing" {
+		t.Fatalf("nil fill price must leave closing (retry), got %s", sp.Status)
+	}
+}
