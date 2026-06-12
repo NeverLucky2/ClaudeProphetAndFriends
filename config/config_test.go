@@ -216,3 +216,25 @@ func TestLoad_ProphetSleeveDefaults(t *testing.T) {
 		t.Errorf("deadline default = %q, want empty", c.ProphetSleeveDeadline)
 	}
 }
+
+func TestLoadConfig_ProphetDebitVerticalsDefaultsOff(t *testing.T) {
+	t.Setenv("OPERATOR_EMAIL", "test@example.com")
+	t.Setenv("ENABLE_PROPHET_DEBIT_VERTICALS", "")
+	if err := Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if AppConfig.EnableProphetDebitVerticals {
+		t.Fatal("ENABLE_PROPHET_DEBIT_VERTICALS must default to false")
+	}
+}
+
+func TestLoadConfig_ProphetDebitVerticalsOn(t *testing.T) {
+	t.Setenv("OPERATOR_EMAIL", "test@example.com")
+	t.Setenv("ENABLE_PROPHET_DEBIT_VERTICALS", "true")
+	if err := Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !AppConfig.EnableProphetDebitVerticals {
+		t.Fatal("ENABLE_PROPHET_DEBIT_VERTICALS=true must set the flag")
+	}
+}
