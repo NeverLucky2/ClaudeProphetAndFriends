@@ -435,6 +435,31 @@ func main() {
 		logger.Warn("Defensive-Prophet hedge requested but trading service unavailable — scheduler not started")
 	}
 
+	// Prophet debit-vertical manage loop (ENABLE_PROPHET_DEBIT_VERTICALS=false
+	// by default). LLM-triggered opens arrive via the Phase-3 tools; this
+	// intraday loop only reconciles fills and fires the deterministic backstops,
+	// so with no verticals it is a no-op. Distinct "v2-vertical" strategy tag
+	// keeps the options stop monitor away from vertical legs.
+	if cfg.EnableProphetDebitVerticals && tradingService != nil {
+		verticalLedger := services.NewProphetVerticalLedger(storageService)
+		verticalOptionsData := services.NewAlpacaOptionsDataService(cfg.AlpacaAPIKey, cfg.AlpacaSecretKey)
+		verticalExecutor := services.NewProphetVerticalExecutor(
+			verticalLedger,
+			verticalOptionsData,
+			services.NewHedgeAccountFetcher(tradingService, dataService), // GetLatestBar provider
+			tradingService,
+			tradeGuard,
+			logger,
+		)
+		nyLocVert, _ := time.LoadLocation("America/New_York")
+		verticalMarketOpen := func() bool { return services.StaticMarketPhase(time.Now().UTC(), nyLocVert) == "open" }
+		verticalScheduler := services.NewProphetVerticalScheduler(verticalExecutor, services.VerticalTickInterval(), services.VerticalIdleInterval(), verticalMarketOpen, logger)
+		go verticalScheduler.Start(ctx)
+		logger.Info("Prophet debit-vertical scheduler started (ENABLE_PROPHET_DEBIT_VERTICALS=true)")
+	} else if cfg.EnableProphetDebitVerticals {
+		logger.Warn("Prophet debit-verticals requested but trading service unavailable — scheduler not started")
+	}
+
 	// Beat-context aggregator endpoint. Bundles account, positions, econ
 	// blackout, regime gate, and segment P&L into a single response so the
 	// harness can inject one read-only block per beat instead of the LLM

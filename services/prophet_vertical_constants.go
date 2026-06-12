@@ -30,3 +30,7 @@ func verticalExitConfig() VerticalExitConfig {
 		ExpectedExitCost: verticalExpectedExitCost,
 	}
 }
+
+// VerticalTickInterval / VerticalIdleInterval expose the cadence to cmd/bot.
+func VerticalTickInterval() time.Duration { return verticalTickInterval }
+func VerticalIdleInterval() time.Duration { return verticalIdleInterval }

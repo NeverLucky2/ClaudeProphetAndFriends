@@ -9,7 +9,11 @@ type MultiLegOrder struct {
 	Underlying  string
 	Legs        []MultiLegOrderLeg
 	Contracts   int
-	LimitPrice  float64 // net credit limit (positive = we receive credit)
+	// LimitPrice is passed straight through to Alpaca's mleg limit_price.
+	// Alpaca convention (Options Level 3 docs): POSITIVE = net debit we pay,
+	// NEGATIVE = net credit we receive, 0 = market combo. (An earlier comment
+	// here said positive=credit — that was Harvest-era legacy and wrong.)
+	LimitPrice  float64
 	TimeInForce string  // "day"
 	// Strategy identifies the agent that owns this combo. Encoded into
 	// Alpaca's client_order_id as "{strategy}:{uuid}" so the tag survives
