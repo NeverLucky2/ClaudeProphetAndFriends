@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"prophet-trader/interfaces"
+	"prophet-trader/models"
 )
 
 // ── stub harness (mirrors the hedge stubs) ──────────────────────────
@@ -177,5 +178,95 @@ func TestPlace_MissingQuoteFailsClosed(t *testing.T) {
 	}
 	if len(mleg.placed) != 0 || len(store.spreads) != 0 {
 		t.Fatal("no order and no row on a failed place")
+	}
+}
+
+func pendingRow(store *fakeVerticalStore) *models.DBProphetVerticalSpread {
+	sp := &models.DBProphetVerticalSpread{
+		VerticalID: "v1", Underlying: "AMZN", Direction: "call_debit",
+		Expiration:  time.Now().Add(35 * 24 * time.Hour),
+		LongSymbol:  "AMZN260717C00240000", LongStrike: 240,
+		ShortSymbol: "AMZN260717C00260000", ShortStrike: 260,
+		Contracts: 1, NetDebitPerContract: 5.15, TotalDebit: 515,
+		EntryOrderID: "o1", Status: "pending_fill",
+	}
+	_ = store.SaveProphetVerticalSpread(sp)
+	return sp
+}
+
+func TestReconcilePending_FilledOpensAndSnapshots(t *testing.T) {
+	store := newFakeVerticalStore()
+	avg := 5.0
+	mleg := &vertStubMleg{orders: map[string]*interfaces.Order{
+		"o1": {ID: "o1", Status: "filled", FilledQty: 1, FilledAvgPrice: &avg},
+	}}
+	bars := vertStubBars{bars: map[string]*interfaces.Bar{"AMZN": {Close: 245.0}}}
+	ex, _ := newVertExec(store, vertStubChain{snaps: amznCallSnaps()}, bars, mleg, &vertStubGuard{})
+	pendingRow(store)
+
+	res := &VerticalTickResult{}
+	ex.RunManageTick(context.Background(), time.Now(), res)
+
+	sp := store.spreads["v1"]
+	if sp.Status != "open" {
+		t.Fatalf("filled entry must open, got %s (errors: %v)", sp.Status, res.Errors)
+	}
+	if !almostEqual(sp.NetDebitPerContract, 5.0, 1e-9) || !almostEqual(sp.TotalDebit, 500, 1e-9) {
+		t.Fatalf("fill economics not updated: %+v", sp)
+	}
+	if !almostEqual(sp.MaxGain, (20-5.0)*100, 1e-9) {
+		t.Fatalf("MaxGain not recomputed from fill debit: %v", sp.MaxGain)
+	}
+	if sp.EntrySpot != 245.0 || sp.EntryLongVol != 0.35 || sp.EntryShortVol != 0.32 || sp.EntryTimeToExpiry <= 0 {
+		t.Fatalf("entry snapshot not captured: %+v", sp)
+	}
+	if sp.OpenedAt.IsZero() {
+		t.Fatal("OpenedAt must be set on fill")
+	}
+}
+
+func TestReconcilePending_CanceledFails_NeverSingleLeg(t *testing.T) {
+	store := newFakeVerticalStore()
+	mleg := &vertStubMleg{orders: map[string]*interfaces.Order{
+		"o1": {ID: "o1", Status: "canceled", FilledQty: 0},
+	}}
+	ex, _ := newVertExec(store, vertStubChain{}, vertStubBars{}, mleg, &vertStubGuard{})
+	pendingRow(store)
+	ex.RunManageTick(context.Background(), time.Now(), &VerticalTickResult{})
+	if s := store.spreads["v1"].Status; s != "failed" {
+		t.Fatalf("canceled entry must become failed (never open/single-leg), got %s", s)
+	}
+}
+
+func TestReconcilePending_StillWorkingLeavesPending(t *testing.T) {
+	store := newFakeVerticalStore()
+	mleg := &vertStubMleg{orders: map[string]*interfaces.Order{
+		"o1": {ID: "o1", Status: "accepted"},
+	}}
+	ex, _ := newVertExec(store, vertStubChain{}, vertStubBars{}, mleg, &vertStubGuard{})
+	pendingRow(store)
+	ex.RunManageTick(context.Background(), time.Now(), &VerticalTickResult{})
+	if s := store.spreads["v1"].Status; s != "pending_fill" {
+		t.Fatalf("working order must stay pending_fill, got %s", s)
+	}
+}
+
+func TestReconcilePending_DegradedFeedStillOpens(t *testing.T) {
+	// Missing bar/snapshots must NOT block the open transition — snapshot
+	// fields stay zero (attribution degrades; Residual absorbs).
+	store := newFakeVerticalStore()
+	avg := 5.0
+	mleg := &vertStubMleg{orders: map[string]*interfaces.Order{
+		"o1": {ID: "o1", Status: "filled", FilledQty: 1, FilledAvgPrice: &avg},
+	}}
+	ex, _ := newVertExec(store, vertStubChain{snaps: map[string]*interfaces.OptionContract{}}, vertStubBars{}, mleg, &vertStubGuard{})
+	pendingRow(store)
+	ex.RunManageTick(context.Background(), time.Now(), &VerticalTickResult{})
+	sp := store.spreads["v1"]
+	if sp.Status != "open" {
+		t.Fatalf("degraded feed must not block the open, got %s", sp.Status)
+	}
+	if sp.EntrySpot != 0 || sp.EntryLongVol != 0 {
+		t.Fatalf("degraded snapshot fields must stay zero: %+v", sp)
 	}
 }
