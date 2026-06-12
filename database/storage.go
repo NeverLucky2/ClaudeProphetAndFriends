@@ -53,6 +53,7 @@ func NewLocalStorage(dbPath string) (*LocalStorage, error) {
 		&models.DBTurtleSession{},
 		&models.DBProphetHedgeSpread{},
 		&models.DBProphetHedgeSession{},
+		&models.DBProphetVerticalSpread{},
 	); err != nil {
 		return nil, fmt.Errorf("failed to migrate database: %w", err)
 	}
@@ -624,6 +625,28 @@ func (s *LocalStorage) GetProphetHedgeClosedPnL(start, end time.Time) (float64, 
 		Where("status = ? AND closed_at >= ? AND closed_at < ?", "closed", start, end).
 		Select("COALESCE(SUM(realized_pnl), 0)").Scan(&total).Error
 	return total, err
+}
+
+// ── Prophet debit-vertical storage ────────────────────────────────
+
+func (s *LocalStorage) SaveProphetVerticalSpread(e *models.DBProphetVerticalSpread) error {
+	return s.db.Save(e).Error
+}
+
+// ListOpenProphetVerticalSpreads returns verticals still in a live state
+// (pending_fill, open, closing) — the set the executor reconciles/manages.
+func (s *LocalStorage) ListOpenProphetVerticalSpreads() ([]*models.DBProphetVerticalSpread, error) {
+	var out []*models.DBProphetVerticalSpread
+	err := s.db.Where("status IN ?", []string{"pending_fill", "open", "closing"}).Find(&out).Error
+	return out, err
+}
+
+func (s *LocalStorage) GetProphetVerticalSpreadByID(id uint) (*models.DBProphetVerticalSpread, error) {
+	var e models.DBProphetVerticalSpread
+	if err := s.db.First(&e, id).Error; err != nil {
+		return nil, err
+	}
+	return &e, nil
 }
 
 // Close closes the database connection
