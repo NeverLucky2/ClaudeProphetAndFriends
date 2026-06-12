@@ -397,8 +397,10 @@ import (
 	"time"
 
 	"prophet-trader/interfaces"
-	"prophet-trader/models"
 )
+
+// NOTE: do NOT import "prophet-trader/models" yet — nothing in this task's
+// code references it directly (unused import = compile error). Task 4 adds it.
 
 // ── stub harness (mirrors the hedge stubs) ──────────────────────────
 
@@ -739,7 +741,7 @@ git commit -m "feat(prophet-vertical): executor Place — per-leg guard, debit c
 - Modify: `services/prophet_vertical_executor.go`
 - Test: `services/prophet_vertical_executor_test.go` (append)
 
-- [ ] **Step 1: Write the failing test** — append:
+- [ ] **Step 1: Write the failing test** — append (and add `"prophet-trader/models"` to the test file's import block — this task is the first to reference it):
 
 ```go
 func pendingRow(store *fakeVerticalStore) *models.DBProphetVerticalSpread {
