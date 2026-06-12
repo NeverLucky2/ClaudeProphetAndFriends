@@ -384,3 +384,103 @@ func TestReconcileClosing_NilFillPriceStaysClosing(t *testing.T) {
 		t.Fatalf("nil fill price must leave closing (retry), got %s", sp.Status)
 	}
 }
+
+// snapsWithMids returns leg snapshots with the given per-share mids (BA ±0.10).
+func snapsWithMids(longMid, shortMid float64) map[string]*interfaces.OptionContract {
+	return map[string]*interfaces.OptionContract{
+		"AMZN260717C00240000": {Symbol: "AMZN260717C00240000", ContractType: "call", StrikePrice: 240, Bid: longMid - 0.10, Ask: longMid + 0.10, ImpliedVolatility: 0.30},
+		"AMZN260717C00260000": {Symbol: "AMZN260717C00260000", ContractType: "call", StrikePrice: 260, Bid: shortMid - 0.10, Ask: shortMid + 0.10, ImpliedVolatility: 0.28},
+	}
+}
+
+func TestManageOpen_CloseRequestedClosesLLMReason(t *testing.T) {
+	store := newFakeVerticalStore()
+	mleg := &vertStubMleg{}
+	bars := vertStubBars{bars: map[string]*interfaces.Bar{"AMZN": {Close: 250.0}}}
+	ex, _ := newVertExec(store, vertStubChain{snaps: snapsWithMids(7.0, 2.0)}, bars, mleg, &vertStubGuard{})
+	sp := openVerticalRow(store)
+	sp.CloseRequested = true
+
+	ex.RunManageTick(context.Background(), time.Now(), &VerticalTickResult{})
+
+	if sp.Status != "closing" || sp.CloseReason != "llm_requested" {
+		t.Fatalf("CloseRequested must close with llm_requested, got %s/%s", sp.Status, sp.CloseReason)
+	}
+}
+
+func TestManageOpen_ForceCloseAtDTEFloor(t *testing.T) {
+	store := newFakeVerticalStore()
+	mleg := &vertStubMleg{}
+	bars := vertStubBars{bars: map[string]*interfaces.Bar{"AMZN": {Close: 250.0}}} // between strikes
+	ex, _ := newVertExec(store, vertStubChain{snaps: snapsWithMids(10.2, 0.1)}, bars, mleg, &vertStubGuard{})
+	sp := openVerticalRow(store)
+	sp.Expiration = time.Now().Add(36 * time.Hour) // DTE 1 ≤ force 2
+
+	ex.RunManageTick(context.Background(), time.Now(), &VerticalTickResult{})
+
+	if sp.Status != "closing" || sp.CloseReason != "force_close" {
+		t.Fatalf("DTE≤floor must force-close, got %s/%s", sp.Status, sp.CloseReason)
+	}
+}
+
+func TestManageOpen_LetExpireCarveOutHolds(t *testing.T) {
+	store := newFakeVerticalStore()
+	mleg := &vertStubMleg{}
+	bars := vertStubBars{bars: map[string]*interfaces.Bar{"AMZN": {Close: 230.0}}} // both legs OTM
+	// residual value: mids 0.03/0.01 → value $2 ≤ $5 expected exit cost
+	ex, _ := newVertExec(store, vertStubChain{snaps: snapsWithMids(0.03, 0.01)}, bars, mleg, &vertStubGuard{})
+	sp := openVerticalRow(store)
+	sp.Expiration = time.Now().Add(36 * time.Hour)
+
+	res := &VerticalTickResult{}
+	ex.RunManageTick(context.Background(), time.Now(), res)
+
+	if sp.Status != "open" || len(mleg.placed) != 0 {
+		t.Fatalf("worthless both-OTM spread must ride to expiry (let_expire), got %s, %d orders", sp.Status, len(mleg.placed))
+	}
+}
+
+func TestManageOpen_HealthyHolds(t *testing.T) {
+	store := newFakeVerticalStore()
+	mleg := &vertStubMleg{}
+	bars := vertStubBars{bars: map[string]*interfaces.Bar{"AMZN": {Close: 250.0}}}
+	ex, _ := newVertExec(store, vertStubChain{snaps: snapsWithMids(7.0, 2.0)}, bars, mleg, &vertStubGuard{})
+	openVerticalRow(store) // DTE ~35, value $500 (healthy)
+
+	ex.RunManageTick(context.Background(), time.Now(), &VerticalTickResult{})
+
+	if len(mleg.placed) != 0 {
+		t.Fatal("healthy vertical must hold (no close order)")
+	}
+}
+
+func TestManageOpen_BlindNearExpiryForceCloses(t *testing.T) {
+	// Degraded feed (no snapshots/spot) at the DTE floor: close protectively
+	// rather than ride blind into expiry.
+	store := newFakeVerticalStore()
+	mleg := &vertStubMleg{}
+	ex, _ := newVertExec(store, vertStubChain{snaps: map[string]*interfaces.OptionContract{}}, vertStubBars{}, mleg, &vertStubGuard{})
+	sp := openVerticalRow(store)
+	sp.Expiration = time.Now().Add(36 * time.Hour)
+
+	ex.RunManageTick(context.Background(), time.Now(), &VerticalTickResult{})
+
+	if sp.Status != "closing" || sp.CloseReason != "force_close" {
+		t.Fatalf("blind near-expiry must force-close, got %s/%s", sp.Status, sp.CloseReason)
+	}
+}
+
+func TestRequestClose_SetsFlag(t *testing.T) {
+	store := newFakeVerticalStore()
+	ex, _ := newVertExec(store, vertStubChain{}, vertStubBars{}, &vertStubMleg{}, &vertStubGuard{})
+	sp := openVerticalRow(store)
+	if err := ex.RequestClose(context.Background(), sp.VerticalID); err != nil {
+		t.Fatalf("request close: %v", err)
+	}
+	if !store.spreads["v1"].CloseRequested {
+		t.Fatal("CloseRequested must be persisted")
+	}
+	if err := ex.RequestClose(context.Background(), "nope"); err == nil {
+		t.Fatal("unknown vertical must error")
+	}
+}

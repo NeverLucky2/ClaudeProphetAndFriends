@@ -310,7 +310,77 @@ func (e *ProphetVerticalExecutor) attributeClose(ctx context.Context, sp *models
 	sp.AttribDirection, sp.AttribTheta, sp.AttribIV, sp.AttribResidual = a.Direction, a.Theta, a.IV, a.Residual
 }
 
-// manageOpen is a placeholder for Task 6.
+// verticalValue prices the spread at current quotes: (longMid − shortMid)
+// × 100 × contracts. valued=false on any missing leg quote.
+func (e *ProphetVerticalExecutor) verticalValue(ctx context.Context, sp *models.DBProphetVerticalSpread) (float64, bool) {
+	long, err := e.chain.GetOptionSnapshot(ctx, sp.LongSymbol)
+	if err != nil || long == nil {
+		return 0, false
+	}
+	short, err := e.chain.GetOptionSnapshot(ctx, sp.ShortSymbol)
+	if err != nil || short == nil {
+		return 0, false
+	}
+	longMid := (long.Bid + long.Ask) / 2
+	shortMid := (short.Bid + short.Ask) / 2
+	return (longMid - shortMid) * 100 * float64(sp.Contracts), true
+}
+
+// manageOpen applies the LLM close request and the deterministic backstops to
+// every "open" vertical. Precedence lives in selectVerticalExit: the near-expiry
+// both-legs-OTM branch evaluates FIRST (let_expire if residual ≤ exit cost,
+// else force_close), then salvage → profit-capture → force-close.
+// Degraded feed: if neither value nor spot is available we cannot evaluate the
+// resolver — but at/under the force DTE we close protectively rather than ride
+// blind into expiry; otherwise skip this tick.
 func (e *ProphetVerticalExecutor) manageOpen(ctx context.Context, open []*models.DBProphetVerticalSpread, now time.Time, res *VerticalTickResult) {
+	for _, sp := range open {
+		if sp.Status != "open" {
+			continue // pending_fill/closing handled by reconcile
+		}
+		if sp.CloseRequested {
+			e.closeVertical(ctx, sp, "llm_requested", res)
+			continue
+		}
+		var spot float64
+		if bar, err := e.bars.GetLatestBar(ctx, sp.Underlying); err == nil && bar != nil {
+			spot = bar.Close
+		}
+		value, valued := e.verticalValue(ctx, sp)
+		dte := verticalDTE(sp.Expiration, now)
+		if !valued || spot <= 0 {
+			if dte <= verticalForceDTE {
+				e.closeVertical(ctx, sp, "force_close", res)
+			} else {
+				res.Skips = append(res.Skips, fmt.Sprintf("%s: quotes unavailable — skipping tick", sp.VerticalID))
+			}
+			continue
+		}
+		state := VerticalState{
+			Direction: VerticalDirection(sp.Direction), Spot: spot,
+			LongStrike: sp.LongStrike, ShortStrike: sp.ShortStrike,
+			CurrentValueTotal: value, MaxGainTotal: sp.MaxGain, TotalDebit: sp.TotalDebit,
+			DTE: dte,
+		}
+		if reason, act := selectVerticalExit(state, verticalExitConfig()); act {
+			e.closeVertical(ctx, sp, reason, res)
+		}
+	}
+}
+
+// RequestClose marks a vertical for LLM-initiated close; the next manage tick
+// executes it through the same fail-closed closeVertical path as the backstops.
+func (e *ProphetVerticalExecutor) RequestClose(_ context.Context, verticalID string) error {
+	open, err := e.ledger.ListOpen()
+	if err != nil {
+		return fmt.Errorf("request close: %w", err)
+	}
+	for _, sp := range open {
+		if sp.VerticalID == verticalID {
+			sp.CloseRequested = true
+			return e.ledger.Save(sp)
+		}
+	}
+	return fmt.Errorf("request close: no live vertical %q", verticalID)
 }
 
