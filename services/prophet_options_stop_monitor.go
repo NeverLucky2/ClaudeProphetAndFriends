@@ -120,22 +120,91 @@ func lossFraction(p *interfaces.OptionsPosition) (float64, bool) {
 	return -p.UnrealizedPL / p.CostBasis, true
 }
 
-// prophetPositions returns the long single-leg options positions that belong to
-// Prophet — i.e. broker long us_option positions (shorts excluded). The retired
-// Harvest condors left no legs to exclude.
-func (m *ProphetOptionsStopMonitor) prophetPositions(ctx context.Context) ([]*interfaces.OptionsPosition, error) {
-	all, err := m.positions.ListOptionsPositions(ctx)
-	if err != nil {
-		return nil, err
+// isExecutedBuy reports whether o is a buy that actually acquired contracts:
+// any positive filled qty, or a filled/partially_filled status (real broker
+// fills always carry both; some fixtures set only the status). Working/unfilled
+// buys do not count.
+func isExecutedBuy(o *interfaces.Order) bool {
+	if o.Side != "buy" {
+		return false
 	}
+	return o.FilledQty > 0 || o.Status == "filled" || o.Status == "partially_filled"
+}
+
+// attributedToProphetSingleLeg reports whether symbol is positively attributable
+// to Prophet's v2-options single-leg strategy: among executed buys for the exact
+// OCC contract, at least one is tagged v2-options and none is tagged anything
+// else. Fails closed when no executed buy is found (aged out / sells only) and
+// when any other-tagged buy contaminates ownership (manual, v2-vertical,
+// prophet-defensive, …). Prophet single-leg never buys-to-close, so a v2-options
+// buy is always an open.
+func attributedToProphetSingleLeg(symbol string, orders []*interfaces.Order) bool {
+	sawV2Options := false
+	for _, o := range orders {
+		if o.Symbol != symbol || !isExecutedBuy(o) {
+			continue
+		}
+		if interfaces.ParseStrategyFromClientOrderID(o.ClientOrderID) == prophetStrategyID {
+			sawV2Options = true
+		} else {
+			return false
+		}
+	}
+	return sawV2Options
+}
+
+// hasPairedShort reports whether the account holds a short option leg on the
+// same (underlying, expiration, option-type) as longSymbol — i.e. longSymbol is
+// the long leg of a vertical/spread. Only a positively-parsed, positively-
+// matched short returns true; an unparseable symbol on either side contributes
+// no pairing (Gate C must add a skip only on a positively found pair, never on
+// uncertainty).
+func hasPairedShort(longSymbol string, all []*interfaces.OptionsPosition) bool {
+	lu, le, lt, ok := ParseOCC(longSymbol)
+	if !ok {
+		return false
+	}
+	for _, p := range all {
+		if p.Side != "short" {
+			continue
+		}
+		if su, se, st, ok := ParseOCC(p.Symbol); ok && su == lu && se == le && st == lt {
+			return true
+		}
+	}
+	return false
+}
+
+// scopeEligibleLongs returns the long single-leg positions the monitor may
+// flatten: those positively attributed to Prophet's v2-options strategy
+// (Gate A) that are not the long leg of a spread (Gate C). Shorts are never
+// eligible. A long dropped while already past the stop threshold is logged once
+// (skipped_unowned, naming the gate) so the monitor visibly declines a
+// non-Prophet / spread leg and a systemic attribution failure stays observable.
+func (m *ProphetOptionsStopMonitor) scopeEligibleLongs(all []*interfaces.OptionsPosition, orders []*interfaces.Order) []*interfaces.OptionsPosition {
 	var out []*interfaces.OptionsPosition
 	for _, p := range all {
 		if p.Side != "long" {
 			continue
 		}
+		gate := ""
+		switch {
+		case !attributedToProphetSingleLeg(p.Symbol, orders):
+			gate = "A:attribution"
+		case hasPairedShort(p.Symbol, all):
+			gate = "C:paired-short"
+		}
+		if gate != "" {
+			if frac, ok := lossFraction(p); ok && frac >= m.cfg.StopPct {
+				m.logger.WithFields(logrus.Fields{
+					"symbol": p.Symbol, "gate": gate, "loss_fraction": frac,
+				}).Warn("prophet_options_stop_skipped_unowned")
+			}
+			continue
+		}
 		out = append(out, p)
 	}
-	return out, nil
+	return out
 }
 
 // workingFlattenOrder returns the monitor's own still-working sell-to-close
@@ -317,16 +386,17 @@ func (m *ProphetOptionsStopMonitor) EvaluateTick(ctx context.Context, now time.T
 		m.logger.Warn("prophet_options_stop_grace_suppressed")
 		return
 	}
-	positions, err := m.prophetPositions(ctx)
-	if err != nil {
-		m.logger.WithError(err).Warn("prophet_options_stop: scoping failed; skipping tick")
-		return
-	}
 	orders, err := m.flattener.ListOrders(ctx, "all")
 	if err != nil {
 		m.logger.WithError(err).Warn("prophet_options_stop: list orders failed; skipping tick")
 		return
 	}
+	all, err := m.positions.ListOptionsPositions(ctx)
+	if err != nil {
+		m.logger.WithError(err).Warn("prophet_options_stop: scoping failed; skipping tick")
+		return
+	}
+	positions := m.scopeEligibleLongs(all, orders)
 	for _, p := range positions {
 		frac, ok := lossFraction(p)
 		if !ok {

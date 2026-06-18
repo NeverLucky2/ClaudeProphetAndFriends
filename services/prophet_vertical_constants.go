@@ -7,8 +7,11 @@ import "time"
 // teaching-toy values.
 const (
 	verticalStrategyTag = "v2-vertical" // distinct from "v2-options" so the
-	// options stop monitor ignores vertical legs (it filters on exactly
-	// "v2-options") and broker reconciliation attributes combos correctly.
+	// options stop monitor never flattens a vertical leg: its scoping requires
+	// positive "v2-options" attribution (Gate A in prophet_options_stop_monitor.go)
+	// and skips any long whose opening buy is tagged otherwise; the structural
+	// paired-short backstop (Gate C) catches the leg too. Broker reconciliation
+	// also attributes combos correctly by this tag.
 	verticalContracts        = 1      // v1: always 1 contract (clean attribution)
 	verticalDebitCapUSD      = 1000.0 // max net debit per vertical (= max loss cap), absolute $
 	verticalLimitBufferFrac  = 0.25   // marketable-limit buffer (same as hedge opens)

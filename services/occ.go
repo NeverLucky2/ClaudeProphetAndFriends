@@ -52,3 +52,16 @@ func IsOptionSymbol(symbol string) bool {
 	}
 	return true
 }
+
+// ParseOCC splits an OCC option symbol (ROOT + YYMMDD + C/P + 8-digit strike)
+// into its parts. ok is false for non-option symbols; it delegates the format
+// check to IsOptionSymbol so the two stay in lockstep. The strike tail is not
+// returned (Gate C does not need it).
+func ParseOCC(symbol string) (underlying, expiration string, optType byte, ok bool) {
+	if !IsOptionSymbol(symbol) {
+		return "", "", 0, false
+	}
+	root := ParseOCCUnderlying(symbol)
+	rest := symbol[len(root):] // root is ASCII, so byte-len == rune-count
+	return root, rest[0:6], rest[6], true
+}

@@ -46,6 +46,7 @@ func TestStuckExit_PlacesMarketableFlattenWhenLLMStuck(t *testing.T) {
 		llmSell("a", "MSFT_C", "canceled", 0, 300, now),
 		llmSell("b", "MSFT_C", "canceled", 0, 200, now),
 		llmSell("c", "MSFT_C", "canceled", 0, 90, now),
+		v2OptionsFilledBuy("MSFT_C"),
 	}}
 	m := enableStuck(newTestMonitor(pos, q, fl))
 	m.SetBeatObserver(beatObserved(now.Add(-time.Minute)))
@@ -76,6 +77,7 @@ func TestStuckExit_BelowRepriceThresholdNoAction(t *testing.T) {
 	fl := &recordingFlattener{orders: []*interfaces.Order{
 		llmSell("a", "MSFT_C", "canceled", 0, 200, now),
 		llmSell("b", "MSFT_C", "canceled", 0, 90, now),
+		v2OptionsFilledBuy("MSFT_C"),
 	}}
 	m := enableStuck(newTestMonitor(pos, q, fl))
 	m.SetBeatObserver(beatObserved(now.Add(-time.Minute)))
@@ -94,6 +96,7 @@ func TestStuckExit_DisabledNoAction(t *testing.T) {
 		llmSell("a", "MSFT_C", "canceled", 0, 300, now),
 		llmSell("b", "MSFT_C", "canceled", 0, 200, now),
 		llmSell("c", "MSFT_C", "canceled", 0, 90, now),
+		v2OptionsFilledBuy("MSFT_C"),
 	}}
 	// NOTE: enableStuck NOT called → flag default OFF.
 	m := newTestMonitor(pos, q, fl)
@@ -115,6 +118,7 @@ func TestStuckExit_RecentFillMeansProgressNoAction(t *testing.T) {
 		llmSell("c", "MSFT_C", "canceled", 0, 90, now),
 		// A recent partial fill: the LLM IS making progress → not stuck.
 		llmSell("d", "MSFT_C", "partially_filled", 1, 30, now),
+		v2OptionsFilledBuy("MSFT_C"),
 	}}
 	m := enableStuck(newTestMonitor(pos, q, fl))
 	m.SetBeatObserver(beatObserved(now.Add(-time.Minute)))
@@ -134,6 +138,7 @@ func TestStuckExit_MonitorOwnOrdersDoNotCount(t *testing.T) {
 		{ID: "s1", Symbol: "MSFT_C", Side: "sell", Status: "canceled", ClientOrderID: "v2-options-stop:MSFT_C:1", SubmittedAt: now.Add(-300 * time.Second)},
 		{ID: "s2", Symbol: "MSFT_C", Side: "sell", Status: "canceled", ClientOrderID: "v2-options-stop:MSFT_C:2", SubmittedAt: now.Add(-200 * time.Second)},
 		{ID: "s3", Symbol: "MSFT_C", Side: "sell", Status: "canceled", ClientOrderID: "v2-options-stop:MSFT_C:3", SubmittedAt: now.Add(-90 * time.Second)},
+		v2OptionsFilledBuy("MSFT_C"),
 	}}
 	m := enableStuck(newTestMonitor(pos, q, fl))
 	m.SetBeatObserver(beatObserved(now.Add(-time.Minute)))
@@ -156,6 +161,7 @@ func TestStuckExit_LossPathTakesPrecedenceAndCooloffStillApplies(t *testing.T) {
 		llmSell("a", "MSFT_C", "canceled", 0, 300, now),
 		llmSell("b", "MSFT_C", "canceled", 0, 200, now),
 		llmSell("c", "MSFT_C", "canceled", 0, 90, now),
+		// Note: the "buy1" order above already provides attribution; no need to add v2OptionsFilledBuy
 	}}
 	m := enableStuck(newTestMonitor(pos, q, fl))
 	m.SetBeatObserver(beatObserved(now.Add(-time.Minute)))
@@ -180,6 +186,7 @@ func TestStuckExit_CancelsWorkingLLMSellThenPlaces(t *testing.T) {
 			llmSell("b", "MSFT_C", "canceled", 0, 200, now),
 			llmSell("c", "MSFT_C", "canceled", 0, 90, now),
 			working,
+			v2OptionsFilledBuy("MSFT_C"),
 		},
 		byID: map[string]*interfaces.Order{"w": {ID: "w", Status: "canceled", FilledQty: 0}},
 	}
@@ -208,6 +215,7 @@ func TestStuckExit_NoDoubleSendWhenMonitorOrderWorking(t *testing.T) {
 		llmSell("b", "MSFT_C", "canceled", 0, 200, now),
 		llmSell("c", "MSFT_C", "canceled", 0, 90, now),
 		monitorWorking,
+		v2OptionsFilledBuy("MSFT_C"),
 	}}
 	m := enableStuck(newTestMonitor(pos, q, fl))
 	m.SetBeatObserver(beatObserved(now.Add(-time.Minute)))

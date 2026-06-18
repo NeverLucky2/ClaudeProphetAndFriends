@@ -44,3 +44,27 @@ func TestIsOptionSymbol(t *testing.T) {
 		}
 	}
 }
+
+func TestParseOCC(t *testing.T) {
+	cases := []struct {
+		in    string
+		under string
+		exp   string
+		typ   byte
+		ok    bool
+	}{
+		{"TSLA251219C00400000", "TSLA", "251219", 'C', true},
+		{"NVDA250620P00130000", "NVDA", "250620", 'P', true},
+		{"SPY250620C00500000", "SPY", "250620", 'C', true},
+		{"QQQ", "", "", 0, false},    // bare ticker
+		{"", "", "", 0, false},       // empty
+		{"NVDA_C", "", "", 0, false}, // toy / non-OCC
+	}
+	for _, c := range cases {
+		under, exp, typ, ok := ParseOCC(c.in)
+		if ok != c.ok || under != c.under || exp != c.exp || typ != c.typ {
+			t.Errorf("ParseOCC(%q) = (%q,%q,%q,%v), want (%q,%q,%q,%v)",
+				c.in, under, exp, string(typ), ok, c.under, c.exp, string(c.typ), c.ok)
+		}
+	}
+}
