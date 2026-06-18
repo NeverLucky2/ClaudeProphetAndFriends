@@ -384,3 +384,26 @@ func (e *ProphetVerticalExecutor) RequestClose(_ context.Context, verticalID str
 	return fmt.Errorf("request close: no live vertical %q", verticalID)
 }
 
+// EnrichedVertical is an open vertical plus live valuation for the list endpoint.
+type EnrichedVertical struct {
+	Row     *models.DBProphetVerticalSpread `json:"row"`
+	Value   float64                         `json:"value"`
+	ValueOK bool                            `json:"value_ok"`
+	DTE     int                             `json:"dte"`
+}
+
+// ListOpenVerticalsEnriched returns all open verticals with live value + DTE.
+// Valuation failures (no quote) yield ValueOK=false rather than dropping the row.
+func (e *ProphetVerticalExecutor) ListOpenVerticalsEnriched(ctx context.Context, now time.Time) ([]EnrichedVertical, error) {
+	rows, err := e.ledger.ListOpen()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]EnrichedVertical, 0, len(rows))
+	for _, r := range rows {
+		v, ok := e.verticalValue(ctx, r)
+		out = append(out, EnrichedVertical{Row: r, Value: v, ValueOK: ok, DTE: verticalDTE(r.Expiration, now)})
+	}
+	return out, nil
+}
+

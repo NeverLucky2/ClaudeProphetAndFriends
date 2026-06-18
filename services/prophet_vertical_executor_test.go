@@ -484,3 +484,50 @@ func TestRequestClose_SetsFlag(t *testing.T) {
 		t.Fatal("unknown vertical must error")
 	}
 }
+
+func TestListOpenVerticalsEnriched(t *testing.T) {
+	store := newFakeVerticalStore()
+	now := time.Now()
+	expiration := now.Add(7 * 24 * time.Hour)
+
+	// Create an open row with known valuation
+	sp := &models.DBProphetVerticalSpread{
+		VerticalID: "v-enriched-1", Underlying: "AMZN", Direction: "call_debit",
+		Expiration:  expiration,
+		LongSymbol:  "AMZN260717C00240000", LongStrike: 240,
+		ShortSymbol: "AMZN260717C00260000", ShortStrike: 260,
+		Contracts: 1, NetDebitPerContract: 5.0, TotalDebit: 500, MaxGain: 1500,
+		EntrySpot: 245, EntryLongVol: 0.35, EntryShortVol: 0.32, EntryTimeToExpiry: 35.0 / 365,
+		Status: "open", OpenedAt: now.Add(-48 * time.Hour),
+	}
+	_ = store.SaveProphetVerticalSpread(sp)
+
+	// Build executor with chain containing both legs (prices: long 6.80/7.20 mid=7.00, short 1.90/2.10 mid=2.00)
+	// Value = (7.00 - 2.00) * 100 * 1 = 500
+	chain := vertStubChain{snaps: amznCallSnaps()}
+	ex, _ := newVertExec(store, chain, vertStubBars{}, &vertStubMleg{}, &vertStubGuard{})
+
+	enriched, err := ex.ListOpenVerticalsEnriched(context.Background(), now)
+	if err != nil {
+		t.Fatalf("ListOpenVerticalsEnriched: %v", err)
+	}
+	if len(enriched) != 1 {
+		t.Fatalf("expected 1 enriched row, got %d", len(enriched))
+	}
+
+	ev := enriched[0]
+	if ev.Row.VerticalID != "v-enriched-1" {
+		t.Fatalf("row ID wrong: %q", ev.Row.VerticalID)
+	}
+	if !ev.ValueOK {
+		t.Fatal("valuation must succeed (both legs quoted)")
+	}
+	expectedValue := (7.00 - 2.00) * 100 * 1
+	if !almostEqual(ev.Value, expectedValue, 1e-9) {
+		t.Fatalf("value wrong: got %v, want %v", ev.Value, expectedValue)
+	}
+	dte := verticalDTE(expiration, now)
+	if ev.DTE != dte {
+		t.Fatalf("DTE wrong: got %d, want %d", ev.DTE, dte)
+	}
+}

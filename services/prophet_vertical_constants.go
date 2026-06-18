@@ -19,6 +19,8 @@ const (
 	verticalCaptureDTE       = 3      // capture short-ITM at/under this DTE
 	verticalSalvageFloorFrac = 0.20   // salvage-stop at ≤20% of debit paid
 	verticalExpectedExitCost = 5.0    // $/contract round-trip estimate for the let-expire carve-out
+	verticalProposalTTL      = 3 * time.Minute // propose→place validity window
+	verticalDebitDriftTolerance = 0.15 // reject place if net debit moved >15% vs the quoted card
 
 	verticalTickInterval = 5 * time.Minute  // manage cadence while market open
 	verticalIdleInterval = 30 * time.Minute // re-check cadence while closed

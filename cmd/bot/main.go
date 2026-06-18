@@ -440,10 +440,14 @@ func main() {
 	// intraday loop only reconciles fills and fires the deterministic backstops,
 	// so with no verticals it is a no-op. Distinct "v2-vertical" strategy tag
 	// keeps the options stop monitor away from vertical legs.
-	if cfg.EnableProphetDebitVerticals && tradingService != nil {
+	// Build the vertical engine unconditionally (inert when unused); start the
+	// scheduler only when the flag is enabled.
+	var verticalExecutor *services.ProphetVerticalExecutor
+	var verticalProposer *services.VerticalProposer
+	if tradingService != nil {
 		verticalLedger := services.NewProphetVerticalLedger(storageService)
 		verticalOptionsData := services.NewAlpacaOptionsDataService(cfg.AlpacaAPIKey, cfg.AlpacaSecretKey)
-		verticalExecutor := services.NewProphetVerticalExecutor(
+		verticalExecutor = services.NewProphetVerticalExecutor(
 			verticalLedger,
 			verticalOptionsData,
 			services.NewHedgeAccountFetcher(tradingService, dataService), // GetLatestBar provider
@@ -451,11 +455,16 @@ func main() {
 			tradeGuard,
 			logger,
 		)
-		nyLocVert, _ := time.LoadLocation("America/New_York")
-		verticalMarketOpen := func() bool { return services.StaticMarketPhase(time.Now().UTC(), nyLocVert) == "open" }
-		verticalScheduler := services.NewProphetVerticalScheduler(verticalExecutor, services.VerticalTickInterval(), services.VerticalIdleInterval(), verticalMarketOpen, logger)
-		go verticalScheduler.Start(ctx)
-		logger.Info("Prophet debit-vertical scheduler started (ENABLE_PROPHET_DEBIT_VERTICALS=true)")
+		verticalProposer = services.NewVerticalProposerForBot(tradingService, dataService, tradeGuard)
+		orderController.SetVerticals(verticalProposer, verticalExecutor, cfg.EnableProphetDebitVerticals)
+
+		if cfg.EnableProphetDebitVerticals {
+			nyLocVert, _ := time.LoadLocation("America/New_York")
+			verticalMarketOpen := func() bool { return services.StaticMarketPhase(time.Now().UTC(), nyLocVert) == "open" }
+			verticalScheduler := services.NewProphetVerticalScheduler(verticalExecutor, services.VerticalTickInterval(), services.VerticalIdleInterval(), verticalMarketOpen, logger)
+			go verticalScheduler.Start(ctx)
+			logger.Info("Prophet debit-vertical scheduler started (ENABLE_PROPHET_DEBIT_VERTICALS=true)")
+		}
 	} else if cfg.EnableProphetDebitVerticals {
 		logger.Warn("Prophet debit-verticals requested but trading service unavailable — scheduler not started")
 	}
@@ -658,6 +667,12 @@ func setupRouter(
 		api.GET("/options/positions", orderController.ListOptionsPositions)
 		api.GET("/options/position/:symbol", orderController.GetOptionsPosition)
 		api.GET("/options/chain/:symbol", orderController.GetOptionsChain)
+
+		// Debit vertical endpoints (Phase 3a — flag-gated)
+		api.POST("/options/verticals/propose", orderController.ProposeVertical)
+		api.POST("/options/verticals/place", orderController.PlaceVertical)
+		api.GET("/options/verticals", orderController.ListVerticals)
+		api.POST("/options/verticals/close", orderController.CloseVertical)
 
 		// News endpoints
 		api.GET("/news", newsController.HandleGetNews)

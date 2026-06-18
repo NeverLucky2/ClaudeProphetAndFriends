@@ -16,12 +16,15 @@ import (
 
 // OrderController handles trading operations
 type OrderController struct {
-	tradingService interfaces.TradingService
-	dataService    interfaces.DataService
-	storageService interfaces.StorageService
-	guard          *services.TradeGuard
-	sleeveGuard    *services.ProphetSleeveGuard
-	logger         *logrus.Logger
+	tradingService   interfaces.TradingService
+	dataService      interfaces.DataService
+	storageService   interfaces.StorageService
+	guard            *services.TradeGuard
+	sleeveGuard      *services.ProphetSleeveGuard
+	verticalProposer *services.VerticalProposer
+	verticalExec     *services.ProphetVerticalExecutor
+	enableVerticals  bool
+	logger           *logrus.Logger
 }
 
 // NewOrderController creates a new order controller
@@ -52,6 +55,14 @@ func (oc *OrderController) SetGuard(guard *services.TradeGuard) {
 // caps + disarm). Nil = not configured (no-op). See the 2026-06-03 spec.
 func (oc *OrderController) SetSleeveGuard(g *services.ProphetSleeveGuard) {
 	oc.sleeveGuard = g
+}
+
+// SetVerticals wires the debit-vertical engine (Phase 3). enabled mirrors
+// cfg.EnableProphetDebitVerticals; when false the endpoints reject.
+func (oc *OrderController) SetVerticals(proposer *services.VerticalProposer, exec *services.ProphetVerticalExecutor, enabled bool) {
+	oc.verticalProposer = proposer
+	oc.verticalExec = exec
+	oc.enableVerticals = enabled
 }
 
 // BuyRequest represents a buy order request
@@ -865,4 +876,119 @@ func getNextFriday() time.Time {
 		daysUntilFriday = 7 // If today is Friday, get next Friday
 	}
 	return now.AddDate(0, 0, daysUntilFriday)
+}
+
+// Vertical endpoints (Phase 3)
+
+type proposeVerticalReq struct {
+	Underlying  string  `json:"underlying" binding:"required"`
+	Direction   string  `json:"direction" binding:"required"` // "call_debit"|"put_debit"
+	Expiration  string  `json:"expiration" binding:"required"` // YYYY-MM-DD
+	TargetWidth float64 `json:"target_width" binding:"required,gt=0"`
+}
+
+func (oc *OrderController) ProposeVertical(c *gin.Context) {
+	if !oc.enableVerticals || oc.verticalProposer == nil {
+		c.JSON(403, gin.H{"error": "debit verticals disabled"})
+		return
+	}
+	var req proposeVerticalReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+	exp, err := time.Parse("2006-01-02", req.Expiration)
+	if err != nil {
+		c.JSON(400, gin.H{"error": "expiration must be YYYY-MM-DD"})
+		return
+	}
+	dir, err := services.ParseVerticalDirection(req.Direction)
+	if err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+	id, card, err := oc.verticalProposer.Propose(c.Request.Context(), req.Underlying, dir, exp, req.TargetWidth, time.Now())
+	if err != nil {
+		c.JSON(422, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, gin.H{"proposal_id": id, "card": card})
+}
+
+type placeVerticalReq struct {
+	ProposalID string `json:"proposal_id" binding:"required"`
+}
+
+func (oc *OrderController) PlaceVertical(c *gin.Context) {
+	if !oc.enableVerticals || oc.verticalProposer == nil || oc.verticalExec == nil {
+		c.JSON(403, gin.H{"error": "debit verticals disabled"})
+		return
+	}
+	var req placeVerticalReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+	now := time.Now()
+	vreq, freshDebit, err := oc.verticalProposer.ValidateForPlace(c.Request.Context(), req.ProposalID, now)
+	if err != nil {
+		c.JSON(422, gin.H{"error": err.Error()})
+		return
+	}
+	notional := freshDebit * 100 * float64(services.VerticalContracts())
+	// Account-level opening guards — parity with the single-leg path.
+	if oc.guard != nil {
+		if err := oc.guard.CheckBuy(c.Request.Context(), services.AgentMain, vreq.Underlying, notional); err != nil {
+			c.JSON(422, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if oc.sleeveGuard != nil {
+		if err := oc.sleeveGuard.EvaluateOpen(c.Request.Context(), notional, now); err != nil {
+			c.JSON(422, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	id, err := oc.verticalExec.Place(c.Request.Context(), vreq, now)
+	if err != nil {
+		c.JSON(422, gin.H{"error": err.Error()})
+		return
+	}
+	oc.verticalExec.RunManageTick(c.Request.Context(), time.Now(), &services.VerticalTickResult{}) // immediate reconcile
+	c.JSON(200, gin.H{"vertical_id": id})
+}
+
+func (oc *OrderController) ListVerticals(c *gin.Context) {
+	if !oc.enableVerticals || oc.verticalExec == nil {
+		c.JSON(403, gin.H{"error": "debit verticals disabled"})
+		return
+	}
+	rows, err := oc.verticalExec.ListOpenVerticalsEnriched(c.Request.Context(), time.Now())
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, gin.H{"verticals": rows})
+}
+
+type closeVerticalReq struct {
+	VerticalID string `json:"vertical_id" binding:"required"`
+}
+
+func (oc *OrderController) CloseVertical(c *gin.Context) {
+	if !oc.enableVerticals || oc.verticalExec == nil {
+		c.JSON(403, gin.H{"error": "debit verticals disabled"})
+		return
+	}
+	var req closeVerticalReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+	if err := oc.verticalExec.RequestClose(c.Request.Context(), req.VerticalID); err != nil {
+		c.JSON(422, gin.H{"error": err.Error()})
+		return
+	}
+	oc.verticalExec.RunManageTick(c.Request.Context(), time.Now(), &services.VerticalTickResult{})
+	c.JSON(200, gin.H{"status": "close requested"})
 }
