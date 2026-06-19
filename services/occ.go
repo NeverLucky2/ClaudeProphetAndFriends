@@ -1,6 +1,9 @@
 package services
 
-import "unicode"
+import (
+	"strconv"
+	"unicode"
+)
 
 // ParseOCCUnderlying extracts the underlying root from an OCC option symbol
 // (e.g. "TSLA251219C00400000" -> "TSLA"). The root is the leading run of
@@ -64,4 +67,22 @@ func ParseOCC(symbol string) (underlying, expiration string, optType byte, ok bo
 	root := ParseOCCUnderlying(symbol)
 	rest := symbol[len(root):] // root is ASCII, so byte-len == rune-count
 	return root, rest[0:6], rest[6], true
+}
+
+// ParseOCCStrike extracts the strike price from an OCC option symbol
+// (e.g. "TSLA251219C00400000" -> 400.00). The 8-digit strike tail encodes the
+// strike in thousandths of a dollar (00400000 = 400.000; 00131500 = 131.500).
+// ok is false for non-option symbols; it delegates the format check to
+// IsOptionSymbol so it stays in lockstep with ParseOCC.
+func ParseOCCStrike(symbol string) (float64, bool) {
+	if !IsOptionSymbol(symbol) {
+		return 0, false
+	}
+	root := ParseOCCUnderlying(symbol)
+	rest := symbol[len(root):] // root is ASCII, so byte-len == rune-count
+	thousandths, err := strconv.Atoi(rest[7:15])
+	if err != nil {
+		return 0, false
+	}
+	return float64(thousandths) / 1000.0, true
 }

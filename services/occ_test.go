@@ -6,11 +6,11 @@ func TestParseOCCUnderlying(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"TSLA251219C00400000", "TSLA"},
 		{"SPY251219P00500000", "SPY"},
-		{"F251219C00012000", "F"},      // 1-char root
+		{"F251219C00012000", "F"}, // 1-char root
 		{"GOOGL251219C00150000", "GOOGL"},
-		{"NVDA", "NVDA"},               // bare underlying (no option suffix)
-		{"", ""},                       // empty
-		{"123456C00010000", ""},        // no alpha root -> unresolved
+		{"NVDA", "NVDA"},        // bare underlying (no option suffix)
+		{"", ""},                // empty
+		{"123456C00010000", ""}, // no alpha root -> unresolved
 	}
 	for _, c := range cases {
 		if got := ParseOCCUnderlying(c.in); got != c.want {
@@ -25,10 +25,10 @@ func TestIsOptionSymbol(t *testing.T) {
 		want bool
 	}{
 		{"TSLA251219C00400000", true},
-		{"QQQ260717C00728000", true},    // the contract that failed in production
-		{"F251219C00012000", true},      // 1-char root
-		{"SPXW260320P05000000", true},   // longer root, put
-		{"QQQ", false},                  // bare ticker
+		{"QQQ260717C00728000", true},  // the contract that failed in production
+		{"F251219C00012000", true},    // 1-char root
+		{"SPXW260320P05000000", true}, // longer root, put
+		{"QQQ", false},                // bare ticker
 		{"AAPL", false},
 		{"", false},
 		{"123456C00010000", false},      // no alpha root
@@ -65,6 +65,31 @@ func TestParseOCC(t *testing.T) {
 		if ok != c.ok || under != c.under || exp != c.exp || typ != c.typ {
 			t.Errorf("ParseOCC(%q) = (%q,%q,%q,%v), want (%q,%q,%q,%v)",
 				c.in, under, exp, string(typ), ok, c.under, c.exp, string(c.typ), c.ok)
+		}
+	}
+}
+
+func TestParseOCCStrike(t *testing.T) {
+	cases := []struct {
+		in   string
+		want float64
+		ok   bool
+	}{
+		{"TSLA251219C00400000", 400.0, true},
+		{"QQQ260717C00728000", 728.0, true},   // the contract that failed in production
+		{"F251219C00012000", 12.0, true},      // 1-char root
+		{"SPXW260320P05000000", 5000.0, true}, // longer root, large strike
+		{"AMZN251219C00131500", 131.5, true},  // fractional ($0.50) strike
+		{"NVDA250620P00130000", 130.0, true},
+		{"QQQ", 0, false},                // bare ticker
+		{"", 0, false},                   // empty
+		{"123456C00010000", 0, false},    // no alpha root
+		{"TSLA251219C0040000", 0, false}, // 7-digit strike (malformed)
+	}
+	for _, c := range cases {
+		got, ok := ParseOCCStrike(c.in)
+		if ok != c.ok || (ok && got != c.want) {
+			t.Errorf("ParseOCCStrike(%q) = (%v,%v), want (%v,%v)", c.in, got, ok, c.want, c.ok)
 		}
 	}
 }

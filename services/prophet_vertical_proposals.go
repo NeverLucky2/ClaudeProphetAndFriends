@@ -84,22 +84,22 @@ type openGuard interface {
 
 // VerticalCard is the entry decision card (instructional approximation).
 type VerticalCard struct {
-	ProposalID    string  `json:"proposal_id"`
-	Underlying    string  `json:"underlying"`
-	Direction     string  `json:"direction"`
-	Expiration    string  `json:"expiration"`
-	DTE           int     `json:"dte"`
-	LongSymbol    string  `json:"long_symbol"`
-	ShortSymbol   string  `json:"short_symbol"`
-	LongStrike    float64 `json:"long_strike"`
-	ShortStrike   float64 `json:"short_strike"`
-	Width         float64 `json:"width"`
-	NetDebit      float64 `json:"net_debit"`       // per-contract
-	MaxLossUSD    float64 `json:"max_loss_usd"`    // = net_debit * 100 * contracts
-	Breakeven     float64 `json:"breakeven"`
-	MaxProfitUSD  float64 `json:"max_profit_usd"`
-	LongIV        float64 `json:"long_iv"`
-	ShortIV       float64 `json:"short_iv"`
+	ProposalID   string  `json:"proposal_id"`
+	Underlying   string  `json:"underlying"`
+	Direction    string  `json:"direction"`
+	Expiration   string  `json:"expiration"`
+	DTE          int     `json:"dte"`
+	LongSymbol   string  `json:"long_symbol"`
+	ShortSymbol  string  `json:"short_symbol"`
+	LongStrike   float64 `json:"long_strike"`
+	ShortStrike  float64 `json:"short_strike"`
+	Width        float64 `json:"width"`
+	NetDebit     float64 `json:"net_debit"`    // per-contract
+	MaxLossUSD   float64 `json:"max_loss_usd"` // = net_debit * 100 * contracts
+	Breakeven    float64 `json:"breakeven"`
+	MaxProfitUSD float64 `json:"max_profit_usd"`
+	LongIV       float64 `json:"long_iv"`
+	ShortIV      float64 `json:"short_iv"`
 }
 
 type VerticalProposer struct {
@@ -225,6 +225,10 @@ type chainSourceAdapter struct {
 }
 
 // ChainMap calls ts.GetOptionsChain and converts the slice to a symbol-keyed map.
+// AlpacaTradingService.GetOptionsChain builds contracts from the snapshot feed,
+// which fills pricing/greeks but leaves ContractType and StrikePrice zero (only
+// the OCC Symbol encodes them). The vertical strike-snapper filters on those two
+// fields, so we backfill them here from the symbol when unset.
 func (a *chainSourceAdapter) ChainMap(ctx context.Context, underlying string, expiration time.Time) (map[string]*interfaces.OptionContract, error) {
 	chain, err := a.ts.GetOptionsChain(ctx, underlying, expiration)
 	if err != nil {
@@ -232,6 +236,24 @@ func (a *chainSourceAdapter) ChainMap(ctx context.Context, underlying string, ex
 	}
 	m := make(map[string]*interfaces.OptionContract, len(chain))
 	for _, c := range chain {
+		if c == nil {
+			continue
+		}
+		if c.ContractType == "" {
+			if _, _, typ, ok := ParseOCC(c.Symbol); ok {
+				switch typ {
+				case 'C':
+					c.ContractType = "call"
+				case 'P':
+					c.ContractType = "put"
+				}
+			}
+		}
+		if c.StrikePrice == 0 {
+			if strike, ok := ParseOCCStrike(c.Symbol); ok {
+				c.StrikePrice = strike
+			}
+		}
 		m[c.Symbol] = c
 	}
 	return m, nil
