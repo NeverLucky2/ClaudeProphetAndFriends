@@ -903,6 +903,69 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: 'propose_debit_vertical',
+        description: 'Propose a defined-risk debit vertical spread (READ-ONLY — places no order). Returns a proposal_id plus a decision card: long/short strikes, net debit (= max loss), breakeven, max profit, and per-leg entry IV/greeks. Call place_debit_vertical with the proposal_id to submit the EXACT proposed strikes. Proposals expire after a few minutes.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            underlying: {
+              type: 'string',
+              description: 'Underlying stock symbol (e.g., AAPL, QQQ)',
+            },
+            direction: {
+              type: 'string',
+              description: 'call_debit = bullish (buy lower-strike call, sell higher-strike call); put_debit = bearish (buy higher-strike put, sell lower-strike put)',
+              enum: ['call_debit', 'put_debit'],
+            },
+            expiration: {
+              type: 'string',
+              description: 'Expiration date in YYYY-MM-DD format',
+            },
+            target_width: {
+              type: 'number',
+              description: 'Desired dollar width between the long and short strikes (e.g., 5 for a $5-wide spread); a helper snaps to the nearest liquid strikes',
+            },
+          },
+          required: ['underlying', 'direction', 'expiration', 'target_width'],
+        },
+      },
+      {
+        name: 'place_debit_vertical',
+        description: 'Place a previously proposed debit vertical spread by its proposal_id. Submits the EXACT strikes from the proposal (re-priced for drift; rejected if the proposal expired or the net debit moved too far). One spread, 1 contract per leg.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            proposal_id: {
+              type: 'string',
+              description: 'The proposal_id returned by propose_debit_vertical',
+            },
+          },
+          required: ['proposal_id'],
+        },
+      },
+      {
+        name: 'list_debit_verticals',
+        description: 'List open debit vertical spreads with live value, unrealized P&L, days-to-expiry, backstop status, and the original entry decision card.',
+        inputSchema: {
+          type: 'object',
+          properties: {},
+        },
+      },
+      {
+        name: 'close_debit_vertical',
+        description: 'Request closing an open debit vertical spread by its vertical_id (closes both legs together, fail-closed).',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            vertical_id: {
+              type: 'string',
+              description: 'The vertical_id from list_debit_verticals',
+            },
+          },
+          required: ['vertical_id'],
+        },
+      },
+      {
         name: 'get_options_positions',
         description: 'Get all open options positions',
         inputSchema: {
@@ -2137,6 +2200,60 @@ ${allNews.map((article, i) =>
           ...(strategy && { strategy }),
         };
         const data = await callTradingBot('/options/order', 'POST', requestData);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(data, null, 2),
+            },
+          ],
+        };
+      }
+
+      case 'propose_debit_vertical': {
+        const requestData = {
+          underlying: args.underlying,
+          direction: args.direction,
+          expiration: args.expiration,
+          target_width: args.target_width,
+        };
+        const data = await callTradingBot('/options/verticals/propose', 'POST', requestData);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(data, null, 2),
+            },
+          ],
+        };
+      }
+
+      case 'place_debit_vertical': {
+        const data = await callTradingBot('/options/verticals/place', 'POST', { proposal_id: args.proposal_id });
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(data, null, 2),
+            },
+          ],
+        };
+      }
+
+      case 'list_debit_verticals': {
+        const data = await callTradingBot('/options/verticals');
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(data, null, 2),
+            },
+          ],
+        };
+      }
+
+      case 'close_debit_vertical': {
+        const data = await callTradingBot('/options/verticals/close', 'POST', { vertical_id: args.vertical_id });
         return {
           content: [
             {

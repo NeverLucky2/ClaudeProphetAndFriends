@@ -1197,7 +1197,9 @@ ${userBlock}`;
       // Per-agent MCP tool allowlist. A non-empty per-sandbox override wins;
       // otherwise the strategy default (tool-allowlists.js) applies; otherwise
       // [] = no filtering (backwards compatible).
-      const allowedTools = resolveAllowedTools(perms.allowedTools, this._agentConfig?.strategyId);
+      const allowedTools = resolveAllowedTools(perms.allowedTools, this._agentConfig?.strategyId, {
+        verticalsEnabled: process.env.ENABLE_PROPHET_DEBIT_VERTICALS === 'true',
+      });
 
       const proc = spawn(OPENCODE_BIN, [...OPENCODE_WIN_PREFIX, ...args], {
         cwd: process.cwd(),

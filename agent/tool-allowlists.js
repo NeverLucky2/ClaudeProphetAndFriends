@@ -26,6 +26,7 @@ export const ALL_TOOLS = [
   'apply_heartbeat_profile',
   'assign_agent_to_sandbox',
   'cancel_order',
+  'close_debit_vertical',
   'close_managed_position',
   'create_agent',
   'create_strategy',
@@ -42,7 +43,7 @@ export const ALL_TOOLS = [
   'get_economic_indicators',
   'get_global_events',
   'get_global_trade_flows',
-  'get_guard_status',
+  'get_guard_status',
   'get_heartbeat_phases',
   'get_heartbeat_profiles',
   'get_historical_bars',
@@ -76,14 +77,17 @@ export const ALL_TOOLS = [
   'get_trade_stats',
   'get_treasury_data',
   'get_trend_signal',
+  'list_debit_verticals',
   'list_news_summaries',
   'log_activity',
   'log_decision',
   'openprophet',
   'place_buy_order',
+  'place_debit_vertical',
   'place_managed_position',
   'place_options_order',
   'place_sell_order',
+  'propose_debit_vertical',
   'read_latest_report',
   'run_analyst_actions',
   'run_catalyst_news',
@@ -139,6 +143,18 @@ const MANAGED = [
 const TREND_SIGNALS = ['get_trend_signal'];
 const MEANREV_SIGNALS = ['get_mean_reversion_candidates', 'get_mean_reversion_signal'];
 const DRIFT_SIGNALS = ['get_earnings_drift_candidates', 'get_earnings_drift_signal'];
+
+// Prophet debit-vertical tools (Phase 3b). Default-hidden from Prophet's static
+// allowlist (added to NON_PROPHET below) and re-added at resolve time only when
+// the caller passes verticalsEnabled — driven by ENABLE_PROPHET_DEBIT_VERTICALS
+// (read in harness.js). OFF => absent from the LLM's catalog => zero token cost,
+// nothing callable. The Go endpoints also 403 when off (defense-in-depth).
+export const VERTICAL_TOOLS = [
+  'propose_debit_vertical',
+  'place_debit_vertical',
+  'list_debit_verticals',
+  'close_debit_vertical',
+];
 
 // Tools cut from Prophet's discretionary kit to shrink the per-beat cached prompt
 // prefix. opencode hardcodes a 5-minute cache TTL (no config knob in 1.14.x/1.15.x),
@@ -202,6 +218,7 @@ const NON_PROPHET = new Set([
   ...DRIFT_SIGNALS,
   ...MANAGER_TOOLS,
   ...PROPHET_TRIM,
+  ...VERTICAL_TOOLS,
 ]);
 
 export const STRATEGY_TOOL_ALLOWLISTS = {
@@ -217,10 +234,14 @@ export const STRATEGY_TOOL_ALLOWLISTS = {
 // Resolve the effective MCP tool allowlist for a beat. A non-empty per-sandbox
 // override wins wholesale (matching existing "non-empty = exact filter"
 // semantics); otherwise the strategy default applies; otherwise [] (no filter).
-export function resolveAllowedTools(sandboxAllow, strategyId) {
+export function resolveAllowedTools(sandboxAllow, strategyId, opts = {}) {
   const sb = Array.isArray(sandboxAllow) ? sandboxAllow.filter(Boolean) : [];
   if (sb.length > 0) return sb;
-  return STRATEGY_TOOL_ALLOWLISTS[strategyId] || [];
+  const base = STRATEGY_TOOL_ALLOWLISTS[strategyId] || [];
+  if (strategyId === 'v2-options' && opts.verticalsEnabled) {
+    return [...base, ...VERTICAL_TOOLS];
+  }
+  return base;
 }
 
 // Exposed for tests: the exclusive per-strategy signal sets and base groups.
@@ -231,5 +252,6 @@ export const _internals = {
   MEANREV_SIGNALS,
   DRIFT_SIGNALS,
   PROPHET_TRIM,
+  VERTICAL_TOOLS,
   ALL_SET,
 };

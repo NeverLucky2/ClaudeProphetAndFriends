@@ -30,7 +30,7 @@ async function liveCatalog() {
 const STRATEGY_IDS = Object.keys(STRATEGY_TOOL_ALLOWLISTS);
 
 // Owner -> the signal/order endpoints that must appear on exactly that agent.
-const EXCLUSIVE = {
+const EXCLUSIVE = {
   'trend': _internals.TREND_SIGNALS,
   'mean-rev-rsi2': _internals.MEANREV_SIGNALS,
   'earnings-drift': _internals.DRIFT_SIGNALS,
@@ -125,7 +125,7 @@ test('Prophet (v2-options) is broad but excludes other strategies signals + mana
   // Size sanity: catalog - 11 exclusive - 8 manager - PROPHET_TRIM. Computed off
   // ALL_TOOLS.length so it tracks catalog growth (e.g. a new generic Prophet tool).
   // (5 = trend 1 + meanrev 2 + drift 2)
-  assert.equal(STRATEGY_TOOL_ALLOWLISTS['v2-options'].length, ALL_TOOLS.length - 5 - MANAGER_TOOLS.length - _internals.PROPHET_TRIM.length);
+  assert.equal(STRATEGY_TOOL_ALLOWLISTS['v2-options'].length, ALL_TOOLS.length - 5 - MANAGER_TOOLS.length - _internals.PROPHET_TRIM.length - _internals.VERTICAL_TOOLS.length);
 });
 
 test('resolveAllowedTools: non-empty sandbox override wins', () => {
@@ -151,4 +151,38 @@ test('every strategyId in the map has a non-empty list', () => {
   for (const [strat, list] of Object.entries(STRATEGY_TOOL_ALLOWLISTS)) {
     assert.ok(Array.isArray(list) && list.length > 0, `${strat} has an empty allowlist`);
   }
+});
+
+test('debit-vertical tools are hidden from Prophet when verticalsEnabled is off', () => {
+  const off = new Set(resolveAllowedTools([], 'v2-options'));
+  const offExplicit = new Set(resolveAllowedTools([], 'v2-options', { verticalsEnabled: false }));
+  for (const tool of _internals.VERTICAL_TOOLS) {
+    assert.ok(!off.has(tool), `default (no opts) must hide vertical tool "${tool}"`);
+    assert.ok(!offExplicit.has(tool), `verticalsEnabled:false must hide vertical tool "${tool}"`);
+  }
+});
+
+test('debit-vertical tools are exposed to Prophet when verticalsEnabled is on', () => {
+  const on = new Set(resolveAllowedTools([], 'v2-options', { verticalsEnabled: true }));
+  for (const tool of _internals.VERTICAL_TOOLS) {
+    assert.ok(on.has(tool), `verticalsEnabled:true must expose vertical tool "${tool}"`);
+  }
+  // The flag only ADDS verticals — every statically-allowed Prophet tool is still present.
+  for (const tool of STRATEGY_TOOL_ALLOWLISTS['v2-options']) {
+    assert.ok(on.has(tool), `enabling verticals must not drop base tool "${tool}"`);
+  }
+});
+
+test('verticalsEnabled only affects v2-options, never other strategies', () => {
+  for (const strat of ['mean-rev-rsi2', 'earnings-drift', 'trend']) {
+    const on = new Set(resolveAllowedTools([], strat, { verticalsEnabled: true }));
+    for (const tool of _internals.VERTICAL_TOOLS) {
+      assert.ok(!on.has(tool), `${strat} must not get vertical tool "${tool}" even when verticalsEnabled`);
+    }
+  }
+});
+
+test('a non-empty sandbox override still wins even when verticalsEnabled', () => {
+  const override = ['get_account', 'get_quote'];
+  assert.deepEqual(resolveAllowedTools(override, 'v2-options', { verticalsEnabled: true }), override);
 });
