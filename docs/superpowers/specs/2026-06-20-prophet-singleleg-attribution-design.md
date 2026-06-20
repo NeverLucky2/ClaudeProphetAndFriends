@@ -11,6 +11,7 @@ When a Prophet single-leg option (`AgentStrategy="v2-options"`) fills, capture a
 ## Decisions (settled in brainstorming)
 
 - **Foundation only.** Build entry-snapshot capture + close-hook attribution. DEFER the single-leg-vs-vertical comparison tally, dashboard surfacing, and the negative-expectancy baseline write-up to a later cycle (data must accrue first).
+- **Mark-based, synchronous close attribution.** The single-leg close is async (true exit fill not known at `CloseManagedPosition`). Rather than build a close-fill reconcile tick (bigger; deferred), attribution runs synchronously from the option's close-time mark; realized P&L is mark-based and `Residual` absorbs entry slippage + model error. Exit-fill slippage is intentionally not captured — a documented approximation.
 - **Persist on `DBManagedPosition` (columns), not a sidecar table.** The single-leg already has a lifecycle row (`models/models.go:126`, `managed_positions`); reusing it means the hooks set fields on the row they already hold — no second table, no dual-write (the project's recurring orphan failure mode). Columns are populated only for `v2-options` rows; equity rows leave them zero, exactly as `AgentStrategy` already does.
 - **New default-OFF flag `ENABLE_PROPHET_SINGLELEG_ATTRIBUTION`.** This touches the *shared* `position_manager.go`, so a dedicated flag gives a clean rollback and keeps it inert until enabled — separate from `ENABLE_PROPHET_DEBIT_VERTICALS`.
 - **Reuse the shared `bsPrice` primitive + the same theta→direction→IV sequence**, in a new isolated `attributeSingleLegPnl`. The proven vertical attribution engine is **not modified** (lower risk); the two are kept behavior-parallel by mirrored tests.
@@ -86,19 +87,26 @@ After the existing `position.EntryPrice = *order.FilledAvgPrice`, when the flag 
 
 Fail-soft: any fetch error or missing field → leave the field zero (mirrors the vertical `EntryLongVol` "zero == degraded" convention). The fill proceeds regardless.
 
-### 4. Close hook — `CloseManagedPosition` (`position_manager.go:~1150`)
+### 4. Close hook — `CloseManagedPosition` (`position_manager.go:~1150`), MARK-BASED & synchronous
 
-When the flag is on AND a `v2-options` single-leg with a non-zero entry snapshot reaches a terminal close with realized P&L known:
+The close path is **async**: `CloseManagedPosition` liquidates via `tradingService.ClosePosition` (a market close whose fill is not synchronous), saves the close order with a non-final status, and marks the position `CLOSED` at `:1249` — so the true exit fill price is NOT available there. Rather than add a close-fill reconcile tick (out of scope for the foundation — see Decisions), the attribution runs **synchronously in `CloseManagedPosition` from the close-time mark**, just before the `CLOSED` transition, when the flag is on AND the row is a `v2-options` single-leg with a non-zero entry snapshot:
 
-- `SingleLegRealizedPnL` = realized P&L (reconcile to broker fills; mirror the vertical close path).
-- exit snapshot = current underlying spot + option IV + (expiry − now) years.
-- run `attributeSingleLegPnl(optType, isLong, strike, entry, exit, realizedPnL, contracts)` and persist `AttribDirection/Theta/IV/Residual`.
+- exit snapshot = close-time underlying spot + the option's close-time IV + (expiry − now) years.
+- exit mark per share = the option's close-time mid `(Bid+Ask)/2`.
+- `SingleLegRealizedPnL` = `(exitMarkPerShare − EntryPrice) × 100 × Quantity × sideSign` (`sideSign` +1 long / −1 short). This reconciles `attributeSingleLegPnl`'s `Residual` to a mark-based realized P&L — Residual then absorbs entry-fill-vs-entry-mark slippage + model error. (Honest limitation: exit-fill slippage is NOT captured; it's a modeled value-change decomposition, consistent with the engine's existing "instructional approximation" framing.)
+- run `attributeSingleLegPnl(optType, isLong, strike, entry, exit, SingleLegRealizedPnL, contracts)` and persist `AttribDirection/Theta/IV/Residual`.
 
-Skipped (not errored) when the entry snapshot is incomplete (any of spot/IV/TTE zero) or the exit feed is degraded — attribution is teaching-only.
+Skipped (not errored) when the entry snapshot is incomplete (any of spot/IV/TTE zero) or the exit feed is degraded (no spot, or bid/ask ≤ 0) — attribution is teaching-only and must never affect the close.
 
-### 5. Data sources (integration seam — confirm during planning)
+### 5. Data sources (seam — RESOLVED, no new dependency)
 
-The hooks need, at fill and at close: the underlying **spot** and the option's **implied vol**. `PositionManager` already revalues option positions (it sets `CurrentPrice`/`UnrealizedPL`, `position_manager.go:~1083`), so an options-data/quote handle is reachable. Design assumes a narrow injected `singleLegGreeksSource` (IV) + spot source, both fail-soft. **Plan-time verification:** confirm exactly which data dependency `PositionManager` already holds for option revaluation and whether it exposes IV, vs. needing a new injected dependency.
+`PositionManager` already holds `tradingService interfaces.TradingService` and `dataService interfaces.DataService`. Both fetches the hooks need are already reachable:
+
+- **spot:** `pm.dataService.GetLatestBar(ctx, underlying)` → `.Close` (mirrors the vertical executor's bar-close spot, `interfaces/trading.go:52`).
+- **IV + exit mark:** `pm.tradingService.GetOptionsChain(ctx, underlying, expiry)` (`interfaces/trading.go:43`) → find the contract whose `Symbol` == the OCC symbol → `.ImpliedVolatility` and `(.Bid+.Ask)/2`. (The Alpaca snapshot feed fills IV/Bid/Ask even though it leaves `ContractType`/`StrikePrice` empty — the match is by `Symbol`, which IS populated.)
+- **underlying / expiry / type / strike:** `ParseOCCUnderlying`, `ParseOCC` (expiry as `"YYMMDD"`, parse via `time.Parse("060102", …)`), `ParseOCCStrike`, gated by `IsOptionSymbol` (all in `services/occ.go`). TTE years = `expiry.Sub(now).Hours()/24/365`.
+
+No new injected dependency. `GetOptionSnapshot` (the vertical executor's path) lives on a separate `OptionDataService` that `PositionManager` does not hold — `GetOptionsChain` is the equivalent reachable from `tradingService`.
 
 ## Data flow
 
@@ -106,8 +114,9 @@ The hooks need, at fill and at close: the underlying **spot** and the option's *
 place (v2-options single-leg) → order fills
   → activateFilledEntry: capture entry {spot, IV, TTE}  [flag on, fail-soft]
   … position managed (stops/targets) …
-CloseManagedPosition: realized P&L known
-  → capture exit {spot, IV, TTE}
+CloseManagedPosition (close is async — exit fill not yet known):
+  → capture exit {spot, IV, TTE} + exit mark from close-time quotes
+  → realizedPnL = (exit mark − entry fill) × 100 × qty × sideSign
   → attributeSingleLegPnl(...) → persist Direction/Theta/IV/Residual  [skip if degraded]
 ```
 
