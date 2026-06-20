@@ -58,6 +58,16 @@ type ManagedPosition struct {
 	UnrealizedPLPC float64 `json:"unrealized_pl_percent"`
 	RemainingQty   float64 `json:"remaining_qty"`
 
+	// Single-leg options attribution (Phase 4 foundation; v2-options only).
+	EntryUnderlyingSpot  float64 `json:"entry_underlying_spot,omitempty"`
+	EntryIV              float64 `json:"entry_iv,omitempty"`
+	EntryTimeToExpiry    float64 `json:"entry_time_to_expiry,omitempty"`
+	SingleLegRealizedPnL float64 `json:"single_leg_realized_pnl,omitempty"`
+	AttribDirection      float64 `json:"attrib_direction,omitempty"`
+	AttribTheta          float64 `json:"attrib_theta,omitempty"`
+	AttribIV             float64 `json:"attrib_iv,omitempty"`
+	AttribResidual       float64 `json:"attrib_residual,omitempty"`
+
 	// Metadata
 	CreatedAt time.Time  `json:"created_at"`
 	UpdatedAt time.Time  `json:"updated_at"`
@@ -101,8 +111,8 @@ type PlaceManagedPositionRequest struct {
 	PartialExit *PartialExitConfig `json:"partial_exit,omitempty"`
 
 	// Metadata
-	Notes          string   `json:"notes,omitempty"`
-	Tags           []string `json:"tags,omitempty"`
+	Notes string   `json:"notes,omitempty"`
+	Tags  []string `json:"tags,omitempty"`
 }
 
 // PositionManager handles automated position management
@@ -111,6 +121,8 @@ type PositionManager struct {
 	dataService    interfaces.DataService
 	storageService *database.LocalStorage
 	guard          *TradeGuard
+
+	singleLegAttribEnabled bool
 
 	positions map[string]*ManagedPosition // position_id -> position
 	mu        sync.RWMutex
@@ -546,7 +558,6 @@ func (pm *PositionManager) checkPositions(ctx context.Context) {
 			continue
 		}
 
-
 		// Check if we need to place/update risk orders
 		if position.Status == "ACTIVE" {
 			pm.manageRiskOrders(ctx, position)
@@ -705,6 +716,8 @@ func (pm *PositionManager) activateFilledEntry(ctx context.Context, position *Ma
 		"fill_price":  position.EntryPrice,
 		"filled_qty":  filledQty,
 	}).Info("Entry order filled - position now active")
+
+	pm.captureSingleLegEntrySnapshot(ctx, position, time.Now())
 
 	pm.placeRiskOrders(ctx, position)
 
@@ -1252,6 +1265,8 @@ func (pm *PositionManager) CloseManagedPosition(ctx context.Context, positionID 
 	position.UpdatedAt = now
 	pm.mu.Unlock()
 
+	pm.attributeSingleLegClose(ctx, position, now)
+
 	if err := pm.savePositionToDB(position); err != nil {
 		pm.logger.WithError(err).WithFields(logrus.Fields{
 			"position_id":              positionID,
@@ -1661,6 +1676,63 @@ func (pm *PositionManager) savePositionToDB(position *ManagedPosition) error {
 	return pm.storageService.SaveManagedPosition(dbPosition)
 }
 
+// EnableSingleLegAttribution toggles the Phase-4 single-leg P&L attribution
+// hooks. Off by default; main.go sets it from config.
+func (pm *PositionManager) EnableSingleLegAttribution(enabled bool) {
+	pm.singleLegAttribEnabled = enabled
+}
+
+// captureSingleLegEntrySnapshot records the entry greek snapshot for a
+// v2-options single-leg at fill. Flag/option-gated, fail-soft: any miss leaves
+// the fields zero and the fill proceeds.
+func (pm *PositionManager) captureSingleLegEntrySnapshot(ctx context.Context, position *ManagedPosition, now time.Time) {
+	if !pm.singleLegAttribEnabled || position.AgentStrategy != "v2-options" || !IsOptionSymbol(position.Symbol) {
+		return
+	}
+	snap, _, ok := singleLegSnapshotNow(ctx, pm.dataService, pm.tradingService, position.Symbol, now)
+	if !ok {
+		return
+	}
+	position.EntryUnderlyingSpot = snap.Spot
+	position.EntryIV = snap.Vol
+	position.EntryTimeToExpiry = snap.TimeToExpiry
+}
+
+// attributeSingleLegClose computes mark-based P&L attribution at close for a
+// v2-options single-leg with a complete entry snapshot. Flag/option-gated,
+// fail-soft, skipped on degraded inputs. Never affects the close.
+func (pm *PositionManager) attributeSingleLegClose(ctx context.Context, position *ManagedPosition, now time.Time) {
+	if !pm.singleLegAttribEnabled || position.AgentStrategy != "v2-options" || !IsOptionSymbol(position.Symbol) {
+		return
+	}
+	if position.EntryUnderlyingSpot <= 0 || position.EntryIV <= 0 || position.EntryTimeToExpiry <= 0 {
+		return // incomplete entry snapshot — nothing to attribute against
+	}
+	exit, mark, ok := singleLegSnapshotNow(ctx, pm.dataService, pm.tradingService, position.Symbol, now)
+	if !ok || mark <= 0 || exit.Vol <= 0 {
+		return // degraded exit feed
+	}
+	_, _, optTypeByte, _ := ParseOCC(position.Symbol)
+	optType := "call"
+	if optTypeByte == 'P' {
+		optType = "put"
+	}
+	strike, _ := ParseOCCStrike(position.Symbol)
+	isLong := position.Side == "buy"
+	sideSign := 1.0
+	if !isLong {
+		sideSign = -1.0
+	}
+	realized := (mark - position.EntryPrice) * 100 * position.Quantity * sideSign
+	entry := SingleLegSnapshot{Spot: position.EntryUnderlyingSpot, Vol: position.EntryIV, TimeToExpiry: position.EntryTimeToExpiry}
+	attr := attributeSingleLegPnl(optType, isLong, strike, entry, exit, realized, int(position.Quantity))
+	position.SingleLegRealizedPnL = realized
+	position.AttribDirection = attr.Direction
+	position.AttribTheta = attr.Theta
+	position.AttribIV = attr.IV
+	position.AttribResidual = attr.Residual
+}
+
 // managedPositionToDB converts ManagedPosition to DBManagedPosition
 func (pm *PositionManager) managedPositionToDB(pos *ManagedPosition) *models.DBManagedPosition {
 	// Convert partial exit orders to JSON
@@ -1670,33 +1742,41 @@ func (pm *PositionManager) managedPositionToDB(pos *ManagedPosition) *models.DBM
 	tagsJSON, _ := json.Marshal(pos.Tags)
 
 	dbPos := &models.DBManagedPosition{
-		PositionID:        pos.ID,
-		Symbol:            pos.Symbol,
-		Side:              pos.Side,
-		Strategy:          pos.Strategy,
-		AgentStrategy:     pos.AgentStrategy,
-		Quantity:          pos.Quantity,
-		EntryPrice:        pos.EntryPrice,
-		EntryOrderID:      pos.EntryOrderID,
-		EntryOrderType:    pos.EntryOrderType,
-		AllocationDollars: pos.AllocationDollars,
-		StopLossPrice:     pos.StopLossPrice,
-		StopLossPercent:   pos.StopLossPercent,
-		StopLossOrderID:   pos.StopLossOrderID,
-		TrailingStop:      pos.TrailingStop,
-		TrailingPercent:   pos.TrailingPercent,
-		TakeProfitPrice:   pos.TakeProfitPrice,
-		TakeProfitPercent: pos.TakeProfitPercent,
-		TakeProfitOrderID: pos.TakeProfitOrderID,
-		Status:            pos.Status,
-		CurrentPrice:      pos.CurrentPrice,
-		UnrealizedPL:      pos.UnrealizedPL,
-		UnrealizedPLPC:    pos.UnrealizedPLPC,
-		RemainingQty:      pos.RemainingQty,
-		Notes:             pos.Notes,
-		Tags:              string(tagsJSON),
-		PartialExitOrders: string(partialExitOrdersJSON),
-		ClosedAt:          pos.ClosedAt,
+		PositionID:           pos.ID,
+		Symbol:               pos.Symbol,
+		Side:                 pos.Side,
+		Strategy:             pos.Strategy,
+		AgentStrategy:        pos.AgentStrategy,
+		Quantity:             pos.Quantity,
+		EntryPrice:           pos.EntryPrice,
+		EntryOrderID:         pos.EntryOrderID,
+		EntryOrderType:       pos.EntryOrderType,
+		AllocationDollars:    pos.AllocationDollars,
+		StopLossPrice:        pos.StopLossPrice,
+		StopLossPercent:      pos.StopLossPercent,
+		StopLossOrderID:      pos.StopLossOrderID,
+		TrailingStop:         pos.TrailingStop,
+		TrailingPercent:      pos.TrailingPercent,
+		TakeProfitPrice:      pos.TakeProfitPrice,
+		TakeProfitPercent:    pos.TakeProfitPercent,
+		TakeProfitOrderID:    pos.TakeProfitOrderID,
+		Status:               pos.Status,
+		CurrentPrice:         pos.CurrentPrice,
+		UnrealizedPL:         pos.UnrealizedPL,
+		UnrealizedPLPC:       pos.UnrealizedPLPC,
+		RemainingQty:         pos.RemainingQty,
+		EntryUnderlyingSpot:  pos.EntryUnderlyingSpot,
+		EntryIV:              pos.EntryIV,
+		EntryTimeToExpiry:    pos.EntryTimeToExpiry,
+		SingleLegRealizedPnL: pos.SingleLegRealizedPnL,
+		AttribDirection:      pos.AttribDirection,
+		AttribTheta:          pos.AttribTheta,
+		AttribIV:             pos.AttribIV,
+		AttribResidual:       pos.AttribResidual,
+		Notes:                pos.Notes,
+		Tags:                 string(tagsJSON),
+		PartialExitOrders:    string(partialExitOrdersJSON),
+		ClosedAt:             pos.ClosedAt,
 	}
 
 	if pos.PartialExit != nil {
@@ -1726,35 +1806,43 @@ func (pm *PositionManager) dbToManagedPosition(dbPos *models.DBManagedPosition) 
 	}
 
 	pos := &ManagedPosition{
-		ID:                dbPos.PositionID,
-		Symbol:            dbPos.Symbol,
-		Side:              dbPos.Side,
-		Strategy:          dbPos.Strategy,
-		AgentStrategy:     dbPos.AgentStrategy,
-		Quantity:          dbPos.Quantity,
-		EntryPrice:        dbPos.EntryPrice,
-		EntryOrderID:      dbPos.EntryOrderID,
-		EntryOrderType:    dbPos.EntryOrderType,
-		AllocationDollars: dbPos.AllocationDollars,
-		StopLossPrice:     dbPos.StopLossPrice,
-		StopLossPercent:   dbPos.StopLossPercent,
-		StopLossOrderID:   dbPos.StopLossOrderID,
-		TrailingStop:      dbPos.TrailingStop,
-		TrailingPercent:   dbPos.TrailingPercent,
-		TakeProfitPrice:   dbPos.TakeProfitPrice,
-		TakeProfitPercent: dbPos.TakeProfitPercent,
-		TakeProfitOrderID: dbPos.TakeProfitOrderID,
-		Status:            dbPos.Status,
-		CurrentPrice:      dbPos.CurrentPrice,
-		UnrealizedPL:      dbPos.UnrealizedPL,
-		UnrealizedPLPC:    dbPos.UnrealizedPLPC,
-		RemainingQty:      dbPos.RemainingQty,
-		Notes:             dbPos.Notes,
-		Tags:              tags,
-		PartialExitOrders: partialExitOrders,
-		CreatedAt:         dbPos.CreatedAt,
-		UpdatedAt:         dbPos.UpdatedAt,
-		ClosedAt:          dbPos.ClosedAt,
+		ID:                   dbPos.PositionID,
+		Symbol:               dbPos.Symbol,
+		Side:                 dbPos.Side,
+		Strategy:             dbPos.Strategy,
+		AgentStrategy:        dbPos.AgentStrategy,
+		Quantity:             dbPos.Quantity,
+		EntryPrice:           dbPos.EntryPrice,
+		EntryOrderID:         dbPos.EntryOrderID,
+		EntryOrderType:       dbPos.EntryOrderType,
+		AllocationDollars:    dbPos.AllocationDollars,
+		StopLossPrice:        dbPos.StopLossPrice,
+		StopLossPercent:      dbPos.StopLossPercent,
+		StopLossOrderID:      dbPos.StopLossOrderID,
+		TrailingStop:         dbPos.TrailingStop,
+		TrailingPercent:      dbPos.TrailingPercent,
+		TakeProfitPrice:      dbPos.TakeProfitPrice,
+		TakeProfitPercent:    dbPos.TakeProfitPercent,
+		TakeProfitOrderID:    dbPos.TakeProfitOrderID,
+		Status:               dbPos.Status,
+		CurrentPrice:         dbPos.CurrentPrice,
+		UnrealizedPL:         dbPos.UnrealizedPL,
+		UnrealizedPLPC:       dbPos.UnrealizedPLPC,
+		RemainingQty:         dbPos.RemainingQty,
+		EntryUnderlyingSpot:  dbPos.EntryUnderlyingSpot,
+		EntryIV:              dbPos.EntryIV,
+		EntryTimeToExpiry:    dbPos.EntryTimeToExpiry,
+		SingleLegRealizedPnL: dbPos.SingleLegRealizedPnL,
+		AttribDirection:      dbPos.AttribDirection,
+		AttribTheta:          dbPos.AttribTheta,
+		AttribIV:             dbPos.AttribIV,
+		AttribResidual:       dbPos.AttribResidual,
+		Notes:                dbPos.Notes,
+		Tags:                 tags,
+		PartialExitOrders:    partialExitOrders,
+		CreatedAt:            dbPos.CreatedAt,
+		UpdatedAt:            dbPos.UpdatedAt,
+		ClosedAt:             dbPos.ClosedAt,
 	}
 
 	if dbPos.PartialExitEnabled {

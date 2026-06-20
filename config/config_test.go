@@ -238,3 +238,25 @@ func TestLoadConfig_ProphetDebitVerticalsOn(t *testing.T) {
 		t.Fatal("ENABLE_PROPHET_DEBIT_VERTICALS=true must set the flag")
 	}
 }
+
+func TestLoadConfig_ProphetSingleLegAttributionDefaultsOff(t *testing.T) {
+	t.Setenv("OPERATOR_EMAIL", "test@example.com")
+	t.Setenv("ENABLE_PROPHET_SINGLELEG_ATTRIBUTION", "")
+	if err := Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if AppConfig.EnableProphetSingleLegAttribution {
+		t.Fatal("ENABLE_PROPHET_SINGLELEG_ATTRIBUTION must default to false")
+	}
+}
+
+func TestLoadConfig_ProphetSingleLegAttributionOn(t *testing.T) {
+	t.Setenv("OPERATOR_EMAIL", "test@example.com")
+	t.Setenv("ENABLE_PROPHET_SINGLELEG_ATTRIBUTION", "true")
+	if err := Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !AppConfig.EnableProphetSingleLegAttribution {
+		t.Fatal("ENABLE_PROPHET_SINGLELEG_ATTRIBUTION=true must set the flag")
+	}
+}

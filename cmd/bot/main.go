@@ -164,6 +164,7 @@ func main() {
 
 	// Create position manager
 	positionManager := services.NewPositionManager(tradingService, dataService, storageService)
+	positionManager.EnableSingleLegAttribution(cfg.EnableProphetSingleLegAttribution)
 	positionController := controllers.NewPositionManagementController(positionManager)
 
 	// Cross-agent sector concentration caps. Values are fractions of portfolio value.

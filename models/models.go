@@ -9,7 +9,7 @@ import (
 // DBOrder represents an order in the database
 type DBOrder struct {
 	gorm.Model
-	OrderID        string `gorm:"uniqueIndex"`
+	OrderID string `gorm:"uniqueIndex"`
 	// ClientOrderID is the broker-side tag we control. For shared-account
 	// strategy attribution we encode strategy as a prefix: "{strategy}:{uuid}".
 	// Alpaca preserves this through fills, so the strategy tag survives the
@@ -38,7 +38,7 @@ type DBOrder struct {
 // DBBar represents historical price data in the database
 type DBBar struct {
 	gorm.Model
-	Symbol    string `gorm:"index:idx_symbol_timestamp"`
+	Symbol    string    `gorm:"index:idx_symbol_timestamp"`
 	Timestamp time.Time `gorm:"index:idx_symbol_timestamp"`
 	Open      float64
 	High      float64
@@ -125,19 +125,19 @@ type DBSignal struct {
 // DBManagedPosition represents a managed position with automated risk management
 type DBManagedPosition struct {
 	gorm.Model
-	PositionID        string `gorm:"uniqueIndex"`
-	Symbol            string `gorm:"index"`
-	Side              string
+	PositionID string `gorm:"uniqueIndex"`
+	Symbol     string `gorm:"index"`
+	Side       string
 	// Strategy is the trading-style classification (DAY_TRADE / SWING_TRADE /
 	// LONG_TERM) and is part of the place_managed_position public contract.
 	// Do NOT overload this with agent IDs — use AgentStrategy below.
-	Strategy          string
+	Strategy string
 	// AgentStrategy is the owning agent's strategyId (e.g. "trend", "v2-options").
 	// Populated end-to-end from OPENPROPHET_STRATEGY at the MCP
 	// boundary so segment-scoped P&L and reconciliation can attribute managed
 	// positions to the right agent. Empty for rows written before this column
 	// existed; readers must fall back to DBOrder attribution in that case.
-	AgentStrategy     string `gorm:"index"`
+	AgentStrategy string `gorm:"index"`
 
 	// Entry details
 	Quantity          float64
@@ -147,11 +147,11 @@ type DBManagedPosition struct {
 	AllocationDollars float64
 
 	// Risk management
-	StopLossPrice     float64
-	StopLossPercent   float64
-	StopLossOrderID   string
-	TrailingStop      bool
-	TrailingPercent   float64
+	StopLossPrice   float64
+	StopLossPercent float64
+	StopLossOrderID string
+	TrailingStop    bool
+	TrailingPercent float64
 
 	// Profit targets
 	TakeProfitPrice   float64
@@ -159,23 +159,36 @@ type DBManagedPosition struct {
 	TakeProfitOrderID string
 
 	// Partial exit
-	PartialExitEnabled      bool
-	PartialExitPercent      float64
+	PartialExitEnabled       bool
+	PartialExitPercent       float64
 	PartialExitTargetPercent float64
 	PartialExitTargetPrice   float64
-	PartialExitOrders       string // JSON array of order IDs
+	PartialExitOrders        string // JSON array of order IDs
 
 	// Status
-	Status           string `gorm:"index"` // PENDING, ACTIVE, PARTIAL, CLOSED, STOPPED_OUT
-	CurrentPrice     float64
-	UnrealizedPL     float64
-	UnrealizedPLPC   float64
-	RemainingQty     float64
+	Status         string `gorm:"index"` // PENDING, ACTIVE, PARTIAL, CLOSED, STOPPED_OUT
+	CurrentPrice   float64
+	UnrealizedPL   float64
+	UnrealizedPLPC float64
+	RemainingQty   float64
+
+	// Single-leg options attribution (Phase 4 foundation). Populated only for
+	// AgentStrategy=="v2-options" rows: the entry snapshot is captured at fill,
+	// the attribution computed (mark-based) at close. Zero for equity positions
+	// and when the feed was degraded at capture/close time.
+	EntryUnderlyingSpot  float64
+	EntryIV              float64
+	EntryTimeToExpiry    float64 // years
+	SingleLegRealizedPnL float64 `gorm:"column:single_leg_realized_pnl"`
+	AttribDirection      float64
+	AttribTheta          float64
+	AttribIV             float64
+	AttribResidual       float64
 
 	// Metadata
-	Notes     string
-	Tags      string // JSON array
-	ClosedAt  *time.Time
+	Notes    string
+	Tags     string // JSON array
+	ClosedAt *time.Time
 }
 
 // TableName overrides for cleaner table names
