@@ -12,15 +12,16 @@ const (
 	// and skips any long whose opening buy is tagged otherwise; the structural
 	// paired-short backstop (Gate C) catches the leg too. Broker reconciliation
 	// also attributes combos correctly by this tag.
-	verticalContracts        = 1      // v1: always 1 contract (clean attribution)
-	verticalDebitCapUSD      = 1000.0 // max net debit per vertical (= max loss cap), absolute $
-	verticalLimitBufferFrac  = 0.25   // marketable-limit buffer (same as hedge opens)
-	verticalForceDTE         = 2      // force-close at/under this DTE
-	verticalCaptureDTE       = 3      // capture short-ITM at/under this DTE
-	verticalSalvageFloorFrac = 0.20   // salvage-stop at ≤20% of debit paid
-	verticalExpectedExitCost = 5.0    // $/contract round-trip estimate for the let-expire carve-out
-	verticalProposalTTL      = 3 * time.Minute // propose→place validity window
-	verticalDebitDriftTolerance = 0.15 // reject place if net debit moved >15% vs the quoted card
+	verticalContracts           = 1               // v1: always 1 contract (clean attribution)
+	verticalDebitCapUSD         = 1000.0          // max net debit per vertical (= max loss cap), absolute $
+	verticalLimitBufferFrac     = 0.25            // marketable-limit buffer (same as hedge opens)
+	verticalForceDTE            = 2               // force-close at/under this DTE
+	verticalCaptureDTE          = 3               // capture short-ITM at/under this DTE
+	verticalSalvageFloorFrac    = 0.20            // salvage-stop at ≤20% of debit paid
+	verticalExpectedExitCost    = 5.0             // $/contract round-trip estimate for the let-expire carve-out
+	verticalProposalTTL         = 3 * time.Minute // propose→place validity window
+	verticalDebitDriftTolerance = 0.15            // reject place if net debit moved >15% vs the quoted card
+	verticalRVLookbackDays      = 20              // realized-vol lookback (trading days) for the cheapness read — matches Prophet's IV-RV gate
 
 	verticalTickInterval = 5 * time.Minute  // manage cadence while market open
 	verticalIdleInterval = 30 * time.Minute // re-check cadence while closed

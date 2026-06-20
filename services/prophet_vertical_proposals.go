@@ -82,6 +82,13 @@ type openGuard interface {
 	CheckOptionsOpen(agent AgentSource, underlying, symbol string, q *interfaces.OptionsQuote, now time.Time) error
 }
 
+// realizedVolSource supplies trailing annualized realized vol for an underlying,
+// used to score entry cheapness (IV-vs-RV). Implemented by *RealizedVolService;
+// may be nil (cheapness then falls back to a skew-only read).
+type realizedVolSource interface {
+	GetAnnualizedRealizedVol(ctx context.Context, symbol string, lookbackDays int) (float64, error)
+}
+
 // VerticalCard is the entry decision card (instructional approximation).
 type VerticalCard struct {
 	ProposalID   string  `json:"proposal_id"`
@@ -100,16 +107,20 @@ type VerticalCard struct {
 	MaxProfitUSD float64 `json:"max_profit_usd"`
 	LongIV       float64 `json:"long_iv"`
 	ShortIV      float64 `json:"short_iv"`
+	Cheapness    string  `json:"cheapness"` // teaching label, e.g. "cheap: call_debit, favorable skew, IV<=RV"
+	SkewDiff     float64 `json:"skew_diff"` // shortIV - longIV (vol sold minus vol bought)
+	IVtoRV       float64 `json:"iv_to_rv"`  // longIV / 20d realized vol; 0 when RV unavailable
 }
 
 type VerticalProposer struct {
 	src   chainSource
 	guard openGuard
 	store *proposalStore
+	rv    realizedVolSource
 }
 
-func NewVerticalProposer(src chainSource, guard openGuard, store *proposalStore) *VerticalProposer {
-	return &VerticalProposer{src: src, guard: guard, store: store}
+func NewVerticalProposer(src chainSource, guard openGuard, store *proposalStore, rv realizedVolSource) *VerticalProposer {
+	return &VerticalProposer{src: src, guard: guard, store: store, rv: rv}
 }
 
 func (p *VerticalProposer) Propose(ctx context.Context, underlying string, dir VerticalDirection, expiration time.Time, targetWidth float64, now time.Time) (string, VerticalCard, error) {
@@ -142,6 +153,17 @@ func (p *VerticalProposer) Propose(ctx context.Context, underlying string, dir V
 	if debit*100*float64(verticalContracts) > verticalDebitCapUSD {
 		return "", VerticalCard{}, fmt.Errorf("propose: debit cap — $%.0f exceeds $%.0f", debit*100, verticalDebitCapUSD)
 	}
+
+	// Entry cheapness teaching read (advisory). An RV fetch failure degrades to
+	// a skew-only read; it never blocks the proposal.
+	rv := 0.0
+	if p.rv != nil {
+		if v, err := p.rv.GetAnnualizedRealizedVol(ctx, underlying, verticalRVLookbackDays); err == nil {
+			rv = v
+		}
+	}
+	cheap := assessVerticalCheapness(dir, long.ImpliedVolatility, short.ImpliedVolatility, rv)
+
 	id := fmt.Sprintf("vp-%d", now.UnixNano())
 	req := PlaceVerticalRequest{
 		Underlying: underlying, Expiration: expiration, Direction: dir,
@@ -158,6 +180,7 @@ func (p *VerticalProposer) Propose(ctx context.Context, underlying string, dir V
 		Breakeven:    breakeven(dir, long.StrikePrice, debit),
 		MaxProfitUSD: (width - debit) * 100 * float64(verticalContracts),
 		LongIV:       long.ImpliedVolatility, ShortIV: short.ImpliedVolatility,
+		Cheapness: cheap.Label, SkewDiff: cheap.SkewDiff, IVtoRV: cheap.IVtoRV,
 	}
 	return id, card, nil
 }
@@ -284,10 +307,11 @@ func NewProposalStore() *proposalStore {
 // NewVerticalProposerForBot is a convenience constructor for wiring the vertical
 // proposer in main.go. It instantiates the chain-source adapter, proposal store,
 // and proposer in one call.
-func NewVerticalProposerForBot(ts interfaces.TradingService, ds interfaces.DataService, guard *TradeGuard) *VerticalProposer {
+func NewVerticalProposerForBot(ts interfaces.TradingService, ds interfaces.DataService, guard *TradeGuard, rv *RealizedVolService) *VerticalProposer {
 	return NewVerticalProposer(
 		NewChainSourceAdapter(ts, ds),
 		guard,
 		NewProposalStore(),
+		rv,
 	)
 }

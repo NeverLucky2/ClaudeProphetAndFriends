@@ -455,7 +455,7 @@ func main() {
 			tradeGuard,
 			logger,
 		)
-		verticalProposer = services.NewVerticalProposerForBot(tradingService, dataService, tradeGuard)
+		verticalProposer = services.NewVerticalProposerForBot(tradingService, dataService, tradeGuard, realizedVolSvc)
 		orderController.SetVerticals(verticalProposer, verticalExecutor, cfg.EnableProphetDebitVerticals)
 
 		if cfg.EnableProphetDebitVerticals {

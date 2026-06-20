@@ -2,6 +2,8 @@ package services
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -55,7 +57,9 @@ type fakeChainSource struct {
 func (f *fakeChainSource) ChainMap(_ context.Context, underlying string, exp time.Time) (map[string]*interfaces.OptionContract, error) {
 	return f.chain, f.err
 }
-func (f *fakeChainSource) Spot(_ context.Context, underlying string) (float64, error) { return f.spot, f.err }
+func (f *fakeChainSource) Spot(_ context.Context, underlying string) (float64, error) {
+	return f.spot, f.err
+}
 
 type fakeOpenGuard struct{ err error }
 
@@ -74,7 +78,7 @@ func TestProposer_Propose_StoresAndCards(t *testing.T) {
 	now := time.Date(2026, 6, 18, 15, 0, 0, 0, time.UTC)
 	exp := time.Date(2026, 6, 20, 0, 0, 0, 0, time.UTC)
 	src := &fakeChainSource{chain: twoLegChain(), spot: 130}
-	p := NewVerticalProposer(src, &fakeOpenGuard{}, newProposalStore())
+	p := NewVerticalProposer(src, &fakeOpenGuard{}, newProposalStore(), nil)
 
 	id, card, err := p.Propose(context.Background(), "NVDA", CallDebit, exp, 10.0, now)
 	if err != nil {
@@ -95,7 +99,7 @@ func TestProposer_Propose_RejectsNonPositiveDebit(t *testing.T) {
 	chain := twoLegChain()
 	chain["NVDA250620C00130000"].Bid, chain["NVDA250620C00130000"].Ask = 1.0, 1.2
 	chain["NVDA250620C00140000"].Bid, chain["NVDA250620C00140000"].Ask = 6.0, 6.4
-	p := NewVerticalProposer(&fakeChainSource{chain: chain, spot: 130}, &fakeOpenGuard{}, newProposalStore())
+	p := NewVerticalProposer(&fakeChainSource{chain: chain, spot: 130}, &fakeOpenGuard{}, newProposalStore(), nil)
 	if _, _, err := p.Propose(context.Background(), "NVDA", CallDebit, time.Now(), 10.0, now); err == nil {
 		t.Fatal("want non-positive-debit rejection, got nil")
 	}
@@ -108,7 +112,7 @@ func TestProposer_ValidateForPlace(t *testing.T) {
 	now := time.Date(2026, 6, 18, 15, 0, 0, 0, time.UTC)
 	store := newProposalStore()
 	src := &fakeChainSource{chain: twoLegChain(), spot: 130}
-	p := NewVerticalProposer(src, &fakeOpenGuard{}, store)
+	p := NewVerticalProposer(src, &fakeOpenGuard{}, store, nil)
 	id, card, err := p.Propose(context.Background(), "NVDA", CallDebit, time.Now(), 10.0, now)
 	if err != nil {
 		t.Fatal(err)
@@ -164,5 +168,80 @@ func TestParseVerticalDirection(t *testing.T) {
 				t.Fatalf("ParseVerticalDirection(%q): want %q, got %q", tt.input, tt.want, got)
 			}
 		})
+	}
+}
+
+type fakeRealizedVolSource struct {
+	vol float64
+	err error
+}
+
+func (f *fakeRealizedVolSource) GetAnnualizedRealizedVol(_ context.Context, _ string, _ int) (float64, error) {
+	return f.vol, f.err
+}
+
+func TestProposer_Propose_EnrichesCheapness(t *testing.T) {
+	now := time.Date(2026, 6, 18, 15, 0, 0, 0, time.UTC)
+	exp := time.Date(2026, 6, 20, 0, 0, 0, 0, time.UTC)
+	// twoLegChain: long C130 IV 0.45, short C140 IV 0.42 → SkewDiff -0.03 (steep).
+	src := &fakeChainSource{chain: twoLegChain(), spot: 130}
+	rv := &fakeRealizedVolSource{vol: 0.50}
+	p := NewVerticalProposer(src, &fakeOpenGuard{}, newProposalStore(), rv)
+
+	_, card, err := p.Propose(context.Background(), "NVDA", CallDebit, exp, 10.0, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !almostEqual(card.SkewDiff, -0.03, 1e-9) {
+		t.Fatalf("SkewDiff = %v, want -0.03", card.SkewDiff)
+	}
+	if !almostEqual(card.IVtoRV, 0.90, 1e-9) { // longIV 0.45 / rv 0.50
+		t.Fatalf("IVtoRV = %v, want 0.90", card.IVtoRV)
+	}
+	if !strings.HasPrefix(card.Cheapness, "rich") || !strings.Contains(card.Cheapness, "steep skew") {
+		t.Fatalf("Cheapness = %q, want rich/steep-skew", card.Cheapness)
+	}
+}
+
+func TestProposer_Propose_NilRV_SkewOnly(t *testing.T) {
+	now := time.Date(2026, 6, 18, 15, 0, 0, 0, time.UTC)
+	// Use a favorable-skew chain (long IV 0.40, short IV 0.42 → SkewDiff +0.02)
+	// so that the label shows "no RV" when rv is nil.
+	favorableChain := map[string]*interfaces.OptionContract{
+		"NVDA250620C00130000": {Symbol: "NVDA250620C00130000", StrikePrice: 130, ContractType: "call", Bid: 6.0, Ask: 6.4, ImpliedVolatility: 0.40},
+		"NVDA250620C00140000": {Symbol: "NVDA250620C00140000", StrikePrice: 140, ContractType: "call", Bid: 2.0, Ask: 2.4, ImpliedVolatility: 0.42},
+	}
+	src := &fakeChainSource{chain: favorableChain, spot: 130}
+	p := NewVerticalProposer(src, &fakeOpenGuard{}, newProposalStore(), nil)
+
+	_, card, err := p.Propose(context.Background(), "NVDA", CallDebit, time.Now(), 10.0, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if card.IVtoRV != 0 {
+		t.Fatalf("IVtoRV = %v, want 0 with nil RV", card.IVtoRV)
+	}
+	if !strings.Contains(card.Cheapness, "no RV") {
+		t.Fatalf("Cheapness = %q, want 'no RV'", card.Cheapness)
+	}
+}
+
+func TestProposer_Propose_RVError_SkewOnly(t *testing.T) {
+	now := time.Date(2026, 6, 18, 15, 0, 0, 0, time.UTC)
+	// Use a favorable-skew chain so the label shows "no RV" when rv fetch fails.
+	favorableChain := map[string]*interfaces.OptionContract{
+		"NVDA250620C00130000": {Symbol: "NVDA250620C00130000", StrikePrice: 130, ContractType: "call", Bid: 6.0, Ask: 6.4, ImpliedVolatility: 0.40},
+		"NVDA250620C00140000": {Symbol: "NVDA250620C00140000", StrikePrice: 140, ContractType: "call", Bid: 2.0, Ask: 2.4, ImpliedVolatility: 0.42},
+	}
+	src := &fakeChainSource{chain: favorableChain, spot: 130}
+	rv := &fakeRealizedVolSource{err: errors.New("feed down")}
+	p := NewVerticalProposer(src, &fakeOpenGuard{}, newProposalStore(), rv)
+
+	_, card, err := p.Propose(context.Background(), "NVDA", CallDebit, time.Now(), 10.0, now)
+	if err != nil {
+		t.Fatalf("propose must succeed despite RV error: %v", err)
+	}
+	if card.IVtoRV != 0 {
+		t.Fatalf("IVtoRV = %v, want 0 on RV error", card.IVtoRV)
 	}
 }
