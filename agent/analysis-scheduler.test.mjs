@@ -22,6 +22,7 @@ import {
   weeklyReportIsForDate,
   isLockStale,
   STALE_LOCK_MS,
+  prophetAutoAnalysesEnabled,
   AnalysisScheduler,
 } from './analysis-scheduler.js';
 
@@ -474,5 +475,179 @@ test('_acquireLock + _isLocked respect a fresh lock held by a live job', async (
     assert.equal(await scheduler._acquireLock(key), false, 'acquire must not steal a fresh lock');
   } finally {
     await fs.unlink(lockPath).catch(() => {});
+  }
+});
+
+// ── PROPHET_ANALYSES_ENABLED gate ─────────────────────────────────────
+// Prophet's discretionary LLM analyses (daily briefing, weekly screeners,
+// scenario analysis, performance review + adapt, postmortem, mid-session news
+// scan) auto-ran on a schedule to feed the now-defensive/dormant Prophet agent.
+// The gate (default OFF) suppresses ONLY those auto-triggers; the load-bearing
+// regime pipeline, trend parameter review, reasoning digest, trade grading,
+// reconciliation, and the manual triggerJob/API path stay live.
+
+// CUT jobs the gate must suppress when OFF.
+const CUT_JOBS = [
+  'daily_briefing', 'weekly_screeners', 'scenario_analysis',
+  'review_performance', 'postmortem', 'adapt_strategy',
+];
+
+test('prophetAutoAnalysesEnabled: true only when PROPHET_ANALYSES_ENABLED === "true"', () => {
+  assert.equal(prophetAutoAnalysesEnabled({ PROPHET_ANALYSES_ENABLED: 'true' }), true);
+  assert.equal(prophetAutoAnalysesEnabled({ PROPHET_ANALYSES_ENABLED: 'false' }), false);
+  assert.equal(prophetAutoAnalysesEnabled({ PROPHET_ANALYSES_ENABLED: '1' }), false);
+  assert.equal(prophetAutoAnalysesEnabled({}), false, 'absent env var → disabled (CUT by default)');
+});
+
+// Build a scheduler with every trigger spied and every branch input controlled,
+// so a run records exactly which jobs the gate let through. Real fs reads inside
+// runStartupChecks (daily_brief.json, weekly_regime_*.json) ENOENT harmlessly.
+function _gateScheduler({ et, lossInfo = null } = {}) {
+  const scheduler = new AnalysisScheduler();
+  const triggered = [];
+  scheduler.triggerJob = async (job) => { triggered.push(job); return { success: true }; };
+  scheduler._isLocked = async () => false;
+  scheduler._detectLossConditions = async () => lossInfo;
+  scheduler._getETInfo = () => et;
+  scheduler._saveState = async () => {};
+  scheduler._log = () => {};
+  scheduler.emit = () => true;
+  scheduler._running = true;
+  scheduler._activeJob = null;
+  scheduler.triggered = triggered;
+  return scheduler;
+}
+
+// Run runStartupChecks twice (gate OFF, then ON) over identical inputs. The
+// real holiday status (isMarketHoliday(new Date())) is the same for both runs,
+// so any job that fires under ON but not OFF was suppressed by the gate alone —
+// and any job that fires identically in both is provably untouched by the gate.
+async function _runStartupOffThenOn(make) {
+  const prev = process.env.PROPHET_ANALYSES_ENABLED;
+  try {
+    delete process.env.PROPHET_ANALYSES_ENABLED;
+    const off = make(); await off.runStartupChecks();
+    process.env.PROPHET_ANALYSES_ENABLED = 'true';
+    const on = make(); await on.runStartupChecks();
+    return { off: off.triggered, on: on.triggered };
+  } finally {
+    if (prev === undefined) delete process.env.PROPHET_ANALYSES_ENABLED;
+    else process.env.PROPHET_ANALYSES_ENABLED = prev;
+  }
+}
+
+test('runStartupChecks: gate OFF suppresses every CUT job; ON restores them (weekday)', async () => {
+  const make = () => _gateScheduler({
+    et: { hour: 8, minute: 0, isoDate: '2026-06-22', dayOfWeek: 1 }, // Monday morning
+    lossInfo: { significantLoss: true, lossDate: '2026-06-19', lossPercent: -5, consecutiveLossDays: 1 },
+  });
+  const { off, on } = await _runStartupOffThenOn(make);
+  // Weekday-gated CUT jobs that this scenario exercises (weekly_screeners is
+  // Sunday-only and covered separately).
+  for (const job of ['daily_briefing', 'scenario_analysis', 'review_performance', 'postmortem', 'adapt_strategy']) {
+    assert.ok(!off.includes(job), `gate OFF must suppress ${job}`);
+    assert.ok(on.includes(job), `gate ON must restore ${job}`);
+  }
+});
+
+test('runStartupChecks: gate does NOT touch trend_parameter_review or the regime pipeline', async () => {
+  const make = () => _gateScheduler({
+    et: { hour: 8, minute: 0, isoDate: '2026-06-22', dayOfWeek: 1 },
+    lossInfo: null,
+  });
+  const { off, on } = await _runStartupOffThenOn(make);
+  // KEEP jobs must fire identically regardless of the gate (equality cancels
+  // out the real-date holiday status the regime sections gate on).
+  for (const job of ['trend_parameter_review', 'macro_regime_skill', 'breadth_skill', 'market_top_skill', 'bubble_skill', 'regime_gate_compute']) {
+    assert.equal(off.includes(job), on.includes(job), `${job} must be unaffected by the gate`);
+  }
+  // trend_parameter_review has no holiday gate, so it must actually fire — proves
+  // the method ran past the CUT block to the KEEP work after it.
+  assert.ok(off.includes('trend_parameter_review'), 'trend_parameter_review must still fire when gate is OFF');
+});
+
+test('runStartupChecks: gate OFF suppresses the Sunday weekly_screeners catch-up; ON restores it', async () => {
+  const make = () => _gateScheduler({
+    et: { hour: 8, minute: 0, isoDate: '2026-06-21', dayOfWeek: 0 }, // Sunday
+    lossInfo: null,
+  });
+  const { off, on } = await _runStartupOffThenOn(make);
+  assert.ok(!off.includes('weekly_screeners'), 'gate OFF must suppress the Sunday weekly_screeners catch-up');
+  assert.ok(on.includes('weekly_screeners'), 'gate ON must restore the Sunday weekly_screeners catch-up');
+});
+
+// _checkSchedule fires time-of-day triggers. Run OFF then ON over the same et.
+async function _checkScheduleOffThenOn(make) {
+  const prev = process.env.PROPHET_ANALYSES_ENABLED;
+  try {
+    delete process.env.PROPHET_ANALYSES_ENABLED;
+    const off = make(); await off._checkSchedule();
+    process.env.PROPHET_ANALYSES_ENABLED = 'true';
+    const on = make(); await on._checkSchedule();
+    return { off: off.triggered, on: on.triggered };
+  } finally {
+    if (prev === undefined) delete process.env.PROPHET_ANALYSES_ENABLED;
+    else process.env.PROPHET_ANALYSES_ENABLED = prev;
+  }
+}
+
+test('_checkSchedule: gate OFF suppresses the 6:00 AM daily_briefing; ON restores it', async () => {
+  const make = () => _gateScheduler({ et: { hour: 6, minute: 0, isoDate: '2026-06-22', dayOfWeek: 1 } });
+  const { off, on } = await _checkScheduleOffThenOn(make);
+  assert.ok(!off.includes('daily_briefing'), 'gate OFF must suppress the 6:00 daily_briefing');
+  assert.ok(on.includes('daily_briefing'), 'gate ON must restore the 6:00 daily_briefing');
+});
+
+test('_checkSchedule: gate OFF suppresses the Monday 6:05 review_performance + adapt_strategy; ON restores them', async () => {
+  const make = () => _gateScheduler({ et: { hour: 6, minute: 5, isoDate: '2026-06-22', dayOfWeek: 1 } });
+  const { off, on } = await _checkScheduleOffThenOn(make);
+  assert.ok(!off.includes('review_performance') && !off.includes('adapt_strategy'), 'gate OFF must suppress the Monday review + adapt');
+  assert.ok(on.includes('review_performance') && on.includes('adapt_strategy'), 'gate ON must restore the Monday review + adapt');
+});
+
+test('_checkSchedule: gate OFF suppresses the Sunday 18:00 weekly_screeners; ON restores it', async () => {
+  const make = () => _gateScheduler({ et: { hour: 18, minute: 0, isoDate: '2026-06-21', dayOfWeek: 0 } });
+  const { off, on } = await _checkScheduleOffThenOn(make);
+  assert.ok(!off.includes('weekly_screeners'), 'gate OFF must suppress the Sunday 18:00 weekly_screeners');
+  assert.ok(on.includes('weekly_screeners'), 'gate ON must restore the Sunday 18:00 weekly_screeners');
+});
+
+test('_checkSchedule: gate OFF suppresses the 16:30 loss-driven postmortem + adapt_strategy; ON restores them', async () => {
+  const make = () => _gateScheduler({
+    et: { hour: 16, minute: 30, isoDate: '2026-06-22', dayOfWeek: 1 },
+    lossInfo: { significantLoss: true, lossDate: '2026-06-22', lossPercent: -6, consecutiveLossDays: 3 },
+  });
+  const { off, on } = await _checkScheduleOffThenOn(make);
+  assert.ok(!off.includes('postmortem') && !off.includes('adapt_strategy'), 'gate OFF must suppress the loss-driven postmortem + adapt');
+  assert.ok(on.includes('postmortem') && on.includes('adapt_strategy'), 'gate ON must restore the loss-driven postmortem + adapt');
+});
+
+test('_checkSchedule: the 16:45 trade_reconciliation fires regardless of the gate (KEEP)', async () => {
+  const make = () => _gateScheduler({ et: { hour: 16, minute: 45, isoDate: '2026-06-22', dayOfWeek: 1 } });
+  const { off, on } = await _checkScheduleOffThenOn(make);
+  assert.ok(off.includes('trade_reconciliation'), 'trade_reconciliation must fire when gate is OFF (KEEP)');
+  assert.ok(on.includes('trade_reconciliation'), 'trade_reconciliation must fire when gate is ON');
+});
+
+test('_startScanLoop: gate OFF installs no scan timer; ON installs one', () => {
+  const prev = process.env.PROPHET_ANALYSES_ENABLED;
+  try {
+    const off = new AnalysisScheduler();
+    off._log = () => {};
+    off._runMidSessionScan = async () => {}; // avoid the immediate scan side-effects
+    delete process.env.PROPHET_ANALYSES_ENABLED;
+    off._startScanLoop();
+    assert.equal(off._scanTimer, null, 'gate OFF must not install the mid-session scan timer');
+
+    const on = new AnalysisScheduler();
+    on._log = () => {};
+    on._runMidSessionScan = async () => {};
+    process.env.PROPHET_ANALYSES_ENABLED = 'true';
+    on._startScanLoop();
+    assert.ok(on._scanTimer != null, 'gate ON must install the mid-session scan timer');
+    on._stopScanLoop();
+  } finally {
+    if (prev === undefined) delete process.env.PROPHET_ANALYSES_ENABLED;
+    else process.env.PROPHET_ANALYSES_ENABLED = prev;
   }
 });

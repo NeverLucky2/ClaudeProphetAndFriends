@@ -18,6 +18,13 @@
  *   trend_parameter_review       → not run this calendar quarter
  *   adapt_strategy               → after review or postmortem, or 3 consecutive losing days
  *
+ * GATE: daily_briefing, weekly_screeners, scenario_analysis, review_performance,
+ * adapt_strategy, postmortem, and the mid-session market scanner are Prophet's
+ * discretionary LLM analyses. They auto-run ONLY when PROPHET_ANALYSES_ENABLED=true
+ * (default OFF — see prophetAutoAnalysesEnabled); the regime-input chain, quarterly
+ * trend_parameter_review, trade_reconciliation, daily_cost_report, reasoning_digest,
+ * and trade_grading are unaffected, as is the manual triggerJob/API path.
+ *
  * Persisted state: data/scheduler-state.json
  */
 import { spawn } from 'child_process';
@@ -168,6 +175,29 @@ export function resolveOpencodeModel(model) {
  */
 export function isTradingDay({ isWeekday, isHoliday }) {
   return Boolean(isWeekday) && !isHoliday;
+}
+
+/**
+ * Gate for Prophet's discretionary, auto-scheduled LLM analyses: the daily
+ * briefing, weekly screeners, scenario analysis, weekly performance review +
+ * adapt-strategy, loss-driven postmortem, and the every-15-min mid-session news
+ * scanner. These all exist to feed the Prophet equity-momentum agent's idea
+ * generation; with the fleet pivoted to uncorrelated ballast and Prophet now
+ * defensive/dormant, that cadence is pure token burn (the scanner alone wakes an
+ * LLM ~26×/trading day). Defaults OFF so the analyses are CUT unless explicitly
+ * re-enabled with PROPHET_ANALYSES_ENABLED=true.
+ *
+ * Scope: gates ONLY the AUTO-triggers in runStartupChecks / _checkSchedule /
+ * the scan loop. It does NOT touch the load-bearing regime-input pipeline
+ * (macro/breadth/market_top/bubble → regime_gate_compute, which feeds the
+ * def-Prophet hedge), trend_parameter_review, reasoning_digest, trade_grading,
+ * or trade_reconciliation; and it does NOT block the manual triggerJob path
+ * (the /api/scheduler/trigger endpoint and the operator-invoked skills), so any
+ * gated analysis can still be run on demand. Pure — exported for tests; reads
+ * env at call time so it picks up live changes.
+ */
+export function prophetAutoAnalysesEnabled(env = process.env) {
+  return env.PROPHET_ANALYSES_ENABLED === 'true';
 }
 
 /**
@@ -459,6 +489,10 @@ export class AnalysisScheduler extends EventEmitter {
     const { hour, dayOfWeek } = this._getETInfo();
     const isWeekday = dayOfWeek >= 1 && dayOfWeek <= 5;
     const tradingDay = isTradingDay({ isWeekday, isHoliday: isMarketHoliday(new Date()) });
+    // Prophet's discretionary analyses are gated off by default (see
+    // prophetAutoAnalysesEnabled). The regime-input chain (1.4/1.5) and the
+    // quarterly trend review (7) below are KEEP jobs and are NOT gated.
+    const autoAnalyses = prophetAutoAnalysesEnabled();
     let adaptNeeded = false;
 
     // 1. Daily briefing — read the stable daily_brief.json and check its
@@ -480,7 +514,7 @@ export class AnalysisScheduler extends EventEmitter {
       }
       briefIsCurrent = false;
     }
-    if (!briefIsCurrent) {
+    if (autoAnalyses && !briefIsCurrent) {
       if (await this._isLocked(this._getLockKey('daily_briefing', isoDate))) {
         this._log('Daily briefing already running in another process — skipping startup trigger.', 'info');
       } else if (isWeekday && hour < 16) {
@@ -563,7 +597,7 @@ export class AnalysisScheduler extends EventEmitter {
       }
       weeklyReportPresent = weeklyReportIsForDate(raw, isoDate);
     }
-    if (shouldTriggerWeeklyScreenerOnStartup({ dayOfWeek, isoDate, lastWeeklyScreenDate: this._lastWeeklyScreenDate, weeklyReportPresent })) {
+    if (autoAnalyses && shouldTriggerWeeklyScreenerOnStartup({ dayOfWeek, isoDate, lastWeeklyScreenDate: this._lastWeeklyScreenDate, weeklyReportPresent })) {
       if (await this._isLocked(this._getLockKey('weekly_screeners', isoDate))) {
         this._log('Weekly screeners already running in another process — skipping startup trigger.', 'info');
       } else {
@@ -573,7 +607,7 @@ export class AnalysisScheduler extends EventEmitter {
     }
 
     // 2. Scenario analysis (state-based)
-    if (this._lastScenarioDate !== isoDate) {
+    if (autoAnalyses && this._lastScenarioDate !== isoDate) {
       if (await this._isLocked(this._getLockKey('scenario_analysis', isoDate))) {
         this._log('Scenario analysis already running in another process — skipping startup trigger.', 'info');
       } else {
@@ -583,7 +617,7 @@ export class AnalysisScheduler extends EventEmitter {
     }
 
     // 3. Weekly performance review (state-based)
-    if (this._lastReviewWeek !== this._getISOWeek(isoDate)) {
+    if (autoAnalyses && this._lastReviewWeek !== this._getISOWeek(isoDate)) {
       if (await this._isLocked(this._getLockKey('review_performance', isoDate))) {
         this._log('Weekly performance review already running in another process — skipping startup trigger.', 'info');
       } else {
@@ -593,8 +627,10 @@ export class AnalysisScheduler extends EventEmitter {
       }
     }
 
-    // 4. Postmortem for significant loss (activity log detection)
-    const lossInfo = await this._detectLossConditions();
+    // 4. Postmortem for significant loss (activity log detection). Gating the
+    // detection when analyses are off also no-ops section 5 below — adapt_strategy
+    // only fires when this section or the weekly review (3) sets adaptNeeded.
+    const lossInfo = autoAnalyses ? await this._detectLossConditions() : null;
     if (lossInfo?.significantLoss && this._lastPostmortemDate !== lossInfo.lossDate) {
       if (await this._isLocked(this._getLockKey('postmortem', lossInfo.lossDate))) {
         this._log('Postmortem already running in another process — skipping startup trigger.', 'info');
@@ -633,6 +669,10 @@ export class AnalysisScheduler extends EventEmitter {
   // ── Mid-session scan loop ────────────────────────────────────────
 
   _startScanLoop() {
+    // CUT when PROPHET_ANALYSES_ENABLED is off — the mid-session news scanner is
+    // the single biggest token consumer (an LLM + web tools every 15 min) and
+    // serves only Prophet's news reactions. See prophetAutoAnalysesEnabled.
+    if (!prophetAutoAnalysesEnabled()) return;
     if (this._scanTimer) return;
     this._scanTimer = setInterval(() => this._runMidSessionScan(), 15 * 60 * 1000);
     // Run immediately if market is currently open
@@ -965,8 +1005,10 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
 
 
   async _checkAndRunLossJobs(isoDate) {
-    // Prophet (aggregate-sandbox) loss flow — unchanged behavior.
-    const lossInfo = await this._detectLossConditions();
+    // Prophet (aggregate-sandbox) loss flow. postmortem + adapt_strategy are CUT
+    // analyses; gating the detection off no-ops the whole flow (the loss-check
+    // tick still stamps _lastLossCheckDate). See prophetAutoAnalysesEnabled.
+    const lossInfo = prophetAutoAnalysesEnabled() ? await this._detectLossConditions() : null;
     let adaptNeeded = false;
     if (lossInfo) {
       if (lossInfo.significantLoss && this._lastPostmortemDate !== lossInfo.lossDate) {
@@ -987,6 +1029,11 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
     const isWeekday = dayOfWeek >= 1 && dayOfWeek <= 5;
     const isMonday = dayOfWeek === 1;
     const isSunday = dayOfWeek === 0;
+    // Prophet's discretionary analyses (daily_briefing, review/adapt, weekly
+    // screeners) are gated off by default; the regime chain, trend review,
+    // reconciliation, cost report, reasoning digest, and trade grading below are
+    // KEEP jobs and stay live. See prophetAutoAnalysesEnabled.
+    const autoAnalyses = prophetAutoAnalysesEnabled();
     // Holiday-aware gate for the pre-market regime-input chain (5:00 skills +
     // 5:50 compute) only — other jobs keep their existing isWeekday gating.
     const tradingDay = isTradingDay({ isWeekday, isHoliday: isMarketHoliday(new Date()) });
@@ -1018,7 +1065,7 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
       await this.triggerJob('regime_gate_compute').catch(() => {});
     }
 
-    if (isWeekday && hour === 6 && minute === 0 && this._lastDailyBriefDate !== isoDate) {
+    if (autoAnalyses && isWeekday && hour === 6 && minute === 0 && this._lastDailyBriefDate !== isoDate) {
       await this.triggerJob('daily_briefing').catch(() => {});
     }
 
@@ -1027,7 +1074,7 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
       await this.triggerJob('trend_parameter_review').catch(() => {});
     }
 
-    if (isMonday && hour === 6 && minute === 5 && this._lastReviewWeek !== currentWeek) {
+    if (autoAnalyses && isMonday && hour === 6 && minute === 5 && this._lastReviewWeek !== currentWeek) {
       await this.triggerJob('review_performance').catch(() => {});
       if (this._lastAdaptDate !== isoDate) {
         await this.triggerJob('adapt_strategy').catch(() => {});
@@ -1073,7 +1120,7 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
       await this.triggerJob('trade_grading').catch(() => {});
     }
 
-    if (isSunday && hour === 18 && minute === 0 && this._lastWeeklyScreenDate !== isoDate) {
+    if (autoAnalyses && isSunday && hour === 18 && minute === 0 && this._lastWeeklyScreenDate !== isoDate) {
       await this.triggerJob('weekly_screeners').catch(() => {});
     }
   }
