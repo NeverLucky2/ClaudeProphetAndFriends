@@ -272,7 +272,7 @@ To check this on each heartbeat, call `get_segment_pnl()` (no args needed — st
 
 **v1 limitation acknowledged in rules:** `get_segment_pnl` currently returns unrealized P&L only (intraday realized closes not yet included). For Turtle this is acceptable because the strategy rarely closes and re-opens within a single session — the trailing stop fires once per day, and realized residue is small relative to the unrealized exposure being measured.
 
-**Cross-strategy coordination — operator note:** Turtle's 30% cap is its lane in the reconciled 100% capital model (2026-06-02): V2 (34%), COIL (24%), TREND (30%), DRIFT (12%) = 100%. Turtle does not coordinate capital with other agents at runtime; it stays within its 30% lane and assumes the other strategies do the same.
+**Cross-strategy coordination — operator note:** Turtle's 30% cap is its lane in the reconciled 100% capital model (2026-06-24): V2 (16%), COIL (42%), TREND (30%), DRIFT (12%) = 100%. Turtle does not coordinate capital with other agents at runtime; it stays within its 30% lane and assumes the other strategies do the same.
 
 ---
 

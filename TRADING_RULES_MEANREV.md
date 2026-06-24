@@ -1,6 +1,6 @@
 # Mean Reversion Trading Rules — Coil
 
-**Updated:** 2026-05-19
+**Updated:** 2026-06-24
 **Style:** Mechanical RSI(2) mean reversion on S&P 500 stocks — rule executor only
 
 ---
@@ -180,10 +180,10 @@ For every entry:
 
 1. Read `portfolio_value` from the Beat Context block (fall back to `get_account` on missing)
 2. Use `last_close` from `get_mean_reversion_candidates` as the entry-price reference
-3. Compute `position_dollars` = `portfolio_value × 0.05` (5% equal-weight per position)
+3. Compute `position_dollars` = `portfolio_value × 0.06` (6% equal-weight per position)
 4. Apply the bear-regime sizing multiplier (see Bear Regime Behavior below)
 5. Apply the regime-gate `sizing_multiplier`
-6. Cap `position_dollars` at 5% of `portfolio_value` (hard ceiling per position)
+6. Cap `position_dollars` at 6% of `portfolio_value` (hard ceiling per position)
 7. Compute `shares` = floor(`position_dollars / last_close`)
 8. If `shares` < 1, skip and log "portfolio too small for {ticker}"
 
@@ -193,19 +193,19 @@ The −7% hard stop is set on the `place_managed_position` call itself; the agen
 
 ## Risk Management — Portfolio Level
 
-**Rule:** Maximum 4 open Coil positions simultaneously
-- 5% per position × 4 positions = 20% theoretical max; the 24% segment lane below is a ceiling (the 4-position limit is the effective binding cap at 20%)
+**Rule:** Maximum 7 open Coil positions simultaneously
+- 6% per position × 7 positions = 42% theoretical max; the 42% segment lane below now equals this binding cap (no cosmetic gap — the lane and the position math deploy the same ceiling)
 
-**Rule:** Maximum 5% of portfolio per single Coil position (hard cap, regardless of computed size)
+**Rule:** Maximum 6% of portfolio per single Coil position (hard cap, regardless of computed size)
 
-**Rule:** Maximum 24% of portfolio deployed in Coil positions at any time
+**Rule:** Maximum 42% of portfolio deployed in Coil positions at any time
 - Position notional × count cannot exceed this. If a new entry would breach, skip and log.
 
 **Daily Circuit Breaker:** If Coil-segment P&L ≤ −2% intraday, halt new entries for the rest of the session. Existing positions continue to be managed by the exit rules.
 
 To check this on each heartbeat, call `get_segment_pnl()` (no args needed — strategy is auto-resolved). The response field `unrealized_pnl_percent` is the metric to compare against the −2.0 threshold.
 
-**Cross-strategy coordination — operator note:** Coil's 24% cap is its lane in the reconciled 100% capital model (2026-06-02): V2 (34%), COIL (24%), TREND (30%), DRIFT (12%). Coil does not coordinate capital with other agents at runtime; it stays within its 24% lane and assumes the other strategies do the same.
+**Cross-strategy coordination — operator note:** Coil's 42% cap is its lane in the reconciled 100% capital model (2026-06-24): V2 (16%), COIL (42%), TREND (30%), DRIFT (12%). Coil is now the largest lane — the operator runs Coil daily (it makes most of the day's trades) and runs Prophet rarely, so capital was shifted from Prophet (34→16%) to Coil (24→42%). Coil does not coordinate capital with other agents at runtime; it stays within its 42% lane and assumes the other strategies do the same.
 
 ---
 
@@ -218,7 +218,7 @@ The operator controls Coil's bear-regime behavior via the `MEANREV_BEAR_MODE` en
 | Mode | Behavior |
 |---|---|
 | `normal` | No adjustment — full size, normal entries |
-| `halfsize` (default) | Position size halved (effectively 2.5% per position, max ~10% deployed). Agent keeps learning. |
+| `halfsize` (default) | Position size halved (effectively 3% per position, max ~21% deployed). Agent keeps learning. |
 | `halt` | Block all new entries. Existing positions continue to be managed by exit rules. |
 
 The candidates endpoint surfaces a top-level `bear_regime` boolean and the resolved `bear_mode`. The agent applies the multiplier to the computed `position_dollars` before the hard cap check.
@@ -240,7 +240,7 @@ Before opening a new Coil entry, call `get_regime_gate_status` (or read from the
 | UNKNOWN | (no data) | fail-open 1.0× | Yes (less strict than Turtle — Coil is shorter-duration) |
 
 Application to Position Sizing:
-- The multiplier applies to `position_dollars` after the bear-regime multiplier but before the 5% hard cap clip.
+- The multiplier applies to `position_dollars` after the bear-regime multiplier but before the 6% hard cap clip.
 - If `block_new_entries=true`, skip the entry. Open Coil positions continue to be managed by exit rules.
 - Coil tolerates UNKNOWN regime data better than Turtle because positions are short-lived (max 5 trading days). Fail-open is acceptable.
 
@@ -274,7 +274,7 @@ Run this sequence each scheduled heartbeat, in order:
 2. Check the activity log. If today's date already has a completed Coil run, log "duplicate heartbeat" and exit.
 3. Read positions from the Beat Context block (or call `get_positions`). Identify Coil-tagged positions.
 4. From the Beat Context block, read `get_segment_pnl()`. If `unrealized_pnl_percent` ≤ −2.0, trip the Coil-segment circuit breaker: log a CIRCUIT_BREAKER decision and skip Step 3 (entries). Step 2 (exits) still runs.
-5. Read `deployed_percent` from the same response. If ≥ 18.0, skip Step 3 (entries).
+5. Read `deployed_percent` from the same response. If ≥ 40.0, skip Step 3 (entries).
 6. Read econ blackout flag. If `is_blackout=true` or `error`, skip Step 3 (entries) but still run Step 2 (exits).
 
 ### Step 2: Exit checks (for each open Coil position)
@@ -298,8 +298,8 @@ For each open Coil position:
 
 Skip this step entirely if:
 - The Coil-segment circuit breaker tripped in Step 1
-- `coil_open_position_count` ≥ 4
-- `coil_deployed_pct` ≥ 24.0
+- `coil_open_position_count` ≥ 7
+- `coil_deployed_pct` ≥ 42.0
 - Econ blackout active
 - `MEANREV_BEAR_MODE=halt` and bear regime is active
 - Regime gate `block_new_entries=true`
@@ -309,9 +309,9 @@ Otherwise:
 1. Call `get_mean_reversion_candidates`. The response contains the pre-filtered, ranked candidate list sorted by `rsi_2` ascending (most oversold first).
 2. For each candidate where `entry_signal=true`:
    - Skip if Coil already holds this ticker (one position per ticker, no averaging down)
-   - Skip if total open Coil positions would exceed 4 after this entry
-   - Skip if total Coil deployed % would exceed 24% after this entry
-3. Compute position size per Position Sizing (apply bear-regime multiplier, then regime-gate multiplier, then 5% hard cap).
+   - Skip if total open Coil positions would exceed 7 after this entry
+   - Skip if total Coil deployed % would exceed 42% after this entry
+3. Compute position size per Position Sizing (apply bear-regime multiplier, then regime-gate multiplier, then 6% hard cap).
 4. Place the entry via `place_managed_position`:
    ```
    {
@@ -326,7 +326,7 @@ Otherwise:
    The take_profit at +10% is a backstop only. Primary exits are the RSI(2) > 70 / SMA-5 cross / 5-day timeout managed in Step 2.
 5. On fill: log entry with `entry_reason: "rsi2_oversold_within_uptrend"`, including `rsi_2`, `sma_200`, `sma_5`, `last_close`, and the computed `position_dollars`.
 
-Stop after the first 4 entries — even if more candidates qualify, the position cap binds.
+Stop after the first 7 entries — even if more candidates qualify, the position cap binds.
 
 ### Step 4: Heartbeat summary (always run)
 
@@ -347,8 +347,8 @@ Before every Coil entry:
 - [ ] `last_close` < `sma_5`?
 - [ ] `earnings_within_5d == false`?
 - [ ] No existing Coil position for this ticker?
-- [ ] Total open Coil positions < 4?
-- [ ] Total Coil-deployed capital < 24%?
+- [ ] Total open Coil positions < 7?
+- [ ] Total Coil-deployed capital < 42%?
 - [ ] Daily circuit breaker not triggered?
 - [ ] Regime gate not blocking new entries?
 - [ ] Bear-mode is not `halt`?

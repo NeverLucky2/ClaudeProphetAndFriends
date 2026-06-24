@@ -74,18 +74,18 @@ catalyst.
 - Prevents: Over-diversification (diworsification)
 - Focus: Quality over quantity
 
-**Rule:** Maximum 34% of portfolio deployed in V2 positions at any time (segment cap)
-- Calculate: sum of `position_value` across all V2 positions / `portfolio_value` ≤ 0.34
-- This is the V2 strategy's lane in the reconciled multi-agent capital model (2026-06-02). The four lanes are V2 (34%), COIL (24%), TREND (30%), DRIFT (12%) — total = 100%. V2 is the largest single lane by design — the operator's deliberate high-conviction allocation for the paper-trading phase.
+**Rule:** Maximum 16% of portfolio deployed in V2 positions at any time (segment cap)
+- Calculate: sum of `position_value` across all V2 positions / `portfolio_value` ≤ 0.16
+- This is the V2 strategy's lane in the reconciled multi-agent capital model (2026-06-24). The four lanes are V2 (16%), COIL (42%), TREND (30%), DRIFT (12%) — total = 100%. V2 is now the *smallest* lane by deliberate choice: the operator runs Prophet rarely because its per-day token cost outweighs the value it returns (and discretionary options trading is not a durable long-term edge for most traders), so capital was moved to Coil — which trades daily and carries the better risk-adjusted record. When V2 does run, the 16% lane is a hard ceiling; at 16% it holds roughly one full 12% position plus a small one.
 - The lanes are maximum shares, not simultaneous mandates; the whole-account deploy ceiling (`MAX_DEPLOYED_PCT`) is the real simultaneous governor and always leaves a cash buffer.
-- If a candidate trade would push V2 deployed above 34%, skip the entry (or close an existing V2 position first to make room)
+- If a candidate trade would push V2 deployed above 16%, skip the entry (or close an existing V2 position first to make room)
 - This cap applies regardless of conviction; high-conviction setups do not override it
 
 > **Code-enforced (not advisory) as of 2026-05-21:** per-position size (12%) and
 > total deployed (50%) are hard caps in the TradeGuard when `ENABLE_POSITION_CAPS`
 > is on (default on); orders exceeding them are rejected. The daily-loss breaker
 > blocks new entries (including options) and fails closed when account equity
-> can't be read. The 34% V2 segment cap and the sector caps remain advisory.
+> can't be read. The 16% V2 segment cap and the sector caps remain advisory.
 
 > **Options auto-stop monitor (code-enforced, flag-gated, default OFF):** when
 > `ENABLE_PROPHET_OPTIONS_STOP=true`, a Go monitor polls this agent's **long
@@ -461,9 +461,9 @@ Flag-gated rollout: enforcement defaults off (`ENABLE_REGIME_GATE=false`). While
 
 ## Portfolio Construction
 
-**Rule:** Stay within the 34% V2 segment lane; whole-account cash is governed centrally
+**Rule:** Stay within the 16% V2 segment lane; whole-account cash is governed centrally
 - The legacy "maintain 50-70% cash" rule was single-agent language and is retired (2026-05-25). In the multi-agent model, cash is a shared-account concern governed by `MAX_DEPLOYED_PCT`, not a per-agent target.
-- V2's own discipline is the 34% segment lane (see Position Sizing) plus the per-position 12% cap. Do not attempt to manage whole-account cash from inside V2 — deploy up to the lane when setups warrant.
+- V2's own discipline is the 16% segment lane (see Position Sizing) plus the per-position 12% cap. Do not attempt to manage whole-account cash from inside V2 — deploy up to the lane when setups warrant.
 
 **Rule:** Diversify across time frames
 - Core swings: 50-120 DTE positions (60-70% of deployed capital)

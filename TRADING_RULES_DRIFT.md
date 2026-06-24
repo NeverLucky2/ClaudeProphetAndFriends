@@ -203,7 +203,7 @@ The −10% hard stop is set on the `place_managed_position` call itself; the age
 
 To check this on each heartbeat, call `get_segment_pnl()`. The response field `unrealized_pnl_percent` is the metric to compare against the −3.0 threshold.
 
-**Cross-strategy coordination — operator note:** Drift's 12% cap is its lane in the reconciled 100% capital model (2026-06-02): V2 (34%), COIL (24%), TREND (30%), DRIFT (12%). Drift does not coordinate capital with other agents at runtime; it stays within its 12% lane and assumes the other strategies do the same.
+**Cross-strategy coordination — operator note:** Drift's 12% cap is its lane in the reconciled 100% capital model (2026-06-24): V2 (16%), COIL (42%), TREND (30%), DRIFT (12%). Drift does not coordinate capital with other agents at runtime; it stays within its 12% lane and assumes the other strategies do the same.
 
 ---
 
