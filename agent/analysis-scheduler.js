@@ -95,21 +95,32 @@ export function isLockStale(mtimeMs, nowMs) {
 
 /**
  * Build the spawn argv for the daily regime-gate compute job. Pure function:
- * given a list of filenames in `reportsDir`, picks the lexicographically
- * latest match for each upstream skill prefix (which matches chronological
- * order for the timestamped filenames the skills emit) and constructs the
- * Python CLI invocation. Exported for tests.
+ * given file entries ({name, mtimeMs}) in `reportsDir`, picks the most recently
+ * modified match for each upstream skill prefix and constructs the Python CLI
+ * invocation. Selecting on mtime (not filename order) is robust to mixed
+ * filename formats within a prefix — see the body comment. Exported for tests.
  */
-export function buildRegimeComputeArgv(reportsDir, scriptPath, outputPath, fileNames) {
+export function buildRegimeComputeArgv(reportsDir, scriptPath, outputPath, fileEntries) {
   const argv = [scriptPath];
   for (const { prefix, flag } of REGIME_INPUT_PREFIXES) {
-    const matches = fileNames.filter((n) => n.startsWith(prefix) && n.endsWith('.json'));
+    const matches = fileEntries.filter((e) => e.name.startsWith(prefix) && e.name.endsWith('.json'));
     if (matches.length === 0) continue;
-    // Lexicographic sort is intentional — the upstream skills' filenames embed
-    // ISO-formatted dates / timestamps, so sort order = chronological order.
-    matches.sort();
-    const latest = matches[matches.length - 1];
-    argv.push(flag, path.join(reportsDir, latest));
+    // Select by most-recent mtime, NOT by filename sort. The old lexicographic
+    // approach assumed every file of a prefix shared one date format so name
+    // order == chronological order — but a single odd file breaks that
+    // silently: a compact `market_top_YYYYMMDD.json` sorts AFTER dashed
+    // `market_top_YYYY-MM-DD_HHMMSS.json` (because '0' > '-'), so a stale
+    // compact leftover got picked every day and was then flagged stale →
+    // neutral 50. mtime is the same freshness signal
+    // compute_daily_regime_score.py already trusts, and is robust to any
+    // filename format. Tie-break on name for determinism when mtimes are equal.
+    let latest = matches[0];
+    for (const e of matches) {
+      if (e.mtimeMs > latest.mtimeMs || (e.mtimeMs === latest.mtimeMs && e.name > latest.name)) {
+        latest = e;
+      }
+    }
+    argv.push(flag, path.join(reportsDir, latest.name));
   }
   argv.push('--output', outputPath);
   return argv;
@@ -1282,7 +1293,19 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
 
     let files = [];
     try {
-      files = await fs.readdir(REPORTS_DIR);
+      const names = await fs.readdir(REPORTS_DIR);
+      // Stat each candidate so buildRegimeComputeArgv can pick the newest by
+      // mtime (robust to mixed filename formats). A file that vanishes or can't
+      // be stat'd between readdir and stat is treated as oldest (mtimeMs 0) so
+      // it never wins selection.
+      files = await Promise.all(names.map(async (name) => {
+        try {
+          const st = await fs.stat(path.join(REPORTS_DIR, name));
+          return { name, mtimeMs: st.mtimeMs };
+        } catch {
+          return { name, mtimeMs: 0 };
+        }
+      }));
     } catch (err) {
       // Reports dir missing → no upstream inputs available. Still run the
       // script (it will write a neutral regime_gate.json so the Go side has

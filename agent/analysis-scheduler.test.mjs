@@ -30,19 +30,19 @@ import {
 // Use path.join in expectations so this suite passes on both.
 const p = (...parts) => path.join(...parts);
 
-test('buildRegimeComputeArgv: picks latest of each prefix lexicographically', () => {
-  // Skills emit timestamped filenames (e.g., macro_regime_2026-05-14_083000.json).
-  // Lexicographic order matches chronological order for these formats, so the
-  // last-sorted file is the latest. No mtime stats needed (cheaper, deterministic).
+test('buildRegimeComputeArgv: picks newest of each prefix by mtime', () => {
+  // Selection is by file mtime (the same freshness signal the Python staleness
+  // check uses), so an unrelated file with a high mtime but the wrong prefix is
+  // ignored, and the newest matching file wins regardless of how its name sorts.
   const files = [
-    'macro_regime_2026-05-13_083000.json',
-    'macro_regime_2026-05-14_083000.json',
-    'market_top_20260513.json',
-    'market_top_20260514.json',
-    'breadth_20260514.json',
-    'bubble_20260514.json',
-    'daily_brief_20260514.json',   // unrelated file — must be ignored
-    'random_other.json',           // unrelated file — must be ignored
+    { name: 'macro_regime_2026-05-13_083000.json', mtimeMs: 1300 },
+    { name: 'macro_regime_2026-05-14_083000.json', mtimeMs: 1400 },
+    { name: 'market_top_20260513.json', mtimeMs: 1300 },
+    { name: 'market_top_20260514.json', mtimeMs: 1400 },
+    { name: 'breadth_20260514.json', mtimeMs: 1400 },
+    { name: 'bubble_20260514.json', mtimeMs: 1400 },
+    { name: 'daily_brief_20260514.json', mtimeMs: 1400 }, // unrelated — must be ignored
+    { name: 'random_other.json', mtimeMs: 9999 },         // unrelated high-mtime — must be ignored
   ];
   const argv = buildRegimeComputeArgv(
     'data/reports',
@@ -71,13 +71,34 @@ test('buildRegimeComputeArgv: picks latest of each prefix lexicographically', ()
   assert.equal(valueOf('--bubble'), p('data/reports', 'bubble_20260514.json'));
 });
 
+test('buildRegimeComputeArgv: picks newest by mtime even when a stale file sorts later by name (regression)', () => {
+  // Real-world bug (2026-06): a leftover compact-format file
+  // `market_top_20260601.json` sorts lexicographically AFTER every dashed
+  // `market_top_YYYY-MM-DD_HHMMSS.json` (because '0' > '-'), so the old
+  // name-sort picked the 3-week-stale June file every day and the regime gate
+  // then flagged it stale and ran blind on top_risk (neutral 50). mtime
+  // selection must pick the freshest file regardless of how its name sorts.
+  const files = [
+    { name: 'market_top_2026-06-24_095803.json', mtimeMs: 5000 }, // newest, but name sorts BEFORE the compact one
+    { name: 'market_top_2026-06-23_095354.json', mtimeMs: 4000 },
+    { name: 'market_top_20260601.json', mtimeMs: 1000 },          // stale leftover, sorts last by name
+  ];
+  const argv = buildRegimeComputeArgv('data/reports', 'script.py', 'out.json', files);
+  const i = argv.indexOf('--top');
+  assert.equal(argv[i + 1], p('data/reports', 'market_top_2026-06-24_095803.json'));
+  // Guard the regression: the OLD lexicographic rule WOULD have picked the stale
+  // compact file, which is exactly the trap mtime selection avoids.
+  const lexLast = files.map((e) => e.name).sort().at(-1);
+  assert.equal(lexLast, 'market_top_20260601.json');
+});
+
 test('buildRegimeComputeArgv: omits flags for prefixes with no matching files', () => {
   // The Python script fails soft on absent inputs (neutral 50). The scheduler
   // mirrors that by simply not passing the flag, rather than passing a fake
   // path that would emit a "file not found" warning to stderr.
   const files = [
-    'macro_regime_2026-05-14_083000.json',
-    'daily_brief_20260514.json',
+    { name: 'macro_regime_2026-05-14_083000.json', mtimeMs: 1400 },
+    { name: 'daily_brief_20260514.json', mtimeMs: 1400 },
   ];
   const argv = buildRegimeComputeArgv(
     'data/reports',
