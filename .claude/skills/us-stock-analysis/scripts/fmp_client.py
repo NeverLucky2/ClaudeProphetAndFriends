@@ -216,6 +216,20 @@ class FMPClient:
             return data
         return None
 
+    def get_price_target_news(self, ticker: str, limit: int = 10) -> Optional[list[dict]]:
+        """Recent per-analyst PT updates (publishedDate, analystCompany, priceTarget).
+
+        Same endpoint the analyst-actions skill uses — gives the consensus a date so
+        staleness is visible (FMP returns newest-first).
+        """
+        params = {"symbol": ticker, "limit": limit}
+        data = self._try_stable_then_v3(
+            "price-target-news", f"price-target/{ticker}", params
+        )
+        if isinstance(data, list):
+            return data
+        return None
+
     def get_analyst_estimates(self, ticker: str, period: str = "annual", limit: int = 4):
         """Forward EPS / revenue estimates."""
         params = {"symbol": ticker, "period": period, "limit": limit}

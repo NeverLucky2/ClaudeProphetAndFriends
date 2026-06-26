@@ -5,11 +5,16 @@ Fetch a one-shot fundamental snapshot for a single ticker.
 Emits a single JSON object on stdout with these top-level keys:
   ticker, quote, profile, ratios_ttm, key_metrics_ttm,
   income_annual, income_quarterly, balance_sheet_annual, cash_flow_annual,
-  price_target_consensus, analyst_estimates_annual, recent_news, share_context
+  price_target_consensus, analyst_estimates_annual, recent_news,
+  share_context, pt_context
 
 share_context surfaces the share-count trend and a marketCap≈price×shares sanity
 check so a surprising price (e.g. after a stock split) can be told apart from corrupt
 or stale data without manually digging into the income statement.
+
+pt_context gives the price-target consensus a date (latest analyst update, 90-day
+update count, price-vs-consensus gap, stale flag) so a lagging anchor can be told
+apart from a genuine sell-side "overvalued" view.
 
 The skill ingests this JSON instead of running 5+ web searches.
 
@@ -91,6 +96,80 @@ def derive_share_context(quote, income_annual) -> dict:
     }
 
 
+def derive_pt_context(quote, pt_consensus, pt_news, today=None) -> dict:
+    """Give the price-target consensus a date so staleness is visible.
+
+    The consensus endpoint carries no publish date or analyst count, so a consensus
+    lagging a fast rally (DDOG traded +31% above target) looks identical to a genuine
+    sell-side "overvalued" call. Recent per-analyst updates disambiguate: fresh targets
+    below the price are informative; stale ones are just an out-of-date anchor.
+    """
+    from datetime import date, datetime
+
+    today = today or date.today()
+
+    update_dates, recent_updates = [], []
+    for item in pt_news or []:
+        raw = (item.get("publishedDate") or "")[:10]
+        try:
+            d = datetime.strptime(raw, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        update_dates.append(d)
+        if len(recent_updates) < 5:
+            recent_updates.append({
+                "date": d.isoformat(),
+                "analystCompany": item.get("analystCompany"),
+                "priceTarget": item.get("priceTarget") or item.get("adjPriceTarget"),
+            })
+
+    latest = max(update_dates) if update_dates else None
+    days_since = (today - latest).days if latest else None
+    updates_90d = sum(1 for d in update_dates if (today - d).days <= 90)
+
+    q = quote or {}
+    price = q.get("price")
+    consensus = (pt_consensus or {}).get("targetConsensus")
+    gap_pct = (
+        round((price - consensus) / consensus * 100, 1)
+        if (price and consensus) else None
+    )
+
+    stale = (days_since > 90) if days_since is not None else None
+
+    note = ""
+    if stale:
+        note = (
+            f"Consensus PT is stale — last analyst update {latest.isoformat()} "
+            f"({days_since}d ago)."
+        )
+        if gap_pct is not None and gap_pct > 10:
+            note += (
+                f" Price is {gap_pct:+.1f}% vs consensus, likely just a lagging "
+                f"anchor after a rally — don't treat it as a sell-side view."
+            )
+    elif stale is False:
+        note = (
+            f"Consensus PT is current — {updates_90d} update(s) in the last 90d, "
+            f"latest {latest.isoformat()}."
+        )
+        if gap_pct is not None and gap_pct > 10:
+            note += (
+                f" Price is {gap_pct:+.1f}% above consensus on fresh targets — "
+                f"analysts genuinely see less upside; treat as informative."
+            )
+
+    return {
+        "latest_update_date": latest.isoformat() if latest else None,
+        "days_since_latest_update": days_since,
+        "updates_last_90d": updates_90d,
+        "price_vs_consensus_pct": gap_pct,
+        "stale": stale,
+        "recent_updates": recent_updates,
+        "note": note,
+    }
+
+
 def fetch_snapshot(
     ticker: str, annual_years: int = 5, quarters: int = 4, news_limit: int = 15,
     client: "FMPClient | None" = None,
@@ -115,6 +194,11 @@ def fetch_snapshot(
     snapshot["recent_news"] = client.get_stock_news(t, news_limit)
 
     snapshot["share_context"] = derive_share_context(snapshot["quote"], snapshot["income_annual"])
+    snapshot["pt_context"] = derive_pt_context(
+        snapshot["quote"],
+        snapshot["price_target_consensus"],
+        client.get_price_target_news(t),
+    )
 
     snapshot["_api_stats"] = client.get_api_stats()
     return snapshot

@@ -1,0 +1,10 @@
+======================================================================
+Market Top Detector
+O'Neil (Distribution) + Minervini (Leadership) + Monty (Rotation)
+======================================================================
+
+FMP API client initialized
+
+Step 1: Fetching Market Data
+----------------------------------------------------------------------
+  Fetching S&P 500 data... 

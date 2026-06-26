@@ -1,6 +1,6 @@
 ---
 name: us-stock-analysis
-description: Comprehensive US stock analysis including fundamental analysis (financial metrics, business quality, valuation), technical analysis (indicators, chart patterns, support/resistance), stock comparisons, and investment report generation. Use when user requests analysis of US stock tickers (e.g., "analyze AAPL", "compare TSLA vs NVDA", "give me a report on Microsoft"), evaluation of financial metrics, technical chart analysis, or investment recommendations for American stocks.
+description: Use when the user asks to analyze, evaluate, compare, or get a report/recommendation on US stock tickers (e.g., "analyze AAPL", "compare TSLA vs NVDA", "is Amazon overvalued?", "should I buy Microsoft?"), or asks about a stock's financials, valuation, technicals, or chart levels. Covers fundamental analysis (financial metrics, business quality, valuation), technical analysis (indicators, chart patterns, support/resistance), peer comparisons, and full investment report generation for American stocks.
 ---
 
 # US Stock Analysis
@@ -30,6 +30,7 @@ Run from the skill directory. Each script emits a single JSON object on stdout �
 **Data-quality habit — read before trusting the numbers:**
 - `fetch_stock_snapshot.py` emits a `share_context` block: the share-count trend plus a `marketCap ≈ price × shares` check. If a price looks surprising (a name you remember near $900 prints at $136), read `share_context.note` BEFORE concluding the data is wrong — `marketcap_consistent: true` with a ratio near 1.0 means it's just split-adjusted, not corrupt. A ratio far from 1.0 flags a split/issuance/stale-series to verify.
 - `pct_off_52w_high`/`low` use intraday highs/lows, so "0.0% off high" means literally at the high (not just the highest close).
+- Before anchoring on `price_target_consensus`, read `pt_context`: it dates the consensus (latest analyst update, 90-day update count, price-vs-consensus gap, `stale` flag). A price far above a STALE consensus is usually a lagging anchor after a rally (don't present it as a sell-side view); the same gap on FRESH targets means analysts genuinely see less upside. `pt_context.recent_updates` gives the latest 5 dated analyst targets for the report narrative.
 - Peer rows include `revenue_growth` (latest annual YoY) alongside the multiples.
 
 **Fallback: WebSearch (when no FMP key or for qualitative narrative).**

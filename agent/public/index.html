@@ -939,6 +939,35 @@
     .settings-content { padding: 20px; max-width: 800px; padding-bottom: 80px; }
     .settings-content h2 { font-family: 'Crimson Pro', serif; font-size: 24px; font-weight: 600; margin-bottom: 4px; }
     .settings-content p.subtitle { color: var(--ink-muted); font-size: 14px; margin-bottom: 20px; }
+    .wl-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .wl-sort-label { margin-left: auto; font-weight: 400; font-size: 12px; color: var(--ink-muted); display: inline-flex; align-items: center; gap: 6px; }
+    .wl-sort-label select { padding: 4px 8px; font-size: 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-panel); color: var(--text); cursor: pointer; }
+    .chart-iv { margin-left: auto; display: inline-flex; gap: 4px; flex-wrap: wrap; }
+    .chart-iv button { font-family: inherit; font-size: 11px; padding: 3px 8px; border: 1px solid var(--border); border-radius: 5px; background: var(--bg-panel); color: var(--ink-light); cursor: pointer; transition: background 0.15s, color 0.15s, border-color 0.15s; }
+    .chart-iv button:hover { border-color: var(--accent); color: var(--accent); }
+    .chart-iv button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .wl-add { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 14px; max-width: 460px; }
+    .wl-add #wl-input { flex: 1 1 130px; min-width: 0; }
+    .wl-add #wl-cat-input { flex: 1 1 130px; min-width: 0; }
+    .wl-add input { padding: 6px 10px; font-size: 13px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-panel); color: var(--text); }
+    .wl-add button { padding: 6px 14px; font-size: 13px; border: 1px solid var(--accent); border-radius: 6px; background: var(--accent); color: #fff; cursor: pointer; white-space: nowrap; }
+    .wl-add button:hover { background: var(--accent-dark); }
+    .wl-groups { display: flex; flex-direction: column; gap: 14px; }
+    .wl-cat-header { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; margin-bottom: 8px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-muted); }
+    .wl-cat-caret { font-size: 10px; color: var(--ink-faint); width: 10px; }
+    .wl-cat-count { color: var(--ink-faint); }
+    .wl-cat-body { display: flex; flex-wrap: wrap; gap: 8px; }
+    .wl-cat.collapsed .wl-cat-body { display: none; }
+    .wl-row { display: inline-flex; align-items: center; gap: 9px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-panel); cursor: pointer; transition: border-color 0.15s, box-shadow 0.15s; }
+    .wl-row:hover { border-color: var(--accent); }
+    .wl-row.active { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+    .wl-sym { font-weight: 600; font-size: 13px; color: var(--text); }
+    .wl-px { font-size: 13px; color: var(--ink-light); }
+    .wl-chg { font-size: 12px; }
+    .wl-chg.up { color: var(--success); }
+    .wl-chg.down { color: var(--error); }
+    .wl-remove { border: none; background: transparent; color: var(--ink-faint); font-size: 16px; line-height: 1; cursor: pointer; padding: 0 2px; }
+    .wl-remove:hover { color: var(--error); }
 
     .config-card {
       background: var(--paper); border: 1px solid var(--rule); padding: 16px;
@@ -1150,6 +1179,7 @@
     <button class="tab" data-tab="history" onclick="switchTab('history')">History</button>
     <button class="tab" data-tab="costs" onclick="switchTab('costs')">Costs</button>
     <button class="tab" data-tab="tips" onclick="switchTab('tips')">Tips</button>
+    <button class="tab" data-tab="markets" onclick="switchTab('markets')">Markets</button>
     <button class="tab tab-portfolio-mobile" data-tab="portfolio" onclick="switchTab('portfolio')"><span class="tab-full">Portfolio</span><span class="tab-short">Port</span></button>
     <button class="tab" data-tab="agents" onclick="switchTab('agents')">Agents</button>
     <button class="tab" data-tab="sandboxes" onclick="switchTab('sandboxes')"><span class="tab-full">Sandboxes</span><span class="tab-short">Sbox</span></button>
@@ -1279,6 +1309,61 @@
         <div id="tips-ledger"></div>
         <div id="tips-sources"></div>
         <div id="tips-list"><div class="no-data">No tips yet.</div></div>
+      </div>
+    </div>
+
+    <!-- Markets Panel -->
+    <div class="panel" id="panel-markets">
+      <div class="settings-content" style="max-width:none">
+        <h2>Markets</h2>
+        <p class="subtitle">Live market context via TradingView — indices, S&amp;P sector heatmap, and an interactive chart. Loads on first open and re-themes with the dashboard.</p>
+        <div class="section">
+          <div id="tv-ticker-tape" class="tv-host" style="min-height:78px"></div>
+        </div>
+        <div class="section" style="display:flex;flex-wrap:wrap;gap:16px">
+          <div style="flex:1 1 280px;max-width:380px;min-width:0">
+            <div class="section-title wl-head">
+              <span>Watchlist <span style="font-weight:400;color:var(--ink-faint);font-size:12px">— click to load the chart</span></span>
+              <label class="wl-sort-label">Sort
+                <select id="wl-sort" onchange="setWatchlistSort(this.value)">
+                  <option value="manual">Manual</option>
+                  <option value="sym">Symbol A–Z</option>
+                  <option value="change-desc">% Change ↓</option>
+                  <option value="change-asc">% Change ↑</option>
+                  <option value="price-desc">Price ↓</option>
+                  <option value="price-asc">Price ↑</option>
+                </select>
+              </label>
+            </div>
+            <div class="wl-add">
+              <input id="wl-input" type="text" maxlength="8" placeholder="Ticker (e.g. MSFT)" autocomplete="off" spellcheck="false" onkeydown="if(event.key==='Enter')addToWatchlist()" style="text-transform:uppercase">
+              <input id="wl-cat-input" type="text" maxlength="20" placeholder="Category" list="wl-cat-list" autocomplete="off" onkeydown="if(event.key==='Enter')addToWatchlist()">
+              <datalist id="wl-cat-list"></datalist>
+              <button type="button" onclick="addToWatchlist()">Add</button>
+            </div>
+            <div id="tv-watchlist" class="wl-groups"></div>
+          </div>
+          <div style="flex:3 1 460px;min-width:0">
+            <div class="section-title wl-head">
+              <span>Advanced Chart</span>
+              <span class="chart-iv" id="chart-iv"></span>
+            </div>
+            <div id="tv-advanced-chart" class="tv-host" style="height:560px"></div>
+          </div>
+        </div>
+        <div class="section" style="display:flex;flex-wrap:wrap;gap:16px">
+          <div style="flex:1 1 320px;min-width:0">
+            <div class="section-title">Market Overview</div>
+            <div id="tv-market-overview" class="tv-host" style="height:460px"></div>
+          </div>
+          <div style="flex:1 1 320px;min-width:0">
+            <div class="section-title">S&amp;P 500 Heatmap</div>
+            <div id="tv-heatmap" class="tv-host" style="height:460px"></div>
+          </div>
+        </div>
+        <p style="font-size:11px;color:var(--ink-faint);margin-top:10px">
+          Charts by <a href="https://www.tradingview.com" target="_blank" rel="noopener" style="color:var(--accent)">TradingView</a>. Requires network access; free for personal/internal use.
+        </p>
       </div>
     </div>
 
@@ -1792,6 +1877,294 @@ function switchTab(id) {
   if (id === 'costs') renderCostsTab();
   if (id === 'tips') loadTipsPanel();
   if (id === 'engine') loadEngineTrades();
+  if (id === 'markets') { if (!_marketsInited) initMarketsPanel(); else _refreshWatchlistQuotes(); }
+}
+
+// ── Markets Tab (TradingView embeds) ───────
+var _marketsInited = false;
+var _chartSymbol = 'QQQ';
+var _chartInterval = 'D';
+var CHART_INTERVAL_KEY = 'markets_chart_interval';
+var CHART_INTERVALS = [
+  { iv: '1', label: '1m' }, { iv: '5', label: '5m' }, { iv: '15', label: '15m' },
+  { iv: '60', label: '1h' }, { iv: 'D', label: '1D' }, { iv: 'W', label: '1W' }, { iv: 'M', label: '1M' }
+];
+var WATCHLIST_KEY = 'markets_watchlist';
+var WATCHLIST_SORT_KEY = 'markets_watchlist_sort';
+var WATCHLIST_COLLAPSED_KEY = 'markets_watchlist_collapsed';
+var _watchlist = [];          // [{ sym, cat }]
+var _watchlistSort = 'manual';
+var _collapsedCats = {};      // { catName: true }
+var _quoteCache = {};
+var _watchlistTimer = null;
+function _watchlistDefault() {
+  return [
+    { sym: 'QQQ', cat: 'ETFs' }, { sym: 'SPY', cat: 'ETFs' },
+    { sym: 'NVDA', cat: 'Tech' }, { sym: 'AAPL', cat: 'Tech' },
+    { sym: 'IBM', cat: 'Watching' }
+  ];
+}
+function _loadWatchlist() {
+  try {
+    var raw = localStorage.getItem(WATCHLIST_KEY);
+    var parsed = raw ? JSON.parse(raw) : null;
+    if (Array.isArray(parsed) && parsed.length && typeof parsed[0] === 'string') {
+      _watchlist = parsed.map(function(s) { return { sym: s, cat: 'Watchlist' }; });  // migrate old flat list
+    } else if (Array.isArray(parsed)) {
+      _watchlist = parsed.filter(function(w) { return w && w.sym; }).map(function(w) { return { sym: w.sym, cat: w.cat || 'Watchlist' }; });
+    } else {
+      _watchlist = _watchlistDefault();
+    }
+  } catch (_) { _watchlist = _watchlistDefault(); }
+  try { _watchlistSort = localStorage.getItem(WATCHLIST_SORT_KEY) || 'manual'; } catch (_) { _watchlistSort = 'manual'; }
+  try {
+    var c = JSON.parse(localStorage.getItem(WATCHLIST_COLLAPSED_KEY) || '[]');
+    _collapsedCats = {};
+    if (Array.isArray(c)) c.forEach(function(name) { _collapsedCats[name] = true; });
+  } catch (_) { _collapsedCats = {}; }
+  try { _chartInterval = localStorage.getItem(CHART_INTERVAL_KEY) || 'D'; } catch (_) { _chartInterval = 'D'; }
+}
+function _saveWatchlist() {
+  try { localStorage.setItem(WATCHLIST_KEY, JSON.stringify(_watchlist)); } catch (_) {}
+}
+function _persistCollapsed() {
+  try { localStorage.setItem(WATCHLIST_COLLAPSED_KEY, JSON.stringify(Object.keys(_collapsedCats).filter(function(k) { return _collapsedCats[k]; }))); } catch (_) {}
+}
+function _tvWidget(hostId, scriptUrl, config) {
+  var host = document.getElementById(hostId);
+  if (!host) return;
+  host.innerHTML = '';
+  var container = document.createElement('div');
+  container.className = 'tradingview-widget-container';
+  container.style.height = '100%';
+  container.style.width = '100%';
+  var widget = document.createElement('div');
+  widget.className = 'tradingview-widget-container__widget';
+  widget.style.height = '100%';
+  widget.style.width = '100%';
+  container.appendChild(widget);
+  var s = document.createElement('script');
+  s.type = 'text/javascript';
+  s.async = true;
+  s.src = scriptUrl;
+  s.innerHTML = JSON.stringify(config);
+  container.appendChild(s);
+  host.appendChild(container);
+}
+function renderMarketsWidgets() {
+  var dark = (document.documentElement.getAttribute('data-theme') === 'dark');
+  var tvTheme = dark ? 'dark' : 'light';
+  var FLEET = [
+    { proName: 'NASDAQ:QQQ', title: 'QQQ' },
+    { proName: 'AMEX:SPY', title: 'SPY' },
+    { proName: 'NASDAQ:NVDA', title: 'NVDA' },
+    { proName: 'NASDAQ:AAPL', title: 'AAPL' },
+    { proName: 'NYSE:IBM', title: 'IBM' }
+  ];
+  _tvWidget('tv-ticker-tape', 'https://s3.tradingview.com/external-embedding/embed-widget-ticker-tape.js', {
+    symbols: FLEET, colorTheme: tvTheme, isTransparent: true, displayMode: 'adaptive', locale: 'en'
+  });
+  _tvWidget('tv-market-overview', 'https://s3.tradingview.com/external-embedding/embed-widget-market-overview.js', {
+    colorTheme: tvTheme, dateRange: '12M', locale: 'en', isTransparent: true,
+    showSymbolLogo: true, width: '100%', height: '100%',
+    tabs: [
+      { title: 'Indices', symbols: [
+        { s: 'FOREXCOM:SPXUSD', d: 'S&P 500' },
+        { s: 'NASDAQ:QQQ', d: 'Nasdaq 100' },
+        { s: 'FOREXCOM:DJI', d: 'Dow 30' },
+        { s: 'AMEX:IWM', d: 'Russell 2000' }
+      ] },
+      { title: 'Fleet', symbols: [
+        { s: 'NASDAQ:QQQ', d: 'QQQ' },
+        { s: 'NASDAQ:NVDA', d: 'NVDA' },
+        { s: 'NASDAQ:AAPL', d: 'AAPL' },
+        { s: 'NYSE:IBM', d: 'IBM' }
+      ] }
+    ]
+  });
+  _tvWidget('tv-heatmap', 'https://s3.tradingview.com/external-embedding/embed-widget-stock-heatmap.js', {
+    dataSource: 'SPX500', blockSize: 'market_cap_basic', blockColor: 'change',
+    grouping: 'sector', locale: 'en', colorTheme: tvTheme,
+    hasTopBar: true, isZoomEnabled: true, hasSymbolTooltip: true, width: '100%', height: '100%'
+  });
+  _renderAdvancedChart();
+}
+function _renderAdvancedChart() {
+  var dark = (document.documentElement.getAttribute('data-theme') === 'dark');
+  _tvWidget('tv-advanced-chart', 'https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js', {
+    autosize: true, symbol: _chartSymbol, interval: _chartInterval, timezone: 'America/New_York',
+    theme: dark ? 'dark' : 'light', style: '1', locale: 'en',
+    backgroundColor: dark ? '#1e1e36' : '#ffffff',
+    gridColor: dark ? 'rgba(240,243,250,0.06)' : 'rgba(42,46,57,0.06)',
+    allow_symbol_change: true, support_host: 'https://www.tradingview.com'
+  });
+}
+function setChartInterval(iv) {
+  _chartInterval = iv;
+  try { localStorage.setItem(CHART_INTERVAL_KEY, iv); } catch (_) {}
+  _renderIntervalButtons();
+  _renderAdvancedChart();
+}
+function _renderIntervalButtons() {
+  var host = document.getElementById('chart-iv');
+  if (!host) return;
+  host.innerHTML = '';
+  CHART_INTERVALS.forEach(function(it) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = (it.iv === _chartInterval ? 'active' : '');
+    b.textContent = it.label;
+    b.title = it.label + ' interval';
+    b.addEventListener('click', function() { setChartInterval(it.iv); });
+    host.appendChild(b);
+  });
+}
+function setChartSymbol(sym) {
+  _chartSymbol = sym;
+  var host = document.getElementById('tv-watchlist');
+  if (host) host.querySelectorAll('.wl-row').forEach(function(r) { r.classList.toggle('active', r.dataset.sym === sym); });
+  _renderAdvancedChart();
+}
+function addToWatchlist() {
+  var input = document.getElementById('wl-input');
+  var catInput = document.getElementById('wl-cat-input');
+  if (!input) return;
+  var sym = (input.value || '').trim().toUpperCase();
+  var cat = ((catInput && catInput.value) || '').trim() || 'Watchlist';
+  if (!/^[A-Z.\-]{1,8}$/.test(sym)) return;
+  input.value = '';
+  if (catInput) catInput.value = '';
+  var existing = _watchlist.filter(function(w) { return w.sym === sym; })[0];
+  if (existing) { existing.cat = cat; }      // re-adding moves it to the new category
+  else { _watchlist.push({ sym: sym, cat: cat }); }
+  _saveWatchlist();
+  _renderWatchlist();
+  _refreshWatchlistQuotes();
+  setChartSymbol(sym);
+}
+function removeFromWatchlist(sym) {
+  var before = _watchlist.length;
+  _watchlist = _watchlist.filter(function(w) { return w.sym !== sym; });
+  if (_watchlist.length !== before) { _saveWatchlist(); _renderWatchlist(); }
+}
+function setWatchlistSort(val) {
+  _watchlistSort = val;
+  try { localStorage.setItem(WATCHLIST_SORT_KEY, val); } catch (_) {}
+  _renderWatchlist();
+}
+function _categoryOrder() {
+  var seen = {}, order = [];
+  _watchlist.forEach(function(w) { if (!seen[w.cat]) { seen[w.cat] = true; order.push(w.cat); } });
+  return order;
+}
+function _sortItems(items) {
+  var arr = items.slice();
+  var s = _watchlistSort;
+  function num(a, b, field, dir) {
+    var av = (_quoteCache[a.sym] || {})[field], bv = (_quoteCache[b.sym] || {})[field];
+    var an = (av == null), bn = (bv == null);
+    if (an && bn) return 0;
+    if (an) return 1;        // missing quotes sink to the bottom
+    if (bn) return -1;
+    return dir * (av - bv);
+  }
+  if (s === 'sym') arr.sort(function(a, b) { return a.sym < b.sym ? -1 : (a.sym > b.sym ? 1 : 0); });
+  else if (s === 'change-desc') arr.sort(function(a, b) { return num(a, b, 'changePct', -1); });
+  else if (s === 'change-asc') arr.sort(function(a, b) { return num(a, b, 'changePct', 1); });
+  else if (s === 'price-desc') arr.sort(function(a, b) { return num(a, b, 'price', -1); });
+  else if (s === 'price-asc') arr.sort(function(a, b) { return num(a, b, 'price', 1); });
+  return arr;  // 'manual' keeps insertion order
+}
+function _renderCatDatalist() {
+  var dl = document.getElementById('wl-cat-list');
+  if (!dl) return;
+  dl.innerHTML = '';
+  _categoryOrder().forEach(function(cat) {
+    var o = document.createElement('option');
+    o.value = cat;
+    dl.appendChild(o);
+  });
+}
+function _fmtQuote(q) {
+  if (!q || q.price == null) return { px: '—', chg: '', cls: '' };
+  var px = '$' + Number(q.price).toFixed(2);
+  var pct = (q.changePct == null) ? '' : (q.changePct >= 0 ? '+' : '') + Number(q.changePct).toFixed(2) + '%';
+  var cls = (q.changePct == null) ? '' : (q.changePct > 0 ? 'up' : (q.changePct < 0 ? 'down' : ''));
+  return { px: px, chg: pct, cls: cls };
+}
+function _renderWatchlistRow(w) {
+  var sym = w.sym;
+  var q = _fmtQuote(_quoteCache[sym]);
+  var row = document.createElement('div');
+  row.className = 'wl-row' + (sym === _chartSymbol ? ' active' : '');
+  row.dataset.sym = sym;
+  row.title = 'Load ' + sym + ' in the chart';
+  row.innerHTML =
+    '<span class="wl-sym">' + esc(sym) + '</span>' +
+    '<span class="wl-px">' + q.px + '</span>' +
+    '<span class="wl-chg ' + q.cls + '">' + q.chg + '</span>' +
+    '<button class="wl-remove" type="button" title="Remove" data-sym="' + esc(sym) + '">&times;</button>';
+  row.addEventListener('click', function(e) {
+    if (e.target && e.target.classList.contains('wl-remove')) { e.stopPropagation(); removeFromWatchlist(sym); return; }
+    setChartSymbol(sym);
+  });
+  return row;
+}
+function _renderWatchlist() {
+  var host = document.getElementById('tv-watchlist');
+  if (!host) return;
+  var sortSel = document.getElementById('wl-sort');
+  if (sortSel && sortSel.value !== _watchlistSort) sortSel.value = _watchlistSort;
+  _renderCatDatalist();
+  host.innerHTML = '';
+  if (!_watchlist.length) {
+    host.innerHTML = '<div class="no-data" style="padding:12px">Watchlist is empty. Add a ticker above.</div>';
+    return;
+  }
+  _categoryOrder().forEach(function(cat) {
+    var items = _sortItems(_watchlist.filter(function(w) { return w.cat === cat; }));
+    var collapsed = !!_collapsedCats[cat];
+    var group = document.createElement('div');
+    group.className = 'wl-cat' + (collapsed ? ' collapsed' : '');
+    var header = document.createElement('div');
+    header.className = 'wl-cat-header';
+    header.innerHTML = '<span class="wl-cat-caret">' + (collapsed ? '▸' : '▾') + '</span>' +
+      '<span>' + esc(cat) + '</span><span class="wl-cat-count">' + items.length + '</span>';
+    header.addEventListener('click', function() {
+      _collapsedCats[cat] = !_collapsedCats[cat];
+      _persistCollapsed();
+      _renderWatchlist();
+    });
+    group.appendChild(header);
+    var body = document.createElement('div');
+    body.className = 'wl-cat-body';
+    items.forEach(function(w) { body.appendChild(_renderWatchlistRow(w)); });
+    group.appendChild(body);
+    host.appendChild(group);
+  });
+}
+function _refreshWatchlistQuotes() {
+  if (!_watchlist.length) return;
+  var panel = document.getElementById('panel-markets');
+  if (!panel || !panel.classList.contains('active')) return;
+  var syms = _watchlist.map(function(w) { return w.sym; });
+  fetch('/api/quotes?symbols=' + encodeURIComponent(syms.join(',')))
+    .then(function(r) { return r.ok ? r.json() : null; })
+    .then(function(d) {
+      if (!d || !d.quotes) return;
+      _quoteCache = d.quotes;
+      _renderWatchlist();
+    })
+    .catch(function() {});
+}
+function initMarketsPanel() {
+  _loadWatchlist();
+  _renderIntervalButtons();
+  _renderWatchlist();
+  renderMarketsWidgets();
+  _refreshWatchlistQuotes();
+  if (!_watchlistTimer) _watchlistTimer = setInterval(_refreshWatchlistQuotes, 30000);
+  _marketsInited = true;
 }
 
 // ── Costs Tab ──────────────────────────────
@@ -2339,6 +2712,7 @@ function _applyTheme(theme) {
     btn.textContent = _THEME_ICONS[theme] || '\u263D';
     btn.title = _THEME_TITLES[theme] || 'Toggle theme';
   }
+  if (typeof _marketsInited !== 'undefined' && _marketsInited && typeof renderMarketsWidgets === 'function') renderMarketsWidgets();
 }
 function toggleDarkMode() {
   var current = localStorage.getItem('theme') || 'sunset-forest';
@@ -2376,12 +2750,18 @@ let _sseReconnectAttempts = 0;
 const _sseSessionId = (window.crypto && crypto.randomUUID)
   ? crypto.randomUUID()
   : (Date.now() + '-' + Math.random().toString(36).slice(2));
+// Highest console-line id (agent_log + agent_text) this page has rendered. Sent
+// back as ?since= on reconnect so the server replays the lines emitted while the
+// stream was down (screen-off, sleep/wake, idle drop, tab hide) instead of leaving
+// a gap. Also the dedupe high-water mark for replayed lines. See log-buffer.js.
+let _lastLogId = 0;
 function connectSSE() {
   if (_eventSource) { try { _eventSource.close(); } catch {} }
   if (_sseReconnectTimer) { clearTimeout(_sseReconnectTimer); _sseReconnectTimer = null; }
   seedTodayTrades();
   _wireHistoricControls();
-  const es = new EventSource(withAuthUrl('/api/events?sid=' + encodeURIComponent(_sseSessionId)));
+  const sinceQuery = _lastLogId ? '&since=' + _lastLogId : '';
+  const es = new EventSource(withAuthUrl('/api/events?sid=' + encodeURIComponent(_sseSessionId) + sinceQuery));
   _eventSource = es;
   es.onopen = () => { 
     _sseReconnectAttempts = 0;
@@ -2428,6 +2808,13 @@ function connectSSE() {
     if (!selectedSandboxId || !d.sandboxId || d.sandboxId === getEffectiveSandboxId()) updateButtons(d.status);
   });
   es.addEventListener('agent_log', e => {
+    // Replayed lines (backfill on reconnect) carry the same ids as the live
+    // stream; skip any at or below the high-water mark so a line that was both
+    // replayed and broadcast renders exactly once. id-less frames (the
+    // first-connect fills recap) fall through and always render.
+    const id = e.lastEventId ? Number(e.lastEventId) : 0;
+    if (id && id <= _lastLogId) return;
+    if (id) _lastLogId = id;
     const d = JSON.parse(e.data);
     const sid = d.sandboxId || getEffectiveSandboxId();
     const route = (window.classifyLogPanes || (() => ({ main: true, go: false })))(d);
@@ -2437,9 +2824,16 @@ function connectSSE() {
     log(formatSandboxPrefix(d) + d.message, d.level || 'info');
   });
   es.addEventListener('agent_text', e => {
+    // Same id/dedupe as agent_log above. agent_text (the beat's report) is buffered
+    // and replayed on reconnect, so skip any frame at/below the high-water mark and
+    // advance the shared cursor. id-less frames (the live pre-buffer stream) always
+    // render.
+    const id = e.lastEventId ? Number(e.lastEventId) : 0;
+    if (id && id <= _lastLogId) return;
+    if (id) _lastLogId = id;
     const d = JSON.parse(e.data);
     const sid = d.sandboxId || getEffectiveSandboxId();
-    d.text.split('\n').forEach(l => { 
+    d.text.split('\n').forEach(l => {
       if(l.trim()) {
         logToSandbox(sid, `<div class="log-entry text"><span class="time">${fmtTime()}</span>${esc(l)}</div>`);
         log(formatSandboxPrefix(d) + l, 'text');

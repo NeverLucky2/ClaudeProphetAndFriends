@@ -43,6 +43,7 @@ import { listNewsCandidates } from './news-candidates.js';
 import { matchTippedTrades } from './tips-scorer.js';
 import { fetchFillsSummary, renderFillsSummaryLine, startOfEtTradingDayIso, claimConnectRecap } from './fills-summary.js';
 import { SSE_KEEPALIVE_MS, sendSseKeepalive } from './sse-keepalive.js';
+import { createLogBuffer, formatSseLogFrame, broadcastBufferedLine } from './log-buffer.js';
 import { runReconciliationForSandbox, readReconciliationSummary } from './trade-reconciliation.js';
 import { runReasoningDigestForSandbox, readReasoningDigestSummary } from './reasoning-digest.js';
 import { readTradeGradesSummary } from '../scripts/trade-grades.mjs';
@@ -138,7 +139,28 @@ async function refreshAllHarnessConfigs(options = {}) {
   await Promise.allSettled(tasks);
 }
 
+// Replay buffer for the console stream. The console renders two ephemeral event
+// types — agent_log (the cost / heartbeat lines) and agent_text (the beat's actual
+// report) — and neither can be reconstructed on reconnect (state/config are re-sent
+// fresh in /api/events). Buffering both — and stamping each frame with a monotonic
+// id — lets a reconnecting client backfill the lines it missed while the SSE stream
+// was down (screen-off, sleep/wake, idle drop, tab hide). See log-buffer.js.
+const logBuffer = createLogBuffer();
+
+// Console-rendered events that must survive a reconnect. agent_text was the bug:
+// it streams the beat's report but used to fall through to the fire-and-forget
+// path, so a tab-hide mid-beat dropped the report while keeping the cost lines.
+const BUFFERED_LOG_EVENTS = new Set(['agent_log', 'agent_text']);
+
 function broadcast(event, data) {
+  // Buffered events must be retained even when nobody is connected — that
+  // disconnected window is exactly the gap the buffer exists to fill. The shared
+  // helper stamps each frame's id/event so the live stream and the reconnect
+  // backfill can never disagree on event type. See log-buffer.js (unit-tested).
+  if (BUFFERED_LOG_EVENTS.has(event)) {
+    broadcastBufferedLine(sseClients, logBuffer, event, data);
+    return;
+  }
   if (sseClients.size === 0) return; // skip serialization when no clients connected
   const msg = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
   for (const client of sseClients) {
@@ -448,6 +470,20 @@ app.get('/api/events', (req, res) => {
   res.write(`event: config\ndata: ${JSON.stringify(safeConfig())}\n\n`);
   sseClients.add(res);
   req.on('close', () => sseClients.delete(res));
+
+  // Backfill the console: replay the console lines this client missed while its SSE
+  // stream was down. The client passes the highest id it has rendered as ?since=;
+  // the browser also sends it as Last-Event-ID on a native auto-reconnect. A
+  // fresh page load (no cursor) replays nothing — the live stream + fills recap
+  // cover it, and dumping the whole window would double-render. Replaying after
+  // add()ing to sseClients means a line broadcast mid-replay is never dropped;
+  // the client dedupes by id so any overlap renders once. See log-buffer.js.
+  const sinceCursor = req.query?.since ?? req.headers['last-event-id'];
+  if (sinceCursor != null && sinceCursor !== '') {
+    for (const entry of logBuffer.since(sinceCursor)) {
+      res.write(formatSseLogFrame(entry));
+    }
+  }
 
   // Trigger B: surface each running agent's day fills to this client only, and
   // only on the first connect of a given dashboard viewing session. The client
@@ -1516,6 +1552,53 @@ app.get('/api/accounts/:id/equity', async (req, res) => {
     };
     _equityCache.set(account.id, entry);
     res.json({ equity: null, asOf: entry.asOf, error: entry.error });
+  }
+});
+
+// Market data: latest price + daily change for watchlist symbols (Alpaca snapshots).
+// Uses the active account's Alpaca keys; the data API works with paper keys (IEX feed).
+const _quotesCache = { ts: 0, key: '', data: null };
+const QUOTES_CACHE_MS = 10000;
+app.get('/api/quotes', async (req, res) => {
+  const raw = String(req.query.symbols || '').trim();
+  if (!raw) return res.json({ quotes: {}, error: null });
+  const symbols = raw.toUpperCase().split(',').map(s => s.trim()).filter(Boolean).slice(0, 50);
+  if (!symbols.length) return res.json({ quotes: {}, error: null });
+  const key = symbols.join(',');
+  if (_quotesCache.data && _quotesCache.key === key && (Date.now() - _quotesCache.ts) < QUOTES_CACHE_MS) {
+    return res.json({ quotes: _quotesCache.data, error: null });
+  }
+  const account = getActiveAccount();
+  if (!account || !account.publicKey) return res.json({ quotes: {}, error: 'no_account' });
+  try {
+    const client = axios.create({
+      baseURL: 'https://data.alpaca.markets',
+      headers: {
+        'APCA-API-KEY-ID': account.publicKey,
+        'APCA-API-SECRET-KEY': account.secretKey,
+      },
+      timeout: 4000,
+    });
+    const { data } = await client.get('/v2/stocks/snapshots', { params: { symbols: key, feed: 'iex' } });
+    const snaps = data && data.snapshots ? data.snapshots : data;
+    const quotes = {};
+    for (const sym of symbols) {
+      const snap = snaps ? snaps[sym] : null;
+      const last = snap ? ((snap.latestTrade && snap.latestTrade.p) ?? (snap.dailyBar && snap.dailyBar.c) ?? null) : null;
+      const prevClose = snap && snap.prevDailyBar ? snap.prevDailyBar.c : null;
+      let change = null, changePct = null;
+      if (last != null && prevClose != null && prevClose !== 0) {
+        change = last - prevClose;
+        changePct = (change / prevClose) * 100;
+      }
+      quotes[sym] = { price: last, change, changePct };
+    }
+    _quotesCache.ts = Date.now();
+    _quotesCache.key = key;
+    _quotesCache.data = quotes;
+    res.json({ quotes, error: null });
+  } catch (err) {
+    res.json({ quotes: {}, error: err.response?.status ? `Alpaca ${err.response.status}` : err.message });
   }
 });
 
