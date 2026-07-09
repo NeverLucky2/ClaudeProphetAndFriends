@@ -364,18 +364,30 @@ and the `n ≥ 200` gate must be sanity-checked against the enumerator's first r
 ## Phasing
 
 1. **Shared enumerator** (`coil-nearmiss-enum.mjs`) + tests. Everything depends on it.
-2. **Part 2 pre-registration** — committed *first*, before Part 1 is run, so the forward window starts
-   clean and the historical benchmark cannot be tuned after the fact.
-3. **Part 1 diagnostic** — build, run, read. Calibrates expectations; discriminates the rival stories.
-4. **Part 3 store + CLI + scorer + tests** — start flagging immediately. AMAT `2026-07-07` *can* and
+2. **Run the enumerator over history** → episode counts, and the historical conversion rate by year and
+   vol-tercile. This is a required *input* to the pre-registration: you cannot benchmark against an
+   unmeasured rate, nor size an `n`-gate without knowing the realized episode rate.
+3. **Commit the pre-registration** (`data/lab/coil-frontrun-prereg.json`, `git add -f`), freezing: the
+   benchmark rate, the `n`-gate, the vol-tercile boundaries, the band edges, the 10-bar cap, block length /
+   seed / iterations, and **`forward_window_start` = the prereg commit date**.
+4. **Part 1 diagnostic report** — the C1 series from (2) plus the C2/C3 return trends. Exploratory.
+5. **Part 3 store + CLI + scorer + tests** — start flagging immediately. AMAT `2026-07-07` *can* and
    *should* be logged, but it will be marked `hindsight: true` (it is being flagged after the bounce was
    observed) and quarantined from the headline. That is the guardrail working as designed, on the very
    case that motivated the feature.
-5. **Part 2 monitor** — run monthly; it emits `UNDERPOWERED` until `n ≥ 200`.
-6. **Phase 3 UI** — deferred, as with the veto ledger.
+6. **Part 2 monitor** — run monthly; it emits `UNDERPOWERED` until the `n`-gate is met.
+7. **Phase 3 UI** — deferred, as with the veto ledger.
 
-Ordering note: (2) before (3) is not cosmetic. Running the diagnostic first and *then* writing the prereg
-would let the historical benchmark be chosen to flatter the forward test.
+**Why (2) before (3) is not peeking.** The one invariant that makes the forward test confirmatory is:
+*the rule is frozen before any forward observation exists.* Measuring the past to set the benchmark and
+size the gate cannot violate that — the forward window is empty at the time. What *would* invalidate the
+test is changing the rule after forward data begins to accrue, which the prereg hash prevents.
+
+The genuine residual risk is different, and no ordering fixes it: **trend continuation.** If the historical
+yearly series is *already* declining, then "forward < pooled historical" can be satisfied by a pre-existing
+trend having nothing to do with AI adoption. That is what the trailing-12-month secondary comparison, and
+reproducing the yearly series inside the monitor's report, exist to expose. Read them before believing a
+SUPPORTED verdict.
 
 ---
 
