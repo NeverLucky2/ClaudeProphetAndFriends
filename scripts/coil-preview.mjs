@@ -232,16 +232,58 @@ export async function runPreview({ base, fetchImpl = globalThis.fetch, now = new
   return assembleReport({ universe, candidatesResp, signals, failed, now });
 }
 
+// Ports to scan when neither TRADING_BOT_URL nor TRADING_BOT_PORT is set. The Go
+// bot's default is 4534, but the multi-sandbox layout gives each sandbox its own
+// port (4535+), and Coil's mean-rev engine lives on whichever sandbox runs it.
+export const PROBE_PORT_LOW = 4534;
+export const PROBE_PORT_HIGH = 4544;
+
 // resolveBase mirrors agent/server.js: TRADING_BOT_URL, else localhost:PORT.
 export function resolveBase(env = process.env) {
-  return env.TRADING_BOT_URL || `http://localhost:${env.TRADING_BOT_PORT || '4534'}`;
+  return env.TRADING_BOT_URL || `http://localhost:${env.TRADING_BOT_PORT || String(PROBE_PORT_LOW)}`;
+}
+
+// isLiveMeanRevBase: true when this base serves a working mean-rev engine. The
+// /universe endpoint answers on every sandbox, so it can't tell them apart —
+// /candidates only returns a real payload (an object with a candidates array) on
+// the sandbox actually running Coil, so that's the discriminator. Never throws:
+// fetchJson turns a dead/refused port into { ok:false }, which reads as not-live.
+export async function isLiveMeanRevBase(base, fetchImpl = globalThis.fetch) {
+  const cand = await fetchJson(base, '/api/v1/meanrev/candidates', fetchImpl);
+  return !!(cand.ok && cand.data && Array.isArray(cand.data.candidates));
+}
+
+// resolveLiveBase decides which bot URL to hit.
+//   - If TRADING_BOT_URL or TRADING_BOT_PORT is set, honor it verbatim and do NOT
+//     probe. This is the program-window path: the agent injects the live port
+//     (agent/analysis-scheduler.js sets TRADING_BOT_URL), and we must not
+//     second-guess it — so this branch is byte-for-byte the pre-patch behavior.
+//   - Otherwise (a bare CLI shell), scan localhost:LOW..HIGH and return the first
+//     port whose mean-rev engine is live. If none answers, fall back to the
+//     default base so the caller still prints its usual "not reachable" message.
+export async function resolveLiveBase({ env = process.env, fetchImpl = globalThis.fetch } = {}) {
+  if (env.TRADING_BOT_URL || env.TRADING_BOT_PORT) {
+    return { base: resolveBase(env), probed: false, scanned: false };
+  }
+  for (let port = PROBE_PORT_LOW; port <= PROBE_PORT_HIGH; port += 1) {
+    const base = `http://localhost:${port}`;
+    if (await isLiveMeanRevBase(base, fetchImpl)) {
+      return { base, probed: true, scanned: true };
+    }
+  }
+  return { base: resolveBase(env), probed: false, scanned: true };
 }
 
 async function main() {
-  const base = resolveBase();
+  const { base, probed, scanned } = await resolveLiveBase();
+  if (probed) console.error(`(auto-discovered Coil mean-rev engine at ${base})`);
   const report = await runPreview({ base });
   if (report.bot_ok === false) {
-    console.error(`Coil bot not reachable at ${base} — cannot preview. (${report.error || 'unknown error'})`);
+    if (scanned && !probed) {
+      console.error(`No live Coil mean-rev engine found on localhost:${PROBE_PORT_LOW}-${PROBE_PORT_HIGH} — cannot preview.`);
+    } else {
+      console.error(`Coil bot not reachable at ${base} — cannot preview. (${report.error || 'unknown error'})`);
+    }
     console.error('If the bot is down, Coil is not trading, so there is nothing to mirror.');
     process.exit(1);
   }

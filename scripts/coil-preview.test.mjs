@@ -2,8 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   WATCH_RSI_MAX, WATCH_SMA5_BAND, THIN_REGIME_PCT, WATCH_MAX_NAMES, STOP_PCT,
+  PROBE_PORT_LOW, PROBE_PORT_HIGH,
   computeMargins, classifyWatch, buildMirror, buildBanner,
   enrichSignal, assembleReport, renderReport, runPreview,
+  resolveBase, resolveLiveBase, isLiveMeanRevBase,
 } from './coil-preview.mjs';
 
 // A non-firing, in-regime, oversold-ish signal that qualifies as WATCH.
@@ -300,4 +302,82 @@ test('renderReport shows the earnings-within-5d line when flagged', () => {
     earnings_within_5d: true, entry_signal: true,
   })] }));
   assert.match(out, /earnings within 5 trading days/);
+});
+
+// --- port resolution / auto-discovery -------------------------------------
+// A fetch stub that keys on the FULL url (host+port matter for probing). An
+// unmatched url throws, which fetchJson turns into a { ok:false } (dead port).
+function stubFetchUrls(routes) {
+  return async (url) => {
+    const entry = routes[url];
+    if (!entry) throw new Error(`no route: ${url}`);
+    return { ok: entry.status >= 200 && entry.status < 300, status: entry.status, json: async () => entry.body };
+  };
+}
+const CAND = '/api/v1/meanrev/candidates';
+
+test('resolveBase default port is the low end of the probe range', () => {
+  assert.equal(resolveBase({}), `http://localhost:${PROBE_PORT_LOW}`);
+});
+
+test('resolveLiveBase honors TRADING_BOT_URL and never probes (program-window path)', async () => {
+  let called = false;
+  const fetchImpl = async () => { called = true; throw new Error('must not fetch'); };
+  const r = await resolveLiveBase({ env: { TRADING_BOT_URL: 'http://localhost:9999' }, fetchImpl });
+  assert.equal(r.base, 'http://localhost:9999');
+  assert.equal(r.probed, false);
+  assert.equal(r.scanned, false);
+  assert.equal(called, false, 'the probe must not run when TRADING_BOT_URL is set');
+});
+
+test('resolveLiveBase honors TRADING_BOT_PORT and never probes', async () => {
+  let called = false;
+  const fetchImpl = async () => { called = true; throw new Error('must not fetch'); };
+  const r = await resolveLiveBase({ env: { TRADING_BOT_PORT: '4600' }, fetchImpl });
+  assert.equal(r.base, 'http://localhost:4600');
+  assert.equal(called, false);
+});
+
+test('resolveLiveBase probes and returns the first live mean-rev port', async () => {
+  const live = 'http://localhost:4537';
+  const fetchImpl = stubFetchUrls({ [`${live}${CAND}`]: { status: 200, body: { bear_regime: false, candidates: [] } } });
+  const r = await resolveLiveBase({ env: {}, fetchImpl });
+  assert.equal(r.base, live);
+  assert.equal(r.probed, true);
+  assert.equal(r.scanned, true);
+});
+
+test('resolveLiveBase prefers the lowest live port when several answer', async () => {
+  const fetchImpl = stubFetchUrls({
+    [`http://localhost:4537${CAND}`]: { status: 200, body: { candidates: [] } },
+    [`http://localhost:4539${CAND}`]: { status: 200, body: { candidates: [] } },
+  });
+  const r = await resolveLiveBase({ env: {}, fetchImpl });
+  assert.equal(r.base, 'http://localhost:4537');
+});
+
+test('resolveLiveBase falls back to the default base when nothing is live', async () => {
+  const fetchImpl = async () => { throw new Error('ECONNREFUSED'); };
+  const r = await resolveLiveBase({ env: {}, fetchImpl });
+  assert.equal(r.base, `http://localhost:${PROBE_PORT_LOW}`);
+  assert.equal(r.probed, false);
+  assert.equal(r.scanned, true);
+});
+
+test('resolveLiveBase ignores a non-mean-rev port that answers without a candidates array', async () => {
+  // e.g. a sandbox running another agent: /candidates returns 200 but no array.
+  const fetchImpl = stubFetchUrls({
+    [`http://localhost:4535${CAND}`]: { status: 200, body: { some: 'other-agent' } },
+    [`http://localhost:4538${CAND}`]: { status: 200, body: { candidates: [] } },
+  });
+  const r = await resolveLiveBase({ env: {}, fetchImpl });
+  assert.equal(r.base, 'http://localhost:4538');
+});
+
+test('isLiveMeanRevBase: valid payload true; missing array / dead port false', async () => {
+  const liveFetch = stubFetchUrls({ [`http://x${CAND}`]: { status: 200, body: { candidates: [] } } });
+  assert.equal(await isLiveMeanRevBase('http://x', liveFetch), true);
+  const noArr = stubFetchUrls({ [`http://x${CAND}`]: { status: 200, body: { foo: 1 } } });
+  assert.equal(await isLiveMeanRevBase('http://x', noArr), false);
+  assert.equal(await isLiveMeanRevBase('http://x', async () => { throw new Error('refused'); }), false);
 });
