@@ -72,11 +72,23 @@ test('stateOf classifies FIRE / NEAR_MISS / OUT', () => {
   assert.equal(stateOf(F(100, 9, 105, 110)), 'OUT');       // close<s200 -> gate fails
 });
 
-test('resolveEpisode: FIRE takes precedence over BOUNCE within a bar', () => {
-  // A bar cannot be both: FIRE requires close<s5, BOUNCE requires close>s5.
-  // But assert FIRE is checked first by giving a bar that fires.
+test('resolveEpisode: a bar meeting all three fire conditions resolves as FIRE', () => {
   const facts = [F(100, 9, 105, 90), F(98, 3, 104, 90)];
   assert.deepEqual(resolveEpisode(facts, 0, { cap: 5 }), { outcome: 'FIRE', bars: 1 });
+});
+
+// The fire predicate is CONJUNCTIVE (rsi2<5 AND close<s5 AND close>s200). These two tests pin
+// that down: a deep RSI alone must not convert an episode. Note FIRE-vs-BOUNCE ordering is
+// vacuous — FIRE needs close<s5, BOUNCE needs close>s5 — so precedence is only meaningful
+// between BOUNCE and REGIME_EXIT (tested below).
+test('resolveEpisode: rsi2<5 but close ABOVE sma5 is a BOUNCE, not a FIRE', () => {
+  const facts = [F(100, 9, 105, 90), F(106, 3, 104, 90)];
+  assert.deepEqual(resolveEpisode(facts, 0, { cap: 5 }), { outcome: 'BOUNCE', bars: 1 });
+});
+
+test('resolveEpisode: rsi2<5 but close BELOW sma200 is a REGIME_EXIT, not a FIRE', () => {
+  const facts = [F(100, 9, 105, 90), F(85, 3, 104, 90)];
+  assert.deepEqual(resolveEpisode(facts, 0, { cap: 5 }), { outcome: 'REGIME_EXIT', bars: 1 });
 });
 
 test('resolveEpisode: close above SMA5 is a BOUNCE', () => {
@@ -151,7 +163,7 @@ test('enumerateEpisodes: consecutive in-band bars yield exactly one episode', ()
   const starts = eps.map(e => e.idx);
   assert.equal(new Set(starts).size, starts.length);       // no duplicate starts
   for (let i = 1; i < starts.length; i += 1) {
-    assert.ok(starts[i] > starts[i - 1] + 0, 'starts strictly increase');
+    assert.ok(starts[i] > starts[i - 1], 'starts strictly increase');
   }
   // Every episode starts on a NEAR_MISS bar whose predecessor was not in-band.
   const facts = factsSeries(bars.map(b => b.close));

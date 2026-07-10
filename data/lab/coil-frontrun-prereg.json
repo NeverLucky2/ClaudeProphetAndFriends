@@ -1,0 +1,57 @@
+{
+  "prereg_version": "1.0",
+  "created_utc": "2026-07-10T07:35:16.860Z",
+  "hypothesis": "Coil's RSI(2)<5 trigger is increasingly front-run: near-miss episodes convert to fires LESS often in the forward window than historically (expected null: no change)",
+  "near_miss_band": [
+    5,
+    15
+  ],
+  "fire_threshold": 5,
+  "gates": "close > SMA200 AND close < SMA5 (entryFiresAt strict gates)",
+  "bounce_definition": "close > SMA5",
+  "resolution_cap": 10,
+  "enumeration": "fresh-signal episodes; no new episode starts inside a resolving one",
+  "earnings_filter": "NOT applied — conversion is a price-dynamics question",
+  "vol_control": {
+    "series": "SPY",
+    "window_sessions": 20,
+    "strata": [
+      "low",
+      "mid",
+      "high"
+    ]
+  },
+  "vol_tercile_boundaries": {
+    "lo": 0.006650203386942371,
+    "hi": 0.0089649769902642
+  },
+  "benchmark_conversion_rate": 0.353232462173315,
+  "forward_window_start": "2026-07-10",
+  "bootstrap": {
+    "method": "date_block",
+    "block_sessions": 15,
+    "iterations": 10000,
+    "seed": 1234,
+    "ci_pct": [
+      2.5,
+      97.5
+    ]
+  },
+  "decision_rule": {
+    "gate1": "n >= n_gate resolved forward episodes",
+    "gate2": "pooled bootstrapDiffCI(historical, forward) on binary FIRE outcome has hi < 0",
+    "gate3": "the same diff has hi < 0 in at least 2 of the 3 vol terciles",
+    "verdict": "SUPPORTED iff gate1 AND gate2 AND gate3; UNDERPOWERED if !gate1; else NOT_SUPPORTED"
+  },
+  "n_gate": 200,
+  "secondary_not_gating": [
+    "forward vs trailing-12-month historical rate",
+    "C2/C3 shallow and deep return trends"
+  ],
+  "expected_outcome": "NOT_SUPPORTED",
+  "counts": {
+    "historical_total": 3928,
+    "historical_resolved": 3635
+  },
+  "artifact_hash": "9d30c81c"
+}

@@ -6,7 +6,7 @@ import { dirname, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { sha256short } from './coil-eventstudy-prereg.mjs';
 
-function stable(v) {
+export function stable(v) {
   if (Array.isArray(v)) return `[${v.map(stable).join(',')}]`;
   if (v && typeof v === 'object') {
     return `{${Object.keys(v).sort().filter(k => k !== 'artifact_hash')
