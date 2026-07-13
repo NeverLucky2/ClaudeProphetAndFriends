@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"prophet-trader/interfaces"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -631,5 +632,127 @@ func TestHalt_EmptyStateFileBlocks(t *testing.T) {
 				t.Fatalf("a %q state file (zero high-water) must block (fail closed), got nil", content)
 			}
 		})
+	}
+}
+
+// Test-hook safety: testPersistFailure must have exactly one writer (tests
+// in this file, deliberately) and never a second one. Pinning that the
+// constructor leaves it nil/unset means any future change that starts
+// setting it from production code (NewCoilLiveHaltGuard or anywhere else)
+// fails this test immediately instead of silently gaining a second,
+// unnoticed writer on a field whose entire purpose is to be inert in
+// production.
+func TestHalt_ConstructorLeavesTestPersistFailureUnset(t *testing.T) {
+	g := NewCoilLiveHaltGuard(CoilLiveHaltConfig{
+		Enabled: true, DrawdownPct: 0.15, BaselineUSD: 5000, StateDir: t.TempDir(),
+	}, &fakeHaltReader{equity: 5000})
+	if g.testPersistFailure != nil {
+		t.Fatalf("constructor must leave testPersistFailure nil, got %v", g.testPersistFailure)
+	}
+}
+
+// N-1: a failed persist must set the guard degraded and BLOCK EVERY
+// subsequent entry, even one that would otherwise sail straight through the
+// equity >= hwm allow path with zero drawdown. This reproduces the exact
+// failure this finding closes: whatever denies a write to StateDir (full
+// disk, read-only remount, unwritable mount) denies writeHighWater,
+// tripLatch, AND fallbackKillFile alike, so a guard that merely logs a
+// failed persist and carries on allowing can run for days unable to persist
+// anything at all -- this test proves that no longer happens.
+func TestHalt_FailedPersistMarksDegradedAndBlocksFreshHighEntry(t *testing.T) {
+	dir := t.TempDir()
+	reader := &fakeHaltReader{equity: 5000} // == baseline: a legitimate new peak, zero drawdown
+	cfg := CoilLiveHaltConfig{Enabled: true, DrawdownPct: 0.15, BaselineUSD: 5000, StateDir: dir}
+	g := NewCoilLiveHaltGuard(cfg, reader)
+	g.testPersistFailure = errors.New("injected: simulated denied atomic write/rename")
+
+	// First beat: equity at a new peak. THIS call must still be allowed --
+	// there is no drawdown to protect against yet -- but the failed persist
+	// must stick the guard into a degraded state for every later call.
+	if err := g.EvaluateEntry(context.Background()); err != nil {
+		t.Fatalf("equity at a new peak must be allowed even though its persist fails, got %v", err)
+	}
+
+	// Second beat: equity climbs even higher -- another fresh high-water
+	// mark that would sail through the equity >= hwm allow path on a healthy
+	// guard. It must now BLOCK purely because the guard is persist-degraded.
+	reader.equity = 6000
+	err := g.EvaluateEntry(context.Background())
+	if err == nil {
+		t.Fatal("a persist-degraded guard must block ALL subsequent entries, even fresh highs, got nil")
+	}
+	if !strings.Contains(err.Error(), "cannot persist halt state") {
+		t.Fatalf("expected the block reason to cite the persist-degraded state, got %q", err.Error())
+	}
+}
+
+// N-1: a failed tripLatch (and its fallbackKillFile rescue attempt) must
+// also mark the guard degraded, independent of whatever the drawdown/latch
+// machinery itself decides for the current call. Unlike
+// TestHalt_LatchRequiresManualRearm, there is deliberately no latch file OR
+// kill file left on disk here (the injected failure denies both writes), so
+// the ONLY thing that can explain the second call still blocking after
+// equity fully recovers is the sticky persistDegraded flag -- not a
+// leftover file the block logic would have found anyway.
+func TestHalt_FailedTripLatchMarksDegradedAndKeepsBlocking(t *testing.T) {
+	dir := t.TempDir()
+	reader := &fakeHaltReader{equity: 4000} // baseline 5000 => -20% drawdown, trips the latch
+	cfg := CoilLiveHaltConfig{Enabled: true, DrawdownPct: 0.15, BaselineUSD: 5000, StateDir: dir}
+	g := NewCoilLiveHaltGuard(cfg, reader)
+	g.testPersistFailure = errors.New("injected: simulated denied atomic write/rename")
+
+	if err := g.EvaluateEntry(context.Background()); err == nil {
+		t.Fatal("a -20% drawdown must block regardless of the persist outcome")
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, coilHaltLatchFileName)); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Fatalf("precondition: the injected failure must have denied the latch write, got stat err %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, coilHaltKillFileName)); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Fatalf("precondition: the injected failure must also have denied the kill-file fallback, got stat err %v", statErr)
+	}
+
+	// Clear the injected failure and let equity fully recover. Neither the
+	// latch nor the kill file exists on disk, so a guard that only consulted
+	// file presence would re-arm here. It must instead keep blocking because
+	// it is persist-degraded.
+	g.testPersistFailure = nil
+	reader.equity = 6000
+	err := g.EvaluateEntry(context.Background())
+	if err == nil {
+		t.Fatal("a guard with a failed tripLatch write must stay degraded and block even after equity recovers, got nil")
+	}
+	if !strings.Contains(err.Error(), "cannot persist halt state") {
+		t.Fatalf("expected the block reason to cite the persist-degraded state, got %q", err.Error())
+	}
+}
+
+// N-2/N-1: Status() must surface the persist-degraded state so an operator
+// looking at a guard that blocks everything can see WHY, rather than staring
+// at a rail that refuses every entry with no explanation. Equity is pinned
+// at the baseline (0% drawdown, no kill/latch file) so degraded is the ONLY
+// thing that can be keeping Armed false here.
+func TestHalt_StatusReportsDegradedState(t *testing.T) {
+	dir := t.TempDir()
+	reader := &fakeHaltReader{equity: 5000}
+	cfg := CoilLiveHaltConfig{Enabled: true, DrawdownPct: 0.15, BaselineUSD: 5000, StateDir: dir}
+	g := NewCoilLiveHaltGuard(cfg, reader)
+	g.testPersistFailure = errors.New("injected: simulated denied atomic write/rename")
+
+	if err := g.EvaluateEntry(context.Background()); err != nil {
+		t.Fatalf("equity at a new peak must be allowed even though its persist fails, got %v", err)
+	}
+
+	status := g.Status(context.Background())
+	if status.Armed {
+		t.Fatal("a persist-degraded guard must not report Armed:true")
+	}
+	found := false
+	for _, r := range status.BlockReasons {
+		if strings.Contains(r, "persist") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected a block reason explaining the persist-degraded state, got %v", status.BlockReasons)
 	}
 }

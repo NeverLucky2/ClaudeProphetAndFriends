@@ -48,9 +48,10 @@ type CoilLiveHaltConfig struct {
 // coilStateDirStatable — checked BEFORE any file-presence check, because a
 // vanished StateDir makes every file inside it stat as "absent" too), an
 // unreadable account, a present (or unreadable — see coilHaltFileExists)
-// kill/latch file, or an unreadable/corrupt/zero-valued high-water state
-// file all block the entry. Consulted only from TradeGuard.CheckBuy, so
-// exits are never blocked.
+// kill/latch file, an unreadable/corrupt/zero-valued high-water state file,
+// or a persist-degraded guard (see persistDegraded below) all block the
+// entry. Consulted only from TradeGuard.CheckBuy, so exits are never
+// blocked.
 //
 // EvaluateEntry is safe for concurrent use: mu serializes the
 // read-high-water / decide / write-high-water sequence so two concurrent
@@ -72,20 +73,48 @@ type CoilLiveHaltConfig struct {
 // observed. It is NOT a substitute for the state file: it does not survive a
 // restart (see TestHalt_InMemoryHighWaterDoesNotSurviveRestart), and the file
 // remains the only thing that does.
+//
+// persistDegraded (N-1) is the complementary fix for what hwmMem alone does
+// NOT cover: hwmMem only protects the CURRENT process's memory of a peak it
+// already observed, but whatever denies a write to StateDir — a full disk, a
+// read-only remount, an unwritable mount — denies writeHighWater, tripLatch,
+// AND fallbackKillFile alike. Without persistDegraded, the guard would keep
+// ALLOWING entries for as long as the process stays up (equity ratchets
+// happily in memory even though nothing reaches disk), and only reveal the
+// problem on the NEXT restart: hwmMem dies with the process, the mark
+// reverts to whatever was last durably written (stale and LOWER than the
+// true peak), and an entry that should have blocked gets allowed. That
+// contradicts this file's own "FAILS CLOSED" contract — a doc comment
+// describing the danger honestly is not a rail. persistDegraded closes it:
+// once ANY persist attempt fails (high-water write, latch write, or the
+// kill-file fallback), the flag is set under g.mu and EvaluateEntry checks
+// it FIRST, before anything else, and blocks every subsequent entry for the
+// life of the process. It is deliberately NOT auto-cleared — recovery is an
+// operator action (fix StateDir, restart the process) — and it is safe to be
+// this aggressive because EvaluateEntry is only ever consulted for NEW
+// entries: a degraded guard cannot trap an already-open position, since
+// exits never route through it.
 type CoilLiveHaltGuard struct {
 	cfg    CoilLiveHaltConfig
 	reader HaltAccountReader
 	logger *logrus.Logger
 
-	mu     sync.Mutex
-	hwmMem float64
+	mu              sync.Mutex
+	hwmMem          float64
+	persistDegraded bool
 
-	// testPersistFailure, when non-nil, makes writeHighWater log-and-return
-	// without attempting the real disk write, deterministically simulating a
-	// denied atomic write/rename. Set only by tests in this package
-	// (white-box) to exercise NEW-1 without depending on OS-specific
-	// permission behavior, which is unreliable on Windows for this exact
-	// scenario (see the concurrency tests below). Nil in production.
+	// testPersistFailure, when non-nil, makes writeHighWater, tripLatch, and
+	// fallbackKillFile each log-and-return without attempting the real disk
+	// write, deterministically simulating a denied atomic write/rename across
+	// ALL of StateDir at once — the realistic shape of the N-1 failure mode
+	// (a full disk or read-only remount denies every write, not just one
+	// file). Set only by tests in this package (white-box) to exercise NEW-1
+	// and N-1 without depending on OS-specific permission behavior, which is
+	// unreliable on Windows for this exact scenario (see the concurrency
+	// tests below). Nil in production — see
+	// TestHalt_ConstructorLeavesTestPersistFailureUnset, which pins that the
+	// constructor never sets it, so it has exactly one writer: tests in this
+	// file, deliberately.
 	testPersistFailure error
 }
 
@@ -231,6 +260,17 @@ func (g *CoilLiveHaltGuard) readPersistedHighWater() (value float64, found bool,
 // Rename is atomic on both POSIX and Windows (Go's os.Rename uses
 // MoveFileEx with MOVEFILE_REPLACE_EXISTING there), so a reader always sees
 // either the fully-old or fully-new contents, never a partial write.
+//
+// N-3: the MkdirAll below WOULD resurrect a vanished StateDir — recreating
+// it here would silently drop whatever latch/kill/high-water state used to
+// live there across the vanish, exactly the fail-open coilStateDirStatable's
+// doc comment describes and closes. This is only safe because every
+// production caller of atomicWriteFile (writeHighWater, tripLatch,
+// fallbackKillFile) is reached exclusively through EvaluateEntry, which
+// calls coilStateDirStatable and blocks BEFORE any of them run. Do not call
+// atomicWriteFile — or add a new caller of it — from anywhere that has not
+// first passed coilStateDirStatable(dir); doing so would silently
+// reintroduce the vanished-dir fail-open.
 func atomicWriteFile(dir, target string, data []byte, perm os.FileMode) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("cannot create state dir: %w", err)
@@ -276,17 +316,29 @@ func atomicWriteFile(dir, target string, data []byte, perm os.FileMode) error {
 // failed persist must still be logged loudly: an operator needs to know the
 // file is stale before the process restarts and the memory backstop goes
 // away with it.
+//
+// N-1: a failed persist also sets g.persistDegraded (under g.mu — this
+// method is only ever called from EvaluateEntry, which already holds the
+// lock for the whole call, so this is a direct field write, not a re-lock).
+// hwmMem alone only protects THIS process's memory; it says nothing about
+// whether StateDir can be written to at all. A write failure here is
+// evidence it cannot, and the same fault will just as surely deny tripLatch
+// and fallbackKillFile on any later beat that needs them — so the guard must
+// stop trusting its own ability to persist a halt, not just log about it.
 func (g *CoilLiveHaltGuard) writeHighWater(v float64) {
 	b, err := json.MarshalIndent(highWaterState{HighWaterUSD: v, UpdatedAt: time.Now().UTC()}, "", "  ")
 	if err != nil {
+		g.persistDegraded = true
 		g.logger.WithError(err).Error("coil live halt: failed to marshal high-water mark")
 		return
 	}
 	if g.testPersistFailure != nil {
+		g.persistDegraded = true
 		g.logger.WithError(g.testPersistFailure).Error("coil live halt: failed to persist high-water mark (test-injected failure)")
 		return
 	}
 	if err := atomicWriteFile(g.cfg.StateDir, g.statePath(), b, 0o644); err != nil {
+		g.persistDegraded = true
 		g.logger.WithError(err).Error("coil live halt: failed to persist high-water mark")
 	}
 }
@@ -328,12 +380,38 @@ func (g *CoilLiveHaltGuard) writeHighWater(v float64) {
 // here at all: readPersistedHighWater reports it as an error and
 // EvaluateEntry fails closed (blocks) rather than silently treating it as an
 // absent file.
-func (g *CoilLiveHaltGuard) effectiveHighWater(equity float64) (float64, error) {
+//
+// hwmMem is taken as a PARAMETER rather than read from g.hwmMem directly
+// (N-2): EvaluateEntry calls this while holding g.mu, so a direct field read
+// there is safe, but Status() calls it from OUTSIDE the lock (Status must
+// never take g.mu for its full duration — see its doc comment). Passing the
+// value in lets each caller decide how to obtain it safely: EvaluateEntry
+// reads g.hwmMem inline (already under mu), Status() takes a point-in-time
+// snapshot via snapshotMu() first. Reading the shared field directly inside
+// this function would race with EvaluateEntry's writes to it whenever called
+// from Status(), which is exactly the bug N-2 reported.
+func (g *CoilLiveHaltGuard) effectiveHighWater(equity, hwmMem float64) (float64, error) {
 	persisted, _, err := g.readPersistedHighWater()
 	if err != nil {
 		return 0, err
 	}
-	return math.Max(g.cfg.BaselineUSD, math.Max(persisted, math.Max(g.hwmMem, equity))), nil
+	return math.Max(g.cfg.BaselineUSD, math.Max(persisted, math.Max(hwmMem, equity))), nil
+}
+
+// snapshotMu returns the current in-memory high-water mark and the sticky
+// persist-degraded flag, read together and atomically under g.mu. Callers
+// outside EvaluateEntry (i.e. Status()) MUST go through this rather than
+// reading g.hwmMem or g.persistDegraded directly — see N-2. This takes the
+// lock only long enough to copy two fields; it is not held for the rest of
+// the caller's work, so Status()'s subsequent broker call is never
+// serialized against EvaluateEntry the way EvaluateEntry's own broker call
+// is (EvaluateEntry holds g.mu for its entire body, including its
+// GetAccount call). EvaluateEntry itself must never call Status() or
+// snapshotMu() — sync.Mutex is not reentrant and either would deadlock.
+func (g *CoilLiveHaltGuard) snapshotMu() (hwmMem float64, degraded bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.hwmMem, g.persistDegraded
 }
 
 type coilHaltLatch struct {
@@ -353,6 +431,14 @@ type coilHaltLatch struct {
 // a latch file. The caller (EvaluateEntry) blocks the CURRENT call
 // regardless of this return value — the error is for loud logging and
 // operator escalation, not for deciding whether to block.
+//
+// N-1: any failure to persist the primary latch write ALSO sets
+// g.persistDegraded (direct field write — this is only ever called from
+// EvaluateEntry, which already holds g.mu for the whole call). This holds
+// even in the branch where fallbackKillFile then succeeds: a failed latch
+// write is itself evidence StateDir is not reliably writable, which the
+// guard must treat as a standing fact about the process, not a one-off
+// rescued by this call's fallback.
 func (g *CoilLiveHaltGuard) tripLatch(equity, hwm, dd float64) error {
 	if coilHaltFileExists(g.latchPath()) {
 		return nil // already latched
@@ -365,9 +451,15 @@ func (g *CoilLiveHaltGuard) tripLatch(equity, hwm, dd float64) error {
 		DrawdownPct:  dd,
 	}, "", "  ")
 	if err != nil {
+		g.persistDegraded = true
 		return g.fallbackKillFile(fmt.Errorf("failed to marshal halt latch: %w", err))
 	}
+	if g.testPersistFailure != nil {
+		g.persistDegraded = true
+		return g.fallbackKillFile(fmt.Errorf("failed to write halt latch (test-injected failure): %w", g.testPersistFailure))
+	}
 	if err := atomicWriteFile(g.cfg.StateDir, g.latchPath(), b, 0o644); err != nil {
+		g.persistDegraded = true
 		return g.fallbackKillFile(fmt.Errorf("failed to write halt latch: %w", err))
 	}
 	return nil
@@ -380,6 +472,12 @@ func (g *CoilLiveHaltGuard) tripLatch(equity, hwm, dd float64) error {
 // failed there is no on-disk record at all, and a later beat could re-arm
 // silently unless the underlying fault (e.g. an unwritable StateDir) is
 // fixed by an operator first.
+//
+// N-1: a failed kill-file write ALSO sets g.persistDegraded. In practice
+// this is usually redundant with tripLatch's own mark (fallbackKillFile is
+// only ever reached after the primary latch write already failed and set
+// it), but it is set here too so this function is independently correct if
+// it is ever called with the flag not already set.
 func (g *CoilLiveHaltGuard) fallbackKillFile(latchErr error) error {
 	b, _ := json.MarshalIndent(struct {
 		Reason    string    `json:"reason"`
@@ -388,7 +486,12 @@ func (g *CoilLiveHaltGuard) fallbackKillFile(latchErr error) error {
 		Reason:    "latch write failed; kill-file fallback engaged",
 		EngagedAt: time.Now().UTC(),
 	}, "", "  ")
+	if g.testPersistFailure != nil {
+		g.persistDegraded = true
+		return fmt.Errorf("latch write failed (%v) AND kill-file fallback failed (test-injected failure: %v) — halt state not persisted to disk", latchErr, g.testPersistFailure)
+	}
 	if err := atomicWriteFile(g.cfg.StateDir, g.killPath(), b, 0o644); err != nil {
+		g.persistDegraded = true
 		return fmt.Errorf("latch write failed (%v) AND kill-file fallback failed (%v) — halt state not persisted to disk", latchErr, err)
 	}
 	return fmt.Errorf("latch write failed, kill-file fallback engaged instead: %w", latchErr)
@@ -402,6 +505,17 @@ func (g *CoilLiveHaltGuard) EvaluateEntry(ctx context.Context) error {
 
 	g.mu.Lock()
 	defer g.mu.Unlock()
+
+	// N-1: checked FIRST, before any other condition. Once any persist has
+	// failed (writeHighWater, tripLatch, or fallbackKillFile — see
+	// persistDegraded's doc comment on the struct), the guard can no longer
+	// prove it is able to durably record a future halt, so it must stop
+	// allowing entries at all rather than keep gating off values it cannot
+	// guarantee it could act on. This is sticky for the life of the process
+	// by design: recovery is an operator action (fix StateDir, restart).
+	if g.persistDegraded {
+		return g.block("cannot persist halt state — failing closed (a prior write to StateDir failed; fix StateDir and restart the process to clear this)")
+	}
 
 	if g.cfg.BaselineUSD <= 0 {
 		return g.block("baseline not configured (COIL_LIVE_BASELINE_USD<=0)")
@@ -431,7 +545,7 @@ func (g *CoilLiveHaltGuard) EvaluateEntry(ctx context.Context) error {
 	}
 
 	equity := acct.PortfolioValue
-	hwm, hwmErr := g.effectiveHighWater(equity)
+	hwm, hwmErr := g.effectiveHighWater(equity, g.hwmMem) // under g.mu already: direct field read is safe
 	if hwmErr != nil {
 		return g.block(fmt.Sprintf("high-water state unreadable or corrupt (fail closed): %v", hwmErr))
 	}
@@ -471,7 +585,18 @@ type CoilHaltStatus struct {
 // rather than an error. Its validity checks mirror EvaluateEntry's exactly
 // so this report can never claim Armed:true in a configuration where
 // EvaluateEntry would actually block everything (e.g. a misconfigured
-// DrawdownPct like 15 instead of 0.15).
+// DrawdownPct like 15 instead of 0.15) — including a persist-degraded guard
+// (N-1): if EvaluateEntry would block on that alone, Status() must say so
+// too, rather than leave the operator staring at a rail that refuses
+// everything with no visible reason.
+//
+// N-2: g.hwmMem and g.persistDegraded are read via snapshotMu() (under
+// g.mu) rather than directly, because Status() runs outside the lock
+// EvaluateEntry holds while mutating both. Reading them directly here would
+// race with EvaluateEntry per the Go memory model. This cannot gate an
+// entry either way — Status() never blocks anything — but an unsynchronized
+// read could misreport the drawdown or the degraded state to the operator
+// watching this rail, which is its whole purpose.
 func (g *CoilLiveHaltGuard) Status(ctx context.Context) CoilHaltStatus {
 	s := CoilHaltStatus{
 		Enabled:     g.cfg.Enabled,
@@ -481,7 +606,11 @@ func (g *CoilLiveHaltGuard) Status(ctx context.Context) CoilHaltStatus {
 	if !g.cfg.Enabled {
 		return s
 	}
+	hwmMemSnapshot, degraded := g.snapshotMu()
 	var reasons []string
+	if degraded {
+		reasons = append(reasons, "cannot persist halt state — degraded (a prior write to StateDir failed; fix StateDir and restart the process)")
+	}
 	if g.cfg.BaselineUSD <= 0 {
 		reasons = append(reasons, "baseline not configured")
 	}
@@ -501,7 +630,7 @@ func (g *CoilLiveHaltGuard) Status(ctx context.Context) CoilHaltStatus {
 		reasons = append(reasons, "account reader not configured")
 	} else if acct, err := g.reader.GetAccount(ctx); err == nil && acct != nil && acct.PortfolioValue > 0 {
 		s.EquityUSD = acct.PortfolioValue
-		if hwm, hwmErr := g.effectiveHighWater(acct.PortfolioValue); hwmErr != nil {
+		if hwm, hwmErr := g.effectiveHighWater(acct.PortfolioValue, hwmMemSnapshot); hwmErr != nil {
 			reasons = append(reasons, "high-water state unreadable")
 		} else {
 			s.HighWaterUSD = hwm
