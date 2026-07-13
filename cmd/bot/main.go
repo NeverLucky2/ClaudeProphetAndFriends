@@ -56,7 +56,10 @@ func main() {
 	const alpacaDataBurst = 10
 	alpacaDataLimiter := services.NewAlpacaDataRateLimiter(cfg.AlpacaDataRatePerMin, alpacaDataBurst)
 
-	// Create trading service
+	// Create trading service. A mode mismatch (ALPACA_PAPER vs ALPACA_BASE_URL)
+	// is FATAL, not a warning: it is the one misconfiguration that can trade real
+	// money while every log line reports "paper". Other construction failures stay
+	// non-fatal (the service retries on request).
 	tradingService, err := services.NewAlpacaTradingService(
 		cfg.AlpacaAPIKey,
 		cfg.AlpacaSecretKey,
@@ -64,11 +67,22 @@ func main() {
 		cfg.AlpacaPaper,
 	)
 	if err != nil {
-		logger.Warn("Failed to create trading service (will retry on requests):", err)
+		logger.Fatalf("FATAL: Alpaca trading service refused to start: %v", err)
 	}
-	if tradingService != nil {
-		tradingService.SetRateLimiter(alpacaDataLimiter)
+
+	// Announce the resolved mode from the URL — the authoritative source — not
+	// from the flag.
+	urlIsPaper, _ := services.IsPaperBaseURL(cfg.AlpacaBaseURL)
+	mode := "LIVE — REAL MONEY"
+	if urlIsPaper {
+		mode = "paper"
 	}
+	logger.WithFields(logrus.Fields{
+		"alpaca_mode":     mode,
+		"alpaca_base_url": cfg.AlpacaBaseURL,
+	}).Warn("Alpaca trading mode resolved")
+
+	tradingService.SetRateLimiter(alpacaDataLimiter)
 
 	// Create the raw Alpaca data service + shared rate limiter, then wrap it in
 	// the cross-agent shared bar cache. Every non-intraday consumer reads through

@@ -58,6 +58,11 @@ type AlpacaTradingService struct {
 	apiKey     string
 	apiSecret  string
 	baseURL    string
+	// isPaper is the resolved paper/live mode. It is validated against baseURL
+	// at construction (they cannot disagree), so it is a trustworthy label —
+	// unlike the pre-2026-07 flag, which was accepted and discarded, letting a
+	// live account report itself as paper.
+	isPaper    bool
 	logger     *logrus.Logger
 	httpClient *http.Client
 	// brokerPlaceOrder is the broker submission seam. Defaults to
@@ -87,8 +92,46 @@ type AlpacaTradingService struct {
 	optionsDataURL string
 }
 
+const (
+	alpacaPaperHost = "paper-api.alpaca.markets"
+	alpacaLiveHost  = "api.alpaca.markets"
+)
+
+// IsPaperBaseURL classifies an Alpaca base URL. known=false means the host is
+// not a recognized Alpaca endpoint — callers on a money path must fail closed
+// rather than guess.
+func IsPaperBaseURL(baseURL string) (isPaper bool, known bool) {
+	u, err := neturl.Parse(strings.TrimSpace(baseURL))
+	if err != nil {
+		return false, false
+	}
+	switch strings.ToLower(u.Host) {
+	case alpacaPaperHost:
+		return true, true
+	case alpacaLiveHost:
+		return false, true
+	}
+	return false, false
+}
+
+// IsPaper reports the validated paper/live mode of this client.
+func (s *AlpacaTradingService) IsPaper() bool { return s.isPaper }
+
 // NewAlpacaTradingService creates a new Alpaca trading service
 func NewAlpacaTradingService(apiKey, secretKey, baseURL string, isPaper bool) (*AlpacaTradingService, error) {
+	// Fail closed: the paper flag and the base URL are two independent sources
+	// of truth for "is this real money". If they disagree, we cannot know which
+	// is right — and the wrong guess trades real money under a "paper" label.
+	urlIsPaper, known := IsPaperBaseURL(baseURL)
+	if !known {
+		return nil, fmt.Errorf("alpaca: unrecognized base URL %q (want %s or %s)", baseURL, alpacaPaperHost, alpacaLiveHost)
+	}
+	if urlIsPaper != isPaper {
+		return nil, fmt.Errorf(
+			"alpaca: mode mismatch — ALPACA_PAPER=%v but base URL %q is %s; refusing to start",
+			isPaper, baseURL, map[bool]string{true: "PAPER", false: "LIVE"}[urlIsPaper])
+	}
+
 	client := alpaca.NewClient(alpaca.ClientOpts{
 		APIKey:    apiKey,
 		APISecret: secretKey,
@@ -112,6 +155,7 @@ func NewAlpacaTradingService(apiKey, secretKey, baseURL string, isPaper bool) (*
 		apiKey:     apiKey,
 		apiSecret:  secretKey,
 		baseURL:    baseURL,
+		isPaper:    isPaper,
 		logger:     logger,
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
