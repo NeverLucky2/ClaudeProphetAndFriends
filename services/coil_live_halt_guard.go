@@ -44,9 +44,12 @@ type CoilLiveHaltConfig struct {
 // is acceptable on paper and not acceptable here.
 //
 // FAILS CLOSED on every uncertainty: missing baseline, invalid drawdown pct,
-// a nil reader, an unreadable account, a present (or unreadable — see
-// coilHaltFileExists) kill/latch file, or an unreadable/corrupt high-water
-// state file all block the entry. Consulted only from TradeGuard.CheckBuy, so
+// a nil reader, a StateDir that is missing/not-a-directory/unstatable (see
+// coilStateDirStatable — checked BEFORE any file-presence check, because a
+// vanished StateDir makes every file inside it stat as "absent" too), an
+// unreadable account, a present (or unreadable — see coilHaltFileExists)
+// kill/latch file, or an unreadable/corrupt/zero-valued high-water state
+// file all block the entry. Consulted only from TradeGuard.CheckBuy, so
 // exits are never blocked.
 //
 // EvaluateEntry is safe for concurrent use: mu serializes the
@@ -84,20 +87,59 @@ func (g *CoilLiveHaltGuard) statePath() string {
 }
 
 // coilHaltFileExists reports whether a guard file (kill switch or latch)
-// should be treated as PRESENT. This is a safety-critical distinction: a
-// stat error that is NOT "file does not exist" — a permission error, an I/O
-// error, an unmounted or renamed StateDir — must never be read as "absent".
-// Reading it as absent would let a filesystem fault silently clear both the
-// manual kill switch and a tripped drawdown latch, turning a latched halt
-// into a full fail-open the moment the disk misbehaves. Only a definitive
-// fs.ErrNotExist is treated as absent; every other stat error is treated as
-// present (block).
+// should be treated as PRESENT, given that its parent StateDir is already
+// known to be a statable directory (see coilStateDirStatable, which
+// EvaluateEntry and Status both call BEFORE this function). A stat error on
+// the file itself that is NOT "file does not exist" — a permission error,
+// an I/O error, a mid-write race — is never read as "absent"; only a
+// definitive fs.ErrNotExist is.
+//
+// This function alone cannot distinguish "file legitimately absent from a
+// healthy directory" from "file absent because the whole parent directory
+// vanished" — os.Stat on a path inside a missing directory ALSO returns
+// fs.ErrNotExist, for the same reason a missing leaf file does. That
+// ambiguity is exactly why callers must verify StateDir itself first: this
+// function only ever runs once that precondition holds.
 func coilHaltFileExists(p string) bool {
 	_, err := os.Stat(p)
 	if err == nil {
 		return true
 	}
 	return !errors.Is(err, fs.ErrNotExist)
+}
+
+// coilStateDirStatable verifies StateDir itself is a real, statable
+// directory before ANY "file is absent" conclusion (coilHaltFileExists,
+// readPersistedHighWater) is trusted. This closes the fail-open where a
+// vanished StateDir — deleted via os.RemoveAll, unmounted, renamed, or an
+// ephemeral container dir that never persisted — made os.Stat on every file
+// inside it return fs.ErrNotExist. Read in isolation, that made the kill
+// file read as absent, the latch read as absent, AND the high-water file
+// read as a legitimate first run (found=false, err=nil) all at once: the
+// peak would silently reset to current equity and a TRIPPED latch would
+// disarm with no block and no error.
+//
+// Any failure here — StateDir unset, missing, or a path that exists but is
+// not a directory — blocks. This deliberately includes a StateDir that has
+// never been created: on disk, "never created" and "vanished" are the same
+// fs.ErrNotExist, so a money rail cannot tell them apart and must not
+// assume the more comfortable interpretation. In production StateDir
+// defaults to the database's own directory (see cmd/bot/main.go), which
+// necessarily already exists whenever the bot is running a DB-backed
+// account, so this does not introduce a real bootstrap deadlock — it only
+// blocks the genuinely abnormal case of a missing or broken StateDir.
+func coilStateDirStatable(dir string) error {
+	if dir == "" {
+		return errors.New("StateDir is not configured")
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("cannot stat StateDir %q: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("StateDir %q exists but is not a directory", dir)
+	}
+	return nil
 }
 
 func (g *CoilLiveHaltGuard) block(reason string) error {
@@ -115,9 +157,20 @@ type highWaterState struct {
 // readPersistedHighWater distinguishes three cases so a corrupt or
 // unreadable state file can never be silently treated as "no prior peak":
 //   - absent (fs.ErrNotExist): legitimate first run — found=false, err=nil
-//   - present but unreadable or unparseable (corruption, permission fault,
-//     truncated write, ...): err != nil — the caller MUST fail closed
+//   - present but unreadable, unparseable, or parseable-but-nonsensical
+//     (corruption, permission fault, truncated write, valid JSON `{}` or
+//     `null` that parses to a zero HighWaterUSD, ...): err != nil — the
+//     caller MUST fail closed
 //   - present and valid: value, found=true, err=nil
+//
+// A zero or negative HighWaterUSD is deliberately treated the same as
+// unparseable content: `{}` and `null` are both syntactically valid JSON
+// that unmarshal to a zero-value highWaterState with no error, but a
+// real high-water mark is always a positive USD figure — a persisted peak
+// of $0 is not data about the account, it is a sign the file was
+// truncated, replaced by an empty write, or never actually written by this
+// guard. Silently accepting it would collapse the peak exactly like the
+// truncated-write bug atomicWriteFile exists to prevent.
 func (g *CoilLiveHaltGuard) readPersistedHighWater() (value float64, found bool, err error) {
 	b, statErr := os.ReadFile(g.statePath())
 	if statErr != nil {
@@ -129,6 +182,9 @@ func (g *CoilLiveHaltGuard) readPersistedHighWater() (value float64, found bool,
 	var s highWaterState
 	if jsonErr := json.Unmarshal(b, &s); jsonErr != nil {
 		return 0, false, fmt.Errorf("high-water state file corrupt: %w", jsonErr)
+	}
+	if s.HighWaterUSD <= 0 {
+		return 0, false, fmt.Errorf("high-water state file has non-positive high_water_usd %.2f (treated as corrupt)", s.HighWaterUSD)
 	}
 	return s.HighWaterUSD, true, nil
 }
@@ -294,6 +350,9 @@ func (g *CoilLiveHaltGuard) EvaluateEntry(ctx context.Context) error {
 	if g.reader == nil {
 		return g.block("account reader not configured (fail closed)")
 	}
+	if err := coilStateDirStatable(g.cfg.StateDir); err != nil {
+		return g.block(fmt.Sprintf("state directory unavailable (fail closed): %v", err))
+	}
 	if coilHaltFileExists(g.killPath()) {
 		return g.block("manual kill switch engaged")
 	}
@@ -365,6 +424,9 @@ func (g *CoilLiveHaltGuard) Status(ctx context.Context) CoilHaltStatus {
 	}
 	if g.cfg.DrawdownPct <= 0 || g.cfg.DrawdownPct >= 1 {
 		reasons = append(reasons, fmt.Sprintf("invalid drawdown pct %.4f (want 0<pct<1)", g.cfg.DrawdownPct))
+	}
+	if err := coilStateDirStatable(g.cfg.StateDir); err != nil {
+		reasons = append(reasons, fmt.Sprintf("state directory unavailable: %v", err))
 	}
 	if coilHaltFileExists(g.killPath()) {
 		reasons = append(reasons, "manual kill engaged")
