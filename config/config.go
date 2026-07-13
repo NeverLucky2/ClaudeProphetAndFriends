@@ -110,6 +110,14 @@ type Config struct {
 	ProphetSleeveLossBudgetFrac  float64 // permanent-disarm realized-loss threshold as fraction of B (0.50)
 	ProphetSleeveDeadline        string  // off-ramp date YYYY-MM-DD; empty/invalid => fail closed when enabled
 	ProphetSleeveDisarmDir       string  // dir for kill/latch files; empty => derive from DatabasePath dir in main.go
+
+	// Coil live drawdown halt. The ONLY code-enforced rail bounding real-money
+	// loss on the live Coil account. Like the Prophet sleeve gate, it FAILS
+	// CLOSED on missing config. Default OFF; enabled only in the live Coil bot.
+	EnableCoilLiveHalt  bool
+	CoilLiveDrawdownPct float64 // 0.15 = halt at -15% from high-water
+	CoilLiveBaselineUSD float64 // funded baseline; floors the high-water mark
+	CoilLiveStateDir    string  // dir for halt latch/kill/state files; empty => derive from DatabasePath dir
 }
 
 var AppConfig *Config
@@ -191,6 +199,11 @@ func Load() error {
 		ProphetSleeveLossBudgetFrac:  parseFloat(getEnvOrDefault("PROPHET_SLEEVE_LOSS_BUDGET_FRAC", "0.50")),
 		ProphetSleeveDeadline:        os.Getenv("PROPHET_SLEEVE_DEADLINE"),
 		ProphetSleeveDisarmDir:       os.Getenv("PROPHET_SLEEVE_DISARM_DIR"),
+
+		EnableCoilLiveHalt:  getEnvOrDefault("ENABLE_COIL_LIVE_HALT", "false") == "true",
+		CoilLiveDrawdownPct: parseFloat(getEnvOrDefault("COIL_LIVE_DRAWDOWN_PCT", "0.15")),
+		CoilLiveBaselineUSD: parseFloat(getEnvOrDefault("COIL_LIVE_BASELINE_USD", "0")),
+		CoilLiveStateDir:    os.Getenv("COIL_LIVE_STATE_DIR"),
 	}
 
 	return nil

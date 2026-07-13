@@ -262,6 +262,31 @@ func main() {
 	orderController.SetSleeveGuard(sleeveGuard)
 	sleeveController := controllers.NewSleeveController(sleeveGuard)
 
+	// Coil live drawdown halt. Default OFF; the live Coil bot sets
+	// ENABLE_COIL_LIVE_HALT=true. Shares the sleeve's state-dir convention.
+	coilHaltStateDir := cfg.CoilLiveStateDir
+	if coilHaltStateDir == "" {
+		coilHaltStateDir = filepath.Dir(cfg.DatabasePath)
+	}
+	if cfg.EnableCoilLiveHalt {
+		coilHalt := services.NewCoilLiveHaltGuard(
+			services.CoilLiveHaltConfig{
+				Enabled:     true,
+				DrawdownPct: cfg.CoilLiveDrawdownPct,
+				BaselineUSD: cfg.CoilLiveBaselineUSD,
+				StateDir:    coilHaltStateDir,
+			},
+			tradingService,
+		)
+		tradeGuard.SetHaltGuard(coilHalt)
+		logger.WithFields(logrus.Fields{
+			"coil_live_halt_enabled": true,
+			"drawdown_pct":           cfg.CoilLiveDrawdownPct,
+			"baseline_usd":           cfg.CoilLiveBaselineUSD,
+			"state_dir":              coilHaltStateDir,
+		}).Warn("Coil live drawdown halt ARMED")
+	}
+
 	logger.WithFields(logrus.Fields{
 		"max_daily_loss_pct":          cfg.MaxDailyLossPct,
 		"sector_aggregation_enabled":  cfg.EnableSectorAggregation,
