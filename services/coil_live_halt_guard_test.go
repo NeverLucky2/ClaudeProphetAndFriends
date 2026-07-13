@@ -2,10 +2,12 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"prophet-trader/interfaces"
+	"sync"
 	"testing"
 )
 
@@ -152,5 +154,113 @@ func TestHalt_ManualKillBlocks(t *testing.T) {
 	}
 	if err := g.EvaluateEntry(context.Background()); err == nil {
 		t.Fatal("manual kill file must block entries")
+	}
+}
+
+// I2: a corrupt/unreadable high-water state file must fail closed (block),
+// never silently collapse the peak to 0. Equity here is at the baseline —
+// with a legitimate absent-file first run this would ratchet and ALLOW; the
+// only thing that must change the outcome is the corruption itself.
+func TestHalt_CorruptHighWaterFileBlocks(t *testing.T) {
+	g, dir := newTestHalt(t, 5000, 5000)
+	if err := os.WriteFile(filepath.Join(dir, coilHaltStateFileName), []byte("not valid json {{{"), 0o644); err != nil {
+		t.Fatalf("write garbage state file: %v", err)
+	}
+	if err := g.EvaluateEntry(context.Background()); err == nil {
+		t.Fatal("a corrupt high-water state file must block (fail closed), got nil")
+	}
+}
+
+// KNOWN LIMITATION — pinned intentionally, not an endorsement. See the
+// effectiveHighWater doc comment: the baseline floor BOUNDS a lost peak, it
+// does not preserve it. Here the true peak was 10000 but its state file was
+// never written/was lost, so a fresh guard has no way to recover it and can
+// only see max(baseline, equity). With equity 8000 and baseline 5000, that
+// floors at 8000 — the guard treats 8000 as the peak and ALLOWS, even though
+// the true drawdown from the real 10000 peak is -20%, well past the 15%
+// limit. This is why operators must never delete the high-water state file.
+func TestHalt_LostStateFileAboveBaseline_KnownLimitationAllowsEntry(t *testing.T) {
+	// No state file is ever written in this test — simulating a peak of
+	// 10000 that occurred but was never persisted (or whose file was lost).
+	g, _ := newTestHalt(t, 8000, 5000)
+	if err := g.EvaluateEntry(context.Background()); err != nil {
+		t.Fatalf("documented limitation: a lost state file above baseline currently ALLOWS the entry (equity treated as the new peak); got block %v", err)
+	}
+}
+
+// The high-water mark must survive a process restart: a SECOND guard built
+// from the same StateDir must see the peak the FIRST guard persisted, not
+// just its own baseline/equity. (The ratchet test above reuses one instance
+// throughout and would pass even with zero persistence.)
+func TestHalt_HighWaterPersistsAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+	cfg := CoilLiveHaltConfig{Enabled: true, DrawdownPct: 0.15, BaselineUSD: 5000, StateDir: dir}
+
+	g1 := NewCoilLiveHaltGuard(cfg, &fakeHaltReader{equity: 10000})
+	if err := g1.EvaluateEntry(context.Background()); err != nil {
+		t.Fatalf("first guard at a new peak must be allowed and persist it, got %v", err)
+	}
+
+	// Second guard instance, same StateDir — simulating a restart. Its own
+	// equity is 8400, which is -16% off the FIRST guard's 10000 peak but
+	// still above the 5000 baseline. If the peak did not survive the
+	// restart, this guard would compute max(5000, 8400) = 8400 and ALLOW.
+	g2 := NewCoilLiveHaltGuard(cfg, &fakeHaltReader{equity: 8400})
+	if err := g2.EvaluateEntry(context.Background()); err == nil {
+		t.Fatal("a fresh guard instance must read the persisted 10000 peak from disk and block at -16%, got nil")
+	}
+}
+
+// I1/M-ish: a latch file whose content cannot be parsed must still block —
+// the block decision is (and must remain) presence-only. This guards
+// against a future regression where someone adds content validation to the
+// latch check and treats unparseable content as "not latched."
+func TestHalt_UnreadableLatchFileBlocks(t *testing.T) {
+	// Equity equals baseline (0% drawdown) so the ONLY thing that could
+	// cause a block is the latch file's presence.
+	g, dir := newTestHalt(t, 5000, 5000)
+	if err := os.WriteFile(filepath.Join(dir, coilHaltLatchFileName), []byte("not valid json {{{"), 0o644); err != nil {
+		t.Fatalf("write garbage latch file: %v", err)
+	}
+	if err := g.EvaluateEntry(context.Background()); err == nil {
+		t.Fatal("an unreadable/unparseable latch file must still block by presence alone, got nil")
+	}
+}
+
+// I4: concurrent EvaluateEntry calls must not corrupt the persisted
+// high-water file or race on shared guard state. Run with -race.
+func TestHalt_ConcurrentEvaluateEntryNoRace(t *testing.T) {
+	dir := t.TempDir()
+	cfg := CoilLiveHaltConfig{Enabled: true, DrawdownPct: 0.15, BaselineUSD: 5000, StateDir: dir}
+	g := NewCoilLiveHaltGuard(cfg, &fakeHaltReader{equity: 9000}) // above baseline: every call ratchets
+
+	const n = 50
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			errs[idx] = g.EvaluateEntry(context.Background())
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent call %d: equity at a new peak must be allowed, got %v", i, err)
+		}
+	}
+
+	b, err := os.ReadFile(filepath.Join(dir, coilHaltStateFileName))
+	if err != nil {
+		t.Fatalf("state file must exist and be readable after concurrent writes: %v", err)
+	}
+	var s highWaterState
+	if err := json.Unmarshal(b, &s); err != nil {
+		t.Fatalf("state file must be valid JSON after concurrent writes (not truncated/corrupt): %v\ncontents: %q", err, b)
+	}
+	if s.HighWaterUSD != 9000 {
+		t.Fatalf("expected persisted high-water 9000, got %v", s.HighWaterUSD)
 	}
 }

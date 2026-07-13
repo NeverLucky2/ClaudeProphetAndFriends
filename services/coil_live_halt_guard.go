@@ -3,10 +3,13 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"prophet-trader/interfaces"
@@ -40,15 +43,28 @@ type CoilLiveHaltConfig struct {
 // concurrency, deploy ceiling) is prose the LLM is trusted to self-police, which
 // is acceptable on paper and not acceptable here.
 //
-// FAILS CLOSED: missing baseline, unreadable account, or a present latch blocks
-// the entry. Consulted only from TradeGuard.CheckBuy, so exits are never blocked.
+// FAILS CLOSED on every uncertainty: missing baseline, invalid drawdown pct,
+// a nil reader, an unreadable account, a present (or unreadable — see
+// coilHaltFileExists) kill/latch file, or an unreadable/corrupt high-water
+// state file all block the entry. Consulted only from TradeGuard.CheckBuy, so
+// exits are never blocked.
+//
+// EvaluateEntry is safe for concurrent use: mu serializes the
+// read-high-water / decide / write-high-water sequence so two concurrent
+// buys cannot interleave and lose a ratchet or a latch write, and all state
+// files are written atomically (temp file + rename) so a crash or a
+// concurrent reader can never observe a truncated file.
 //
 // Re-arm is deliberate: delete the latch file. There is intentionally no
-// programmatic re-arm.
+// programmatic re-arm. Do NOT delete the high-water state file to "fix" a
+// halt — see the effectiveHighWater doc comment for why that only bounds,
+// rather than eliminates, the resulting loss of the true peak.
 type CoilLiveHaltGuard struct {
 	cfg    CoilLiveHaltConfig
 	reader HaltAccountReader
 	logger *logrus.Logger
+
+	mu sync.Mutex
 }
 
 func NewCoilLiveHaltGuard(cfg CoilLiveHaltConfig, reader HaltAccountReader) *CoilLiveHaltGuard {
@@ -57,13 +73,31 @@ func NewCoilLiveHaltGuard(cfg CoilLiveHaltConfig, reader HaltAccountReader) *Coi
 	return &CoilLiveHaltGuard{cfg: cfg, reader: reader, logger: logger}
 }
 
-func (g *CoilLiveHaltGuard) killPath() string  { return filepath.Join(g.cfg.StateDir, coilHaltKillFileName) }
-func (g *CoilLiveHaltGuard) latchPath() string { return filepath.Join(g.cfg.StateDir, coilHaltLatchFileName) }
-func (g *CoilLiveHaltGuard) statePath() string { return filepath.Join(g.cfg.StateDir, coilHaltStateFileName) }
+func (g *CoilLiveHaltGuard) killPath() string {
+	return filepath.Join(g.cfg.StateDir, coilHaltKillFileName)
+}
+func (g *CoilLiveHaltGuard) latchPath() string {
+	return filepath.Join(g.cfg.StateDir, coilHaltLatchFileName)
+}
+func (g *CoilLiveHaltGuard) statePath() string {
+	return filepath.Join(g.cfg.StateDir, coilHaltStateFileName)
+}
 
+// coilHaltFileExists reports whether a guard file (kill switch or latch)
+// should be treated as PRESENT. This is a safety-critical distinction: a
+// stat error that is NOT "file does not exist" — a permission error, an I/O
+// error, an unmounted or renamed StateDir — must never be read as "absent".
+// Reading it as absent would let a filesystem fault silently clear both the
+// manual kill switch and a tripped drawdown latch, turning a latched halt
+// into a full fail-open the moment the disk misbehaves. Only a definitive
+// fs.ErrNotExist is treated as absent; every other stat error is treated as
+// present (block).
 func coilHaltFileExists(p string) bool {
 	_, err := os.Stat(p)
-	return err == nil
+	if err == nil {
+		return true
+	}
+	return !errors.Is(err, fs.ErrNotExist)
 }
 
 func (g *CoilLiveHaltGuard) block(reason string) error {
@@ -78,35 +112,110 @@ type highWaterState struct {
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
-func (g *CoilLiveHaltGuard) readPersistedHighWater() float64 {
-	b, err := os.ReadFile(g.statePath())
-	if err != nil {
-		return 0 // absent/unreadable -> baseline floors it; never fails open
+// readPersistedHighWater distinguishes three cases so a corrupt or
+// unreadable state file can never be silently treated as "no prior peak":
+//   - absent (fs.ErrNotExist): legitimate first run — found=false, err=nil
+//   - present but unreadable or unparseable (corruption, permission fault,
+//     truncated write, ...): err != nil — the caller MUST fail closed
+//   - present and valid: value, found=true, err=nil
+func (g *CoilLiveHaltGuard) readPersistedHighWater() (value float64, found bool, err error) {
+	b, statErr := os.ReadFile(g.statePath())
+	if statErr != nil {
+		if errors.Is(statErr, fs.ErrNotExist) {
+			return 0, false, nil
+		}
+		return 0, false, fmt.Errorf("high-water state file unreadable: %w", statErr)
 	}
 	var s highWaterState
-	if json.Unmarshal(b, &s) != nil {
-		return 0
+	if jsonErr := json.Unmarshal(b, &s); jsonErr != nil {
+		return 0, false, fmt.Errorf("high-water state file corrupt: %w", jsonErr)
 	}
-	return s.HighWaterUSD
+	return s.HighWaterUSD, true, nil
 }
 
+// atomicWriteFile writes data to target by writing a temp file in dir and
+// renaming it over target. os.WriteFile is truncate-then-write: a crash or a
+// concurrent writer mid-write can leave target truncated, which (for the
+// high-water file) would previously have parsed as 0 and destroyed the peak.
+// Rename is atomic on both POSIX and Windows (Go's os.Rename uses
+// MoveFileEx with MOVEFILE_REPLACE_EXISTING there), so a reader always sees
+// either the fully-old or fully-new contents, never a partial write.
+func atomicWriteFile(dir, target string, data []byte, perm os.FileMode) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("cannot create state dir: %w", err)
+	}
+	tmp, err := os.CreateTemp(dir, filepath.Base(target)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("cannot create temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	cleanup := func() { _ = os.Remove(tmpPath) }
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return fmt.Errorf("cannot write temp file: %w", err)
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return fmt.Errorf("cannot chmod temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return fmt.Errorf("cannot close temp file: %w", err)
+	}
+	if err := os.Rename(tmpPath, target); err != nil {
+		cleanup()
+		return fmt.Errorf("cannot rename temp file into place: %w", err)
+	}
+	return nil
+}
+
+// writeHighWater persists the ratcheted peak atomically (see
+// atomicWriteFile). Errors are logged loudly but do not block the CURRENT
+// call: equity is at or above the high-water mark here (that is why we are
+// ratcheting), so there is no drawdown to protect against on this entry. A
+// lost ratchet only matters on a LATER call — effectiveHighWater's baseline
+// floor bounds, but does not eliminate, how far the mark can fall as a
+// result. See the effectiveHighWater doc comment.
 func (g *CoilLiveHaltGuard) writeHighWater(v float64) {
-	if err := os.MkdirAll(g.cfg.StateDir, 0o755); err != nil {
-		g.logger.WithError(err).Error("coil live halt: cannot create state dir")
+	b, err := json.MarshalIndent(highWaterState{HighWaterUSD: v, UpdatedAt: time.Now().UTC()}, "", "  ")
+	if err != nil {
+		g.logger.WithError(err).Error("coil live halt: failed to marshal high-water mark")
 		return
 	}
-	b, _ := json.MarshalIndent(highWaterState{HighWaterUSD: v, UpdatedAt: time.Now().UTC()}, "", "  ")
-	if err := os.WriteFile(g.statePath(), b, 0o644); err != nil {
+	if err := atomicWriteFile(g.cfg.StateDir, g.statePath(), b, 0o644); err != nil {
 		g.logger.WithError(err).Error("coil live halt: failed to persist high-water mark")
 	}
 }
 
-// effectiveHighWater is max(baseline, persisted, equity). Flooring at the
-// funded baseline is what makes a lost state file safe: without it, a file lost
-// mid-drawdown would reset the mark down to current equity and the halt would
-// never fire.
-func (g *CoilLiveHaltGuard) effectiveHighWater(equity float64) float64 {
-	return math.Max(g.cfg.BaselineUSD, math.Max(g.readPersistedHighWater(), equity))
+// effectiveHighWater is max(baseline, persisted, equity).
+//
+// Honest limitation: the baseline floor BOUNDS how far a lost/reset
+// high-water mark can fall — it does NOT make losing the state file safe in
+// general. It is only a no-op when equity is already at or below the
+// baseline. If the true peak was above the baseline (the normal case in any
+// drawdown that started from a real peak), losing the file resets the mark
+// down to CURRENT EQUITY, not to the true peak. Example: true peak $14,000,
+// baseline $10,000, equity now $12,000 — delete the state file and the mark
+// becomes $12,000, so the halt fires at $10,200 instead of the correct
+// $11,900 it would have fired at against the true peak. The floor prevents
+// the mark from falling BELOW the baseline; it does not preserve the peak
+// above it. Operators must NOT delete coilHaltStateFileName. Only the latch
+// file (coilHaltLatchFileName) is meant to be deleted, and only deliberately,
+// to re-arm after a reviewed halt.
+//
+// A corrupt or unreadable state file is a DIFFERENT case and is not floored
+// here at all: readPersistedHighWater reports it as an error and
+// EvaluateEntry fails closed (blocks) rather than silently treating it as an
+// absent file.
+func (g *CoilLiveHaltGuard) effectiveHighWater(equity float64) (float64, error) {
+	persisted, _, err := g.readPersistedHighWater()
+	if err != nil {
+		return 0, err
+	}
+	return math.Max(g.cfg.BaselineUSD, math.Max(persisted, equity)), nil
 }
 
 type coilHaltLatch struct {
@@ -117,24 +226,54 @@ type coilHaltLatch struct {
 	DrawdownPct  float64   `json:"drawdown_pct"`
 }
 
-func (g *CoilLiveHaltGuard) tripLatch(equity, hwm, dd float64) {
+// tripLatch persists the halt latch atomically and reports failure to the
+// caller. A failed latch write must never be silently swallowed: with no
+// latch on disk, a later beat would see equity recover and re-arm itself
+// with no operator action, which is exactly what "manual re-arm only"
+// forbids. On failure this makes a best-effort attempt to write the kill
+// file instead, so the block still survives a process restart even without
+// a latch file. The caller (EvaluateEntry) blocks the CURRENT call
+// regardless of this return value — the error is for loud logging and
+// operator escalation, not for deciding whether to block.
+func (g *CoilLiveHaltGuard) tripLatch(equity, hwm, dd float64) error {
 	if coilHaltFileExists(g.latchPath()) {
-		return
+		return nil // already latched
 	}
-	if err := os.MkdirAll(g.cfg.StateDir, 0o755); err != nil {
-		g.logger.WithError(err).Error("coil live halt: cannot create state dir for latch")
-		return
-	}
-	b, _ := json.MarshalIndent(coilHaltLatch{
+	b, err := json.MarshalIndent(coilHaltLatch{
 		Reason:       "high-water drawdown halt",
 		EngagedAt:    time.Now().UTC(),
 		EquityUSD:    equity,
 		HighWaterUSD: hwm,
 		DrawdownPct:  dd,
 	}, "", "  ")
-	if err := os.WriteFile(g.latchPath(), b, 0o644); err != nil {
-		g.logger.WithError(err).Error("coil live halt: failed to write halt latch")
+	if err != nil {
+		return g.fallbackKillFile(fmt.Errorf("failed to marshal halt latch: %w", err))
 	}
+	if err := atomicWriteFile(g.cfg.StateDir, g.latchPath(), b, 0o644); err != nil {
+		return g.fallbackKillFile(fmt.Errorf("failed to write halt latch: %w", err))
+	}
+	return nil
+}
+
+// fallbackKillFile makes a best-effort attempt to persist the kill file when
+// the primary latch write failed, so the block survives a restart even
+// without a latch on disk. Its own failure is still reported to the caller:
+// EvaluateEntry blocks the current call regardless, but if BOTH writes
+// failed there is no on-disk record at all, and a later beat could re-arm
+// silently unless the underlying fault (e.g. an unwritable StateDir) is
+// fixed by an operator first.
+func (g *CoilLiveHaltGuard) fallbackKillFile(latchErr error) error {
+	b, _ := json.MarshalIndent(struct {
+		Reason    string    `json:"reason"`
+		EngagedAt time.Time `json:"engaged_at"`
+	}{
+		Reason:    "latch write failed; kill-file fallback engaged",
+		EngagedAt: time.Now().UTC(),
+	}, "", "  ")
+	if err := atomicWriteFile(g.cfg.StateDir, g.killPath(), b, 0o644); err != nil {
+		return fmt.Errorf("latch write failed (%v) AND kill-file fallback failed (%v) — halt state not persisted to disk", latchErr, err)
+	}
+	return fmt.Errorf("latch write failed, kill-file fallback engaged instead: %w", latchErr)
 }
 
 // EvaluateEntry returns nil to allow a new entry, or an error to block it.
@@ -142,11 +281,18 @@ func (g *CoilLiveHaltGuard) EvaluateEntry(ctx context.Context) error {
 	if !g.cfg.Enabled {
 		return nil
 	}
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
 	if g.cfg.BaselineUSD <= 0 {
 		return g.block("baseline not configured (COIL_LIVE_BASELINE_USD<=0)")
 	}
 	if g.cfg.DrawdownPct <= 0 || g.cfg.DrawdownPct >= 1 {
 		return g.block(fmt.Sprintf("invalid drawdown pct %.4f (want 0<pct<1)", g.cfg.DrawdownPct))
+	}
+	if g.reader == nil {
+		return g.block("account reader not configured (fail closed)")
 	}
 	if coilHaltFileExists(g.killPath()) {
 		return g.block("manual kill switch engaged")
@@ -164,7 +310,10 @@ func (g *CoilLiveHaltGuard) EvaluateEntry(ctx context.Context) error {
 	}
 
 	equity := acct.PortfolioValue
-	hwm := g.effectiveHighWater(equity)
+	hwm, hwmErr := g.effectiveHighWater(equity)
+	if hwmErr != nil {
+		return g.block(fmt.Sprintf("high-water state unreadable or corrupt (fail closed): %v", hwmErr))
+	}
 	if equity >= hwm {
 		g.writeHighWater(equity) // ratchet up
 		return nil
@@ -172,7 +321,11 @@ func (g *CoilLiveHaltGuard) EvaluateEntry(ctx context.Context) error {
 
 	drawdown := (hwm - equity) / hwm
 	if drawdown >= g.cfg.DrawdownPct {
-		g.tripLatch(equity, hwm, drawdown)
+		if latchErr := g.tripLatch(equity, hwm, drawdown); latchErr != nil {
+			g.logger.WithError(latchErr).Error(
+				"coil live halt: failed to durably persist the drawdown halt — still blocking this entry, but the halt " +
+					"may not survive a restart without operator intervention; investigate StateDir immediately")
+		}
 		return g.block(fmt.Sprintf(
 			"drawdown %.2f%% >= %.2f%% limit (equity $%.2f vs high-water $%.2f) — new entries halted; open positions still managed",
 			drawdown*100, g.cfg.DrawdownPct*100, equity, hwm))
@@ -192,8 +345,11 @@ type CoilHaltStatus struct {
 	BaselineUSD  float64  `json:"baseline_usd"`
 }
 
-// Status never places orders, so a read failure is reported as a reason rather
-// than an error.
+// Status never places orders, so a read failure is reported as a reason
+// rather than an error. Its validity checks mirror EvaluateEntry's exactly
+// so this report can never claim Armed:true in a configuration where
+// EvaluateEntry would actually block everything (e.g. a misconfigured
+// DrawdownPct like 15 instead of 0.15).
 func (g *CoilLiveHaltGuard) Status(ctx context.Context) CoilHaltStatus {
 	s := CoilHaltStatus{
 		Enabled:     g.cfg.Enabled,
@@ -207,20 +363,29 @@ func (g *CoilLiveHaltGuard) Status(ctx context.Context) CoilHaltStatus {
 	if g.cfg.BaselineUSD <= 0 {
 		reasons = append(reasons, "baseline not configured")
 	}
+	if g.cfg.DrawdownPct <= 0 || g.cfg.DrawdownPct >= 1 {
+		reasons = append(reasons, fmt.Sprintf("invalid drawdown pct %.4f (want 0<pct<1)", g.cfg.DrawdownPct))
+	}
 	if coilHaltFileExists(g.killPath()) {
 		reasons = append(reasons, "manual kill engaged")
 	}
 	if coilHaltFileExists(g.latchPath()) {
 		reasons = append(reasons, "drawdown halt latched")
 	}
-	if acct, err := g.reader.GetAccount(ctx); err == nil && acct != nil && acct.PortfolioValue > 0 {
+	if g.reader == nil {
+		reasons = append(reasons, "account reader not configured")
+	} else if acct, err := g.reader.GetAccount(ctx); err == nil && acct != nil && acct.PortfolioValue > 0 {
 		s.EquityUSD = acct.PortfolioValue
-		s.HighWaterUSD = g.effectiveHighWater(acct.PortfolioValue)
-		if s.HighWaterUSD > 0 {
-			s.DrawdownPct = (s.HighWaterUSD - s.EquityUSD) / s.HighWaterUSD
-		}
-		if s.DrawdownPct >= g.cfg.DrawdownPct {
-			reasons = append(reasons, "drawdown limit reached")
+		if hwm, hwmErr := g.effectiveHighWater(acct.PortfolioValue); hwmErr != nil {
+			reasons = append(reasons, "high-water state unreadable")
+		} else {
+			s.HighWaterUSD = hwm
+			if s.HighWaterUSD > 0 {
+				s.DrawdownPct = (s.HighWaterUSD - s.EquityUSD) / s.HighWaterUSD
+			}
+			if s.DrawdownPct >= g.cfg.DrawdownPct {
+				reasons = append(reasons, "drawdown limit reached")
+			}
 		}
 	} else {
 		reasons = append(reasons, "account unavailable")
