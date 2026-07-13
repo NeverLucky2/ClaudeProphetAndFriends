@@ -178,7 +178,7 @@ function defaultAgents() {
       description: 'Aggressive discretionary options trader with scalping overlay',
       systemPromptTemplate: 'default',
       strategyId: 'v2-options',
-      model: 'anthropic/claude-sonnet-4-6',
+      model: 'anthropic/claude-sonnet-5',
       // Pre-market: only fire the 09:15 scheduled wake + 09:30 phase-snap.
       // Cadence 86400 silences intra-phase ticks; suppressPhaseSnaps skips the
       // 04:00 boundary; scheduledBeats adds the 09:15 wake.
@@ -213,7 +213,7 @@ For existing positions, use get_mean_reversion_signal({ symbol }) to check the e
       // Mechanical RSI(2) mean-reversion — does not adjust on news or sector moves.
       // Exempt from emergency-alert wakes.
       respondsToEmergencyWakes: false,
-      model: 'anthropic/claude-sonnet-4-6',
+      model: 'anthropic/claude-sonnet-5',
       heartbeatOverrides: {
         pre_market: 86400,
         market_open: 86400,
@@ -254,7 +254,7 @@ For existing positions, use get_earnings_drift_signal({ symbol, earnings_date, t
       // news (its rules reject any beat outside the 16:55–17:15 ET window).
       // Exempt from emergency-alert wakes; same class as Coil/Trend/Harvest.
       respondsToEmergencyWakes: false,
-      model: 'anthropic/claude-sonnet-4-6',
+      model: 'anthropic/claude-sonnet-5',
       heartbeatOverrides: {
         pre_market: 86400,
         market_open: 86400,
@@ -294,7 +294,7 @@ Use get_trend_signal({ symbol }) to read the daily-bar Donchian-100 high, Donchi
       // Price-only, daily-bar trend follower — no provision to act on intraday
       // news. Exempt from emergency-alert wakes.
       respondsToEmergencyWakes: false,
-      model: 'anthropic/claude-sonnet-4-6',
+      model: 'anthropic/claude-sonnet-5',
       heartbeatOverrides: {
         pre_market: 86400,
         market_open: 86400,
@@ -452,7 +452,8 @@ function defaultModels() {
   }
   
   return [
-    { id: 'anthropic/claude-sonnet-4-6', name: 'Claude Sonnet 4.6', description: 'Best speed + intelligence, $3/$15 per MTok' },
+    { id: 'anthropic/claude-sonnet-5', name: 'Claude Sonnet 5', description: 'Newest Sonnet, near-Opus coding/agentic, $3/$15 ($2/$10 intro thru 2026-08-31) per MTok' },
+    { id: 'anthropic/claude-sonnet-4-6', name: 'Claude Sonnet 4.6', description: 'Prior-gen Sonnet, $3/$15 per MTok' },
     { id: 'anthropic/claude-opus-4-6', name: 'Claude Opus 4.6', description: 'Most intelligent, best for agents, $5/$25 per MTok' },
     { id: 'anthropic/claude-haiku-4-5', name: 'Claude Haiku 4.5', description: 'Fastest, near-frontier, $1/$5 per MTok' },
     { id: 'anthropic/claude-sonnet-4-5', name: 'Claude Sonnet 4.5 (Legacy)', description: 'Previous gen Sonnet, $3/$15 per MTok' },
@@ -470,7 +471,7 @@ function createSandbox(account, overrides = {}) {
     name: overrides.name || account.name || `Sandbox ${account.id}`,
     agent: {
       activeAgentId: overrides.agent?.activeAgentId || overrides.activeAgentId || 'default',
-      model: overrides.agent?.model || overrides.activeModel || 'anthropic/claude-sonnet-4-6',
+      model: overrides.agent?.model || overrides.activeModel || 'anthropic/claude-sonnet-5',
       overrides: {
         ...DEFAULT_AGENT_OVERRIDES,
         ...(overrides.agent?.overrides || {}),
@@ -492,7 +493,7 @@ function createDefaultConfig() {
 
     // Legacy compatibility aliases. Keep mirrored during migration.
     activeAgentId: 'default',
-    activeModel: 'anthropic/claude-sonnet-4-6',
+    activeModel: 'anthropic/claude-sonnet-5',
     heartbeat: { ...DEFAULT_HEARTBEAT },
     permissions: { ...DEFAULT_PERMISSIONS },
     plugins: mergePlugins(),
@@ -502,7 +503,7 @@ function createDefaultConfig() {
     agents: defaultAgents(),
     strategies: defaultStrategies(),
     manager: {
-      model: 'anthropic/claude-sonnet-4-6',
+      model: 'anthropic/claude-sonnet-5',
       customPrompt: '',
     },
     models: defaultModels(),
@@ -529,7 +530,7 @@ function mergeSandbox(sandbox, fallback = {}) {
     ...sandbox,
     agent: {
       activeAgentId: sandbox?.agent?.activeAgentId || fallback.activeAgentId || 'default',
-      model: sandbox?.agent?.model || fallback.activeModel || 'anthropic/claude-sonnet-4-6',
+      model: sandbox?.agent?.model || fallback.activeModel || 'anthropic/claude-sonnet-5',
       overrides: {
         ...DEFAULT_AGENT_OVERRIDES,
         ...(sandbox?.agent?.overrides || {}),

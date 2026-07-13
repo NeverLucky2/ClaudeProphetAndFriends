@@ -483,7 +483,7 @@ export class AgentHarness {
     if (!this._agentConfig) throw new Error(`Agent not found for sandbox ${this._sandboxConfig.id}`);
 
     const account = this._resolveAccount();
-    const model = this._agentConfig.model || this._sandboxConfig.agent?.model || 'anthropic/claude-sonnet-4-6';
+    const model = this._agentConfig.model || this._sandboxConfig.agent?.model || 'anthropic/claude-sonnet-5';
 
     this.state.activeAgentId = this._agentConfig.id;
     this.state.activeAccountId = account?.id || this._sandboxConfig.accountId || null;
@@ -1148,8 +1148,8 @@ ${userBlock}`;
     }
     return new Promise(async (resolve, reject) => {
       const sessionEpoch = this._sessionEpoch;
-      // OpenCode model format: anthropic/claude-sonnet-4-6
-      const ocModel = model?.includes('/') ? model : `anthropic/${model || 'claude-sonnet-4-6'}`;
+      // OpenCode model format: anthropic/claude-sonnet-5
+      const ocModel = model?.includes('/') ? model : `anthropic/${model || 'claude-sonnet-5'}`;
 
       // Check max tool rounds from permissions
       const perms = this._resolvePermissions();

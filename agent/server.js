@@ -244,7 +244,7 @@ async function runReasoningDigestAllSandboxes(isoDate) {
 
 // ── Analysis Scheduler ─────────────────────────────────────────────
 const scheduler = new AnalysisScheduler({
-  model: getConfig().activeModel || 'anthropic/claude-sonnet-4-6',
+  model: getConfig().activeModel || 'anthropic/claude-sonnet-5',
   onEmergencyWake: (reason) => orchestrator.triggerEmergencyHeartbeat(reason),
   getHealthySandboxUrl: () => {
     const runtime = orchestrator.listRuntimes().find(r => r.goReady && r.port);
@@ -575,7 +575,7 @@ app.post('/api/manager/message', async (req, res) => {
 
     const config = getConfig();
     const mgr = config.manager || {};
-    const model = mgr.model || config.activeModel || 'anthropic/claude-sonnet-4-6';
+    const model = mgr.model || config.activeModel || 'anthropic/claude-sonnet-5';
     const ocModel = model.includes('/') ? model : `anthropic/${model}`;
     const customPromptAddition = mgr.customPrompt ? `\n\n## Custom Instructions\n${mgr.customPrompt}` : '';
     
@@ -1200,7 +1200,7 @@ app.post('/api/sandboxes/:id/message', async (req, res) => {
         '- Risk tolerance? (max position size, stop loss %)\n' +
         '- Which model? (' + providers + ')\n' +
         '- Any specific rules?\n\n' +
-        'Example: "Create a conservative tech options agent with 30-day holds, max 10% per position, using claude-sonnet-4-6"'
+        'Example: "Create a conservative tech options agent with 30-day holds, max 10% per position, using claude-sonnet-5"'
       });
     }
     

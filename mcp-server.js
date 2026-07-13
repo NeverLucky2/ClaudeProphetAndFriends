@@ -1277,7 +1277,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             name: { type: 'string', description: 'Agent name (e.g., "BluechipTrader")' },
             description: { type: 'string', description: 'Short description of the agent personality' },
-            model: { type: 'string', description: 'Model ID (e.g., "anthropic/claude-sonnet-4-6")' },
+            model: { type: 'string', description: 'Model ID (e.g., "anthropic/claude-sonnet-5")' },
             strategyId: { type: 'string', description: 'Strategy ID to use (optional, can assign later)' },
             customSystemPrompt: { type: 'string', description: 'Custom system prompt for this agent' },
           },
@@ -2686,7 +2686,7 @@ Worst Trade: ${stats.worst_result_pct.toFixed(1)}% ($${stats.worst_result_dollar
         const body = {
           name: agentName,
           description: description || '',
-          model: model || 'anthropic/claude-sonnet-4-6',
+          model: model || 'anthropic/claude-sonnet-5',
           strategyId: strategyId || undefined,
           systemPromptTemplate: customSystemPrompt ? 'custom' : 'default',
           customSystemPrompt: customSystemPrompt || '',
