@@ -62,12 +62,31 @@ type CoilLiveHaltConfig struct {
 // programmatic re-arm. Do NOT delete the high-water state file to "fix" a
 // halt — see the effectiveHighWater doc comment for why that only bounds,
 // rather than eliminates, the resulting loss of the true peak.
+//
+// hwmMem is a same-process backstop for a failed persist (see writeHighWater
+// and effectiveHighWater): a denied atomic write/rename — full disk,
+// transient I/O error, or (confirmed empirically on Windows: a concurrent
+// reader with an open handle denies roughly half of a tight loop of renames
+// because os.Open there omits FILE_SHARE_DELETE) a concurrent Status() call
+// racing the rename — must not make the guard forget a peak it already
+// observed. It is NOT a substitute for the state file: it does not survive a
+// restart (see TestHalt_InMemoryHighWaterDoesNotSurviveRestart), and the file
+// remains the only thing that does.
 type CoilLiveHaltGuard struct {
 	cfg    CoilLiveHaltConfig
 	reader HaltAccountReader
 	logger *logrus.Logger
 
-	mu sync.Mutex
+	mu     sync.Mutex
+	hwmMem float64
+
+	// testPersistFailure, when non-nil, makes writeHighWater log-and-return
+	// without attempting the real disk write, deterministically simulating a
+	// denied atomic write/rename. Set only by tests in this package
+	// (white-box) to exercise NEW-1 without depending on OS-specific
+	// permission behavior, which is unreliable on Windows for this exact
+	// scenario (see the concurrency tests below). Nil in production.
+	testPersistFailure error
 }
 
 func NewCoilLiveHaltGuard(cfg CoilLiveHaltConfig, reader HaltAccountReader) *CoilLiveHaltGuard {
@@ -140,6 +159,22 @@ func coilStateDirStatable(dir string) error {
 		return fmt.Errorf("StateDir %q exists but is not a directory", dir)
 	}
 	return nil
+}
+
+// CoilStateDirStatable is the exported form of coilStateDirStatable, meant to
+// be called from cmd/bot/main.go at ARM TIME — before NewCoilLiveHaltGuard is
+// even constructed — so a misconfigured non-default COIL_LIVE_STATE_DIR
+// fails loudly at startup (logger.Fatalf) instead of silently blocking every
+// live entry with nothing but a repeating log line to explain why. The
+// default StateDir (the database's own directory) is always created at
+// startup and so is never affected by this check; this exists for the
+// non-default case. Deliberately does NOT create the directory if it is
+// missing — see coilStateDirStatable's doc comment: resurrecting a vanished
+// StateDir would silently drop whatever latch/kill state used to live there
+// across a restart, which is the exact fail-open a previous review round
+// closed.
+func CoilStateDirStatable(dir string) error {
+	return coilStateDirStatable(dir)
 }
 
 func (g *CoilLiveHaltGuard) block(reason string) error {
@@ -231,14 +266,24 @@ func atomicWriteFile(dir, target string, data []byte, perm os.FileMode) error {
 // writeHighWater persists the ratcheted peak atomically (see
 // atomicWriteFile). Errors are logged loudly but do not block the CURRENT
 // call: equity is at or above the high-water mark here (that is why we are
-// ratcheting), so there is no drawdown to protect against on this entry. A
-// lost ratchet only matters on a LATER call — effectiveHighWater's baseline
-// floor bounds, but does not eliminate, how far the mark can fall as a
-// result. See the effectiveHighWater doc comment.
+// ratcheting), so there is no drawdown to protect against on this entry.
+//
+// A failed persist no longer loses the peak within this process: the caller
+// (EvaluateEntry) updates hwmMem under g.mu BEFORE calling writeHighWater, so
+// effectiveHighWater's max(...) still sees the observed peak on every later
+// call in this process even if the bytes never reached disk. Only a
+// RESTART loses hwmMem — that is what the state file is for, and it is why a
+// failed persist must still be logged loudly: an operator needs to know the
+// file is stale before the process restarts and the memory backstop goes
+// away with it.
 func (g *CoilLiveHaltGuard) writeHighWater(v float64) {
 	b, err := json.MarshalIndent(highWaterState{HighWaterUSD: v, UpdatedAt: time.Now().UTC()}, "", "  ")
 	if err != nil {
 		g.logger.WithError(err).Error("coil live halt: failed to marshal high-water mark")
+		return
+	}
+	if g.testPersistFailure != nil {
+		g.logger.WithError(g.testPersistFailure).Error("coil live halt: failed to persist high-water mark (test-injected failure)")
 		return
 	}
 	if err := atomicWriteFile(g.cfg.StateDir, g.statePath(), b, 0o644); err != nil {
@@ -246,21 +291,38 @@ func (g *CoilLiveHaltGuard) writeHighWater(v float64) {
 	}
 }
 
-// effectiveHighWater is max(baseline, persisted, equity).
+// effectiveHighWater is max(baseline, persisted, hwmMem, equity).
 //
-// Honest limitation: the baseline floor BOUNDS how far a lost/reset
-// high-water mark can fall — it does NOT make losing the state file safe in
-// general. It is only a no-op when equity is already at or below the
-// baseline. If the true peak was above the baseline (the normal case in any
-// drawdown that started from a real peak), losing the file resets the mark
-// down to CURRENT EQUITY, not to the true peak. Example: true peak $14,000,
-// baseline $10,000, equity now $12,000 — delete the state file and the mark
-// becomes $12,000, so the halt fires at $10,200 instead of the correct
-// $11,900 it would have fired at against the true peak. The floor prevents
-// the mark from falling BELOW the baseline; it does not preserve the peak
-// above it. Operators must NOT delete coilHaltStateFileName. Only the latch
-// file (coilHaltLatchFileName) is meant to be deleted, and only deliberately,
-// to re-arm after a reviewed halt.
+// hwmMem closes the gap a failed writeHighWater would otherwise leave: if the
+// atomic write/rename for a prior ratchet was denied (full disk, transient
+// I/O error, or — confirmed empirically in this package's own concurrency
+// tests — a concurrent reader on Windows denying the rename), the on-disk
+// persisted value can be stale and LOWER than a peak this same process
+// already observed and ratcheted to in memory. Without hwmMem in the max,
+// that stale disk value alone would silently become the mark, understating
+// the true drawdown and potentially ALLOWING an entry that should block: a
+// concrete failure mode is persisted=$12,000 (last successful write), a
+// later beat at equity $14,000 whose ratchet write is denied (hwmMem still
+// advances to $14,000 in memory), then equity $11,900 — the correct
+// drawdown is 15% (blocks); computed from the stale $12,000 alone it would
+// be 0.83% (silently allows). See TestHalt_FailedPersistDoesNotLoseInMemoryPeak.
+//
+// hwmMem is NOT a substitute for the file: it lives only as long as the
+// process does. Honest limitation on the file side: the baseline floor
+// BOUNDS how far a lost/reset high-water mark can fall ACROSS A RESTART — it
+// does NOT make losing the state file safe in general. It is only a no-op
+// when equity is already at or below the baseline. If the true peak was
+// above the baseline (the normal case in any drawdown that started from a
+// real peak), losing the file AND the process restarting (so hwmMem is also
+// gone) resets the mark down to CURRENT EQUITY, not to the true peak.
+// Example: true peak $14,000, baseline $10,000, equity now $12,000 — lose
+// the state file across a restart and the mark becomes $12,000, so the halt
+// fires at $10,200 instead of the correct $11,900 it would have fired at
+// against the true peak. The floor prevents the mark from falling BELOW the
+// baseline; it does not preserve the peak above it. Operators must NOT
+// delete coilHaltStateFileName. Only the latch file (coilHaltLatchFileName)
+// is meant to be deleted, and only deliberately, to re-arm after a reviewed
+// halt.
 //
 // A corrupt or unreadable state file is a DIFFERENT case and is not floored
 // here at all: readPersistedHighWater reports it as an error and
@@ -271,7 +333,7 @@ func (g *CoilLiveHaltGuard) effectiveHighWater(equity float64) (float64, error) 
 	if err != nil {
 		return 0, err
 	}
-	return math.Max(g.cfg.BaselineUSD, math.Max(persisted, equity)), nil
+	return math.Max(g.cfg.BaselineUSD, math.Max(persisted, math.Max(g.hwmMem, equity))), nil
 }
 
 type coilHaltLatch struct {
@@ -374,7 +436,8 @@ func (g *CoilLiveHaltGuard) EvaluateEntry(ctx context.Context) error {
 		return g.block(fmt.Sprintf("high-water state unreadable or corrupt (fail closed): %v", hwmErr))
 	}
 	if equity >= hwm {
-		g.writeHighWater(equity) // ratchet up
+		g.hwmMem = equity        // ratchet the in-memory backstop FIRST — see effectiveHighWater
+		g.writeHighWater(equity) // best-effort persist; a failure no longer loses the peak this process observed
 		return nil
 	}
 

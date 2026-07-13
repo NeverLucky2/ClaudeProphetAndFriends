@@ -269,6 +269,18 @@ func main() {
 		coilHaltStateDir = filepath.Dir(cfg.DatabasePath)
 	}
 	if cfg.EnableCoilLiveHalt {
+		// Validate BEFORE constructing the guard: a non-default
+		// COIL_LIVE_STATE_DIR pointing at a directory that does not exist
+		// would otherwise block 100% of live entries with nothing but a log
+		// line to explain it (coilStateDirStatable inside EvaluateEntry fails
+		// closed on every call, but silently — an operator staring at a dead
+		// bot has no reason to suspect a typo'd env var). Deliberately does
+		// NOT MkdirAll the directory here: see CoilStateDirStatable's doc
+		// comment for why that would resurrect a vanished dir and drop a
+		// latch across a restart.
+		if err := services.CoilStateDirStatable(coilHaltStateDir); err != nil {
+			logger.Fatalf("Coil live drawdown halt: COIL_LIVE_STATE_DIR %q is not usable (fail closed at startup rather than silently blocking every live entry): %v", coilHaltStateDir, err)
+		}
 		coilHalt := services.NewCoilLiveHaltGuard(
 			services.CoilLiveHaltConfig{
 				Enabled:     true,

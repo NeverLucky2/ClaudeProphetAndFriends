@@ -46,6 +46,36 @@ func (r *sequencedHaltReader) GetAccount(_ context.Context) (*interfaces.Account
 	return &interfaces.Account{PortfolioValue: v}, nil
 }
 
+// indexedHaltEquityKey carries a goroutine's fixed equity INDEX through
+// ctx, for indexedHaltReader below.
+type indexedHaltEquityKey struct{}
+
+// indexedHaltReader hands out a value keyed by an index carried in ctx —
+// fixed to each goroutine BEFORE it competes for g.mu — rather than by
+// GetAccount call order. This matters because GetAccount is invoked while
+// EvaluateEntry holds g.mu: a reader keyed by call order (sequencedHaltReader,
+// above) hands out values in exactly the order goroutines happen to
+// acquire the lock, so if the underlying slice is monotonically increasing,
+// the values are ALWAYS consumed in increasing order regardless of which
+// goroutine wins each race — the maximum is then, by construction, always
+// the LAST write. That never exercises the case that actually matters for a
+// high-water ratchet: a call that acquires the lock LATER but presents a
+// LOWER equity than a peak already reached. Keying by a pre-assigned index
+// instead means which goroutine wins the mutex race (a property of the Go
+// scheduler, independent of index) determines the ACTUAL write order, which
+// is therefore a genuine, unpredictable shuffle relative to value order.
+type indexedHaltReader struct {
+	equities []float64
+}
+
+func (r *indexedHaltReader) GetAccount(ctx context.Context) (*interfaces.Account, error) {
+	idx, ok := ctx.Value(indexedHaltEquityKey{}).(int)
+	if !ok || idx < 0 || idx >= len(r.equities) {
+		return nil, errors.New("indexedHaltReader: no valid equity index in context")
+	}
+	return &interfaces.Account{PortfolioValue: r.equities[idx]}, nil
+}
+
 func newTestHalt(t *testing.T, equity float64, baseline float64) (*CoilLiveHaltGuard, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -234,6 +264,100 @@ func TestHalt_HighWaterPersistsAcrossRestart(t *testing.T) {
 	}
 }
 
+// NEW-1: a failed high-water persist must not let the guard measure
+// drawdown from a stale, lower peak and allow an entry it should have
+// blocked. Reproduces the exact scenario from the review: persisted HWM is
+// 12000 (a real successful write), a later beat ratchets the true peak to
+// 14000 but its persist is denied (disk stays at 12000), and a beat after
+// that presents equity 11900 — a 15% drawdown from the TRUE 14000 peak
+// (must block), but only a 0.83% drawdown from the stale 12000 persisted
+// value (would wrongly allow). g.hwmMem is what closes this gap: it is
+// ratcheted under g.mu on every observed peak regardless of whether the
+// persist succeeds, so effectiveHighWater's max(...) still sees 14000 on the
+// third call even though the file on disk never got past 12000.
+func TestHalt_FailedPersistDoesNotLoseInMemoryPeak(t *testing.T) {
+	dir := t.TempDir()
+	reader := &fakeHaltReader{equity: 12000}
+	cfg := CoilLiveHaltConfig{Enabled: true, DrawdownPct: 0.15, BaselineUSD: 5000, StateDir: dir}
+	g := NewCoilLiveHaltGuard(cfg, reader)
+
+	// First beat: equity 12000 is a new peak: this write must succeed for
+	// real, so the persisted file genuinely holds 12000 before we start
+	// injecting failures.
+	if err := g.EvaluateEntry(context.Background()); err != nil {
+		t.Fatalf("equity at a new peak must be allowed, got %v", err)
+	}
+	persistedAfterFirst, found, err := g.readPersistedHighWater()
+	if err != nil || !found || persistedAfterFirst != 12000 {
+		t.Fatalf("precondition: expected a genuine persisted high-water of 12000, got value=%v found=%v err=%v", persistedAfterFirst, found, err)
+	}
+
+	// Second beat: equity climbs to a new peak of 14000, but the persist is
+	// denied (simulating the disk/rename failure this finding is about).
+	// The call itself must still be ALLOWED — equity is at/above the mark
+	// on THIS call, there is no drawdown to protect against yet.
+	g.testPersistFailure = errors.New("injected: simulated denied atomic write/rename")
+	reader.equity = 14000
+	if err := g.EvaluateEntry(context.Background()); err != nil {
+		t.Fatalf("equity at a new peak must be allowed even though its persist fails, got %v", err)
+	}
+
+	// Confirm the failure injection actually did what it claims: disk must
+	// still say 12000, NOT 14000. Otherwise this test would prove nothing.
+	persistedAfterSecond, found, err := g.readPersistedHighWater()
+	if err != nil || !found || persistedAfterSecond != 12000 {
+		t.Fatalf("precondition: the second write must have been denied (disk should still read 12000), got value=%v found=%v err=%v", persistedAfterSecond, found, err)
+	}
+
+	// Third beat: equity drops to 11900. True drawdown from the real 14000
+	// peak is exactly 15% and MUST block. A guard that only trusted the
+	// stale 12000 persisted value would compute an 0.83% drawdown and
+	// wrongly allow this entry.
+	reader.equity = 11900
+	if err := g.EvaluateEntry(context.Background()); err == nil {
+		t.Fatal("BUG: a failed persist let the guard forget the true 14000 peak — 15% drawdown from it must block, got nil (allowed)")
+	}
+}
+
+// NEW-1 restart semantics: hwmMem is a same-process backstop only. It must
+// NOT survive constructing a fresh guard — that is what the state file is
+// for, and conflating the two would mean an operator restarting the process
+// (e.g. a routine deploy) silently loses the "failed persist" protection
+// without any warning that they are now back to relying solely on the file
+// and the baseline floor. This test pins the intended division of
+// responsibility: memory helps mid-process, the file is what must survive a
+// restart.
+func TestHalt_InMemoryHighWaterDoesNotSurviveRestart(t *testing.T) {
+	dir := t.TempDir()
+	cfg := CoilLiveHaltConfig{Enabled: true, DrawdownPct: 0.15, BaselineUSD: 5000, StateDir: dir}
+
+	// g1 observes a peak of 14000 but its persist is denied from the very
+	// first write, so NOTHING ever reaches disk for this peak — the only
+	// record of it is g1's own hwmMem.
+	reader := &fakeHaltReader{equity: 14000}
+	g1 := NewCoilLiveHaltGuard(cfg, reader)
+	g1.testPersistFailure = errors.New("injected: simulated denied atomic write/rename")
+	if err := g1.EvaluateEntry(context.Background()); err != nil {
+		t.Fatalf("equity at a new peak must be allowed even though its persist fails, got %v", err)
+	}
+	if _, found, _ := g1.readPersistedHighWater(); found {
+		t.Fatal("precondition: no state file should exist yet — the peak must live only in g1's memory")
+	}
+
+	// g2 is a fresh guard instance over the SAME StateDir (simulating a
+	// restart). It must NOT inherit g1's in-memory 14000: with no file on
+	// disk, it can only see max(baseline, equity). At equity 11900 that
+	// floors at 11900 itself, which g2 treats as a brand-new peak and
+	// ALLOWS — the documented, unavoidable cost of memory not surviving a
+	// restart (this is exactly why operators must not rely on hwmMem in
+	// place of the state file).
+	reader2 := &fakeHaltReader{equity: 11900}
+	g2 := NewCoilLiveHaltGuard(cfg, reader2)
+	if err := g2.EvaluateEntry(context.Background()); err != nil {
+		t.Fatalf("a fresh guard instance must NOT inherit the prior process's in-memory peak, got block %v", err)
+	}
+}
+
 // I1/M-ish: a latch file whose content cannot be parsed must still block —
 // the block decision is (and must remain) presence-only. This guards
 // against a future regression where someone adds content validation to the
@@ -284,23 +408,30 @@ func TestHalt_UnreadableLatchFileBlocks(t *testing.T) {
 // TestHalt_ConcurrentEvaluateEntryNoRace: 50 goroutines call EvaluateEntry
 // on ONE shared guard with DISTINCT, varying equities (not one shared
 // value — a version that fed every goroutine the same equity would emit
-// byte-identical writes and could not detect a lost ratchet at all). The
-// final persisted high-water mark must equal the MAXIMUM equity any call
-// saw. This is deterministic and timing-independent: exercising g.mu is
-// what makes it deterministic despite 50 goroutines racing to read, decide,
-// and write against shared state.
+// byte-identical writes and could not detect a lost ratchet at all). Each
+// goroutine's equity is fixed by its INDEX via indexedHaltReader (see its
+// doc comment), NOT by GetAccount call order — a call-order-keyed reader
+// combined with a monotonically increasing equity slice would always
+// consume values in increasing order (since GetAccount runs under g.mu), so
+// the maximum would trivially be whichever call happened to acquire the
+// lock last. Keying by index instead means lock-acquisition order and value
+// order are genuinely decoupled: some goroutine holding a LOWER equity than
+// the peak already reached WILL run after that peak was written, and the
+// final persisted high-water mark must still equal the MAXIMUM equity any
+// call saw — i.e. that later, lower-equity call must not clobber it. This is
+// deterministic and timing-independent: exercising g.mu is what makes it
+// deterministic despite 50 goroutines racing to read, decide, and write
+// against shared state.
 func TestHalt_ConcurrentEvaluateEntryNoRace(t *testing.T) {
 	dir := t.TempDir()
 	cfg := CoilLiveHaltConfig{Enabled: true, DrawdownPct: 0.15, BaselineUSD: 5000, StateDir: dir}
 
 	const n = 50
 
-	// Hands out a DISTINCT, strictly-above-baseline equity per call (in
-	// whatever order goroutines happen to acquire g.mu), so every ratcheting
-	// write's payload differs from the others. The spread stays under the
-	// 15% drawdown limit end-to-end (5933 vs 5100 is ~14.0%) so no ordering
-	// of these calls can spuriously trip the latch — the only thing under
-	// test here is the ratchet, not the drawdown block.
+	// A DISTINCT, strictly-above-baseline equity per goroutine INDEX. The
+	// spread stays under the 15% drawdown limit end-to-end (5933 vs 5100 is
+	// ~14.0%) so no ordering of these calls can spuriously trip the latch —
+	// the only thing under test here is the ratchet, not the drawdown block.
 	equities := make([]float64, n)
 	maxEquity := 0.0
 	for i := 0; i < n; i++ {
@@ -309,7 +440,7 @@ func TestHalt_ConcurrentEvaluateEntryNoRace(t *testing.T) {
 			maxEquity = equities[i]
 		}
 	}
-	reader := &sequencedHaltReader{equities: equities}
+	reader := &indexedHaltReader{equities: equities}
 	g := NewCoilLiveHaltGuard(cfg, reader) // ONE shared guard: exercises g.mu for real
 
 	var wg sync.WaitGroup
@@ -318,7 +449,8 @@ func TestHalt_ConcurrentEvaluateEntryNoRace(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			errs[idx] = g.EvaluateEntry(context.Background())
+			ctx := context.WithValue(context.Background(), indexedHaltEquityKey{}, idx)
+			errs[idx] = g.EvaluateEntry(ctx)
 		}(i)
 	}
 	wg.Wait()
