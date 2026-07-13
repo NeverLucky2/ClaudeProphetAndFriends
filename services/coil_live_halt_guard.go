@@ -190,20 +190,87 @@ func coilStateDirStatable(dir string) error {
 	return nil
 }
 
-// CoilStateDirStatable is the exported form of coilStateDirStatable, meant to
-// be called from cmd/bot/main.go at ARM TIME — before NewCoilLiveHaltGuard is
-// even constructed — so a misconfigured non-default COIL_LIVE_STATE_DIR
-// fails loudly at startup (logger.Fatalf) instead of silently blocking every
-// live entry with nothing but a repeating log line to explain why. The
-// default StateDir (the database's own directory) is always created at
-// startup and so is never affected by this check; this exists for the
-// non-default case. Deliberately does NOT create the directory if it is
-// missing — see coilStateDirStatable's doc comment: resurrecting a vanished
-// StateDir would silently drop whatever latch/kill state used to live there
-// across a restart, which is the exact fail-open a previous review round
-// closed.
-func CoilStateDirStatable(dir string) error {
-	return coilStateDirStatable(dir)
+// coilHaltWriteProbeFileName is the throwaway file CoilStateDirWritable
+// writes-then-removes to prove StateDir is actually writable, not just
+// statable. Named distinctly from the three real state files so it can never
+// collide with coilHaltFileExists/readPersistedHighWater's notion of
+// "present" for the kill switch, latch, or high-water mark.
+const coilHaltWriteProbeFileName = "coil_live_write_probe.tmp"
+
+// coilStateDirWriteProbeFunc performs the probe write inside
+// CoilStateDirWritable. It is atomicWriteFile in production — always, with
+// exactly one writer (the var initializer below; nothing else in production
+// code reassigns it). Tests in this package (white-box) may temporarily swap
+// it to deterministically simulate a denied probe write without depending on
+// OS-specific permission/ACL behavior, which is unreliable on Windows for
+// this exact scenario — the same rationale as testPersistFailure above,
+// applied here because CoilStateDirWritable is a package-level function with
+// no guard instance (and therefore no struct field) to hang a test hook off
+// of at arm time, before any guard is constructed.
+var coilStateDirWriteProbeFunc = atomicWriteFile
+
+// CoilStateDirWritable is the exported ARM-TIME check, called from
+// cmd/bot/main.go before NewCoilLiveHaltGuard is even constructed, so a
+// misconfigured or unwritable COIL_LIVE_STATE_DIR fails loudly at startup
+// (logger.Fatalf) instead of silently degrading every live entry with
+// nothing but a repeating log line to explain why.
+//
+// This closes the hole a stat-only check leaves open: a directory can be
+// perfectly statable — exists, is a directory — and still be unwritable (a
+// full disk, a read-only remount, an ACL change). The old CoilStateDirStatable
+// name is gone because a stat alone is no longer what arm time trusts. The
+// failure loop a stat-only check invited: StateDir goes unwritable while the
+// bot is running -> persistDegraded correctly trips and blocks new entries,
+// telling the operator to "fix StateDir and restart the process" -> the
+// operator restarts WITHOUT fixing the disk (the message invited exactly
+// that) -> the new process starts with persistDegraded=false and hwmMem=0,
+// the stat-only check passes because the dir still stats fine, and the guard
+// resumes measuring drawdown against a high-water mark that stopped
+// ratcheting the moment the old process degraded — stale and LOWER than the
+// true peak, so a real drawdown reads as a small one and an entry that
+// should block gets allowed. An unwritable StateDir must refuse to BOOT
+// rather than silently resume from stale state; booting into a state the
+// guard cannot persist is the fail-open this closes.
+//
+// First runs coilStateDirStatable (the existing empty-path / stat-error /
+// not-a-directory checks — kept as-is, the probe below is an ADDITION, not a
+// replacement) and returns immediately on failure, before ever touching the
+// filesystem for a write. Only once that passes does this write a probe file
+// via atomicWriteFile — the SAME temp-file-then-rename mechanism the real
+// persists (writeHighWater, tripLatch, fallbackKillFile) use, not a bare
+// os.Create — so the probe exercises the actual write path, then removes it.
+// Any failure to write the probe is returned as an error for main.go's
+// existing logger.Fatalf to act on: fail closed, refuse to start.
+//
+// Deliberately does NOT create StateDir if it is missing — coilStateDirStatable
+// already rejects that case above before any write is attempted, and even
+// the probe write's call into atomicWriteFile (which does its own
+// os.MkdirAll) is therefore only ever reached when StateDir already exists,
+// so it can never resurrect a vanished directory. See coilStateDirStatable's
+// doc comment: resurrecting a vanished StateDir would silently drop whatever
+// latch/kill state used to live there across a restart, which is the exact
+// fail-open a previous review round closed and this one must not reopen.
+//
+// A failure to remove the probe file after a successful write is logged (if
+// a logger is supplied) but does NOT itself block boot — the write succeeded,
+// which is what this check exists to prove; a harmless leftover probe file
+// is not evidence StateDir is unwritable.
+func CoilStateDirWritable(dir string, logger *logrus.Logger) error {
+	if err := coilStateDirStatable(dir); err != nil {
+		return err
+	}
+	probePath := filepath.Join(dir, coilHaltWriteProbeFileName)
+	if err := coilStateDirWriteProbeFunc(dir, probePath, []byte("coil live halt write probe\n"), 0o600); err != nil {
+		return fmt.Errorf("StateDir %q is not writable: %w", dir, err)
+	}
+	if rmErr := os.Remove(probePath); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
+		if logger != nil {
+			logger.WithError(rmErr).WithField("probe_path", probePath).
+				Warn("coil live halt: write probe succeeded but removing the probe file afterward failed; " +
+					"the leftover file is harmless and does not block boot, but should be cleaned up manually")
+		}
+	}
+	return nil
 }
 
 func (g *CoilLiveHaltGuard) block(reason string) error {

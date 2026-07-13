@@ -270,16 +270,19 @@ func main() {
 	}
 	if cfg.EnableCoilLiveHalt {
 		// Validate BEFORE constructing the guard: a non-default
-		// COIL_LIVE_STATE_DIR pointing at a directory that does not exist
-		// would otherwise block 100% of live entries with nothing but a log
-		// line to explain it (coilStateDirStatable inside EvaluateEntry fails
-		// closed on every call, but silently — an operator staring at a dead
-		// bot has no reason to suspect a typo'd env var). Deliberately does
-		// NOT MkdirAll the directory here: see CoilStateDirStatable's doc
+		// COIL_LIVE_STATE_DIR pointing at a directory that does not exist, or
+		// one that stats fine but is not actually writable (full disk,
+		// read-only remount, ACL change), would otherwise let the bot boot and
+		// either block 100% of live entries with nothing but a log line to
+		// explain it, or — worse, for the unwritable-but-statable case —
+		// silently resume measuring drawdown against a stale, no-longer-
+		// ratcheting high-water mark (see CoilStateDirWritable's doc comment
+		// for the exact restart failure loop this closes). Deliberately does
+		// NOT MkdirAll the directory here: see CoilStateDirWritable's doc
 		// comment for why that would resurrect a vanished dir and drop a
 		// latch across a restart.
-		if err := services.CoilStateDirStatable(coilHaltStateDir); err != nil {
-			logger.Fatalf("Coil live drawdown halt: COIL_LIVE_STATE_DIR %q is not usable (fail closed at startup rather than silently blocking every live entry): %v", coilHaltStateDir, err)
+		if err := services.CoilStateDirWritable(coilHaltStateDir, logger); err != nil {
+			logger.Fatalf("Coil live drawdown halt: COIL_LIVE_STATE_DIR %q is not usable (fail closed at startup rather than booting into stale drawdown state): %v", coilHaltStateDir, err)
 		}
 		coilHalt := services.NewCoilLiveHaltGuard(
 			services.CoilLiveHaltConfig{

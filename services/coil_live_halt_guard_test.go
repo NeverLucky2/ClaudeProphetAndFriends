@@ -726,6 +726,89 @@ func TestHalt_FailedTripLatchMarksDegradedAndKeepsBlocking(t *testing.T) {
 	}
 }
 
+// N-4: the ARM-TIME check must prove StateDir is actually WRITABLE, not just
+// statable. A directory can stat perfectly fine (exists, is a directory) and
+// still refuse every write — full disk, read-only remount, ACL change. The
+// old stat-only check let the bot boot in exactly that state and silently
+// resume measuring drawdown from a high-water mark that had stopped
+// ratcheting: this pins the happy path (a normal writable temp dir arms
+// cleanly via the real write-probe path, not a mock).
+func TestHalt_StateDirWriteProbeSucceedsOnWritableDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := CoilStateDirWritable(dir, nil); err != nil {
+		t.Fatalf("a normal writable temp dir must pass the write probe, got %v", err)
+	}
+}
+
+// N-4: the write probe must actually clean up after itself — no leftover
+// probe file on disk once CoilStateDirWritable returns successfully. A
+// probe that forgot to remove its own file would slowly litter StateDir and,
+// worse, would mean the "writable" conclusion was never really verified by
+// a full write-then-remove round trip.
+func TestHalt_StateDirWriteProbeLeavesNoFileBehind(t *testing.T) {
+	dir := t.TempDir()
+	if err := CoilStateDirWritable(dir, nil); err != nil {
+		t.Fatalf("write probe on a writable dir must succeed, got %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected no leftover files after a successful write probe, got %v", entries)
+	}
+}
+
+// N-4: a StateDir that is statable but unwritable must FAIL the arm-time
+// check — this is the exact hole the write probe closes. Deterministic and
+// cross-platform: rather than chmod/ACL tricks (unreliable on Windows), this
+// points StateDir at a path that is a FILE, which coilStateDirStatable's
+// existing not-a-directory check catches (belt) — and, independently,
+// exercises the probe's own write-failure branch directly by pointing the
+// probe write at a target inside a path component that is itself a file, so
+// os.CreateTemp/atomicWriteFile fails for a reason that has nothing to do
+// with the not-a-directory precondition already covered elsewhere. This
+// mirrors how testPersistFailure isolates EvaluateEntry's write-failure
+// branches elsewhere in this file: exercise the failure deterministically
+// without depending on OS-specific permission behavior.
+func TestHalt_StateDirWriteProbeFailsWhenUnwritable(t *testing.T) {
+	t.Run("PathIsAFileNotADirectory", func(t *testing.T) {
+		parent := t.TempDir()
+		notADir := filepath.Join(parent, "not-a-dir")
+		if err := os.WriteFile(notADir, []byte("x"), 0o644); err != nil {
+			t.Fatalf("write file: %v", err)
+		}
+		if err := CoilStateDirWritable(notADir, nil); err == nil {
+			t.Fatal("a StateDir that is a file, not a directory, must fail the arm-time check, got nil")
+		}
+	})
+
+	// Exercises the write-probe branch itself (not the earlier stat check):
+	// StateDir stats fine as a real, existing, writable directory —
+	// coilStateDirStatable passes cleanly — but the probe write is injected
+	// to fail, deterministically simulating the exact scenario this finding
+	// is about (a full disk, read-only remount, or ACL change denying the
+	// write despite the dir statting fine). Mirrors testPersistFailure's
+	// pattern above: an injected failure hook instead of relying on
+	// OS-specific permission behavior, which is unreliable on Windows.
+	t.Run("InjectedProbeWriteFailure", func(t *testing.T) {
+		dir := t.TempDir() // a completely normal, writable, statable directory
+		orig := coilStateDirWriteProbeFunc
+		coilStateDirWriteProbeFunc = func(_, _ string, _ []byte, _ os.FileMode) error {
+			return errors.New("injected: simulated denied write probe")
+		}
+		defer func() { coilStateDirWriteProbeFunc = orig }()
+
+		err := CoilStateDirWritable(dir, nil)
+		if err == nil {
+			t.Fatal("an injected write-probe failure must fail the arm-time check even on an otherwise-writable dir, got nil")
+		}
+		if !strings.Contains(err.Error(), "not writable") {
+			t.Fatalf("expected the error to say the dir is not writable, got %q", err.Error())
+		}
+	})
+}
+
 // N-2/N-1: Status() must surface the persist-degraded state so an operator
 // looking at a guard that blocks everything can see WHY, rather than staring
 // at a rail that refuses every entry with no explanation. Equity is pinned
