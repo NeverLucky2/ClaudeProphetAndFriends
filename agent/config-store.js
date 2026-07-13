@@ -940,14 +940,48 @@ function updateSandbox(accountId, updater) {
 
 // ── Accounts ───────────────────────────────────────────────────────
 
+const ALPACA_PAPER_URL = 'https://paper-api.alpaca.markets';
+const ALPACA_LIVE_URL = 'https://api.alpaca.markets';
+
+// resolveAccountMode is the single source of truth for an account's
+// paper-vs-live identity. baseUrl and the paper boolean are two independent
+// claims about whether real money is at stake; if they contradict, we cannot
+// know which is right, and guessing wrong trades real money under a "paper"
+// label. Fails closed: contradiction or unknown host throws.
+export function resolveAccountMode({ baseUrl, paper }) {
+  const isPaper = paper !== false;
+  const raw = (baseUrl || '').trim();
+  if (!raw) return { baseUrl: isPaper ? ALPACA_PAPER_URL : ALPACA_LIVE_URL, paper: isPaper };
+
+  let host;
+  try {
+    host = new URL(raw).host.toLowerCase();
+  } catch {
+    throw new Error(`Account baseUrl is not a valid URL: ${raw}`);
+  }
+
+  const urlIsPaper = host === 'paper-api.alpaca.markets';
+  const urlIsLive = host === 'api.alpaca.markets';
+  if (!urlIsPaper && !urlIsLive) {
+    throw new Error(`Account baseUrl has an unrecognized host: ${host} (want paper-api.alpaca.markets or api.alpaca.markets)`);
+  }
+  if (urlIsPaper !== isPaper) {
+    throw new Error(
+      `Account mode mismatch: paper=${isPaper} but baseUrl ${raw} is ${urlIsPaper ? 'PAPER' : 'LIVE'}. ` +
+      `Refusing to save an account whose label contradicts its endpoint.`);
+  }
+  return { baseUrl: raw, paper: isPaper };
+}
+
 export async function addAccount({ name, publicKey, secretKey, baseUrl, paper }) {
   if (!publicKey || !secretKey) throw new Error('publicKey and secretKey are required');
+  const mode = resolveAccountMode({ baseUrl, paper });
   const id = crypto.randomUUID().slice(0, 8);
   const account = {
     id,
     name: name || `Account ${_config.accounts.length + 1}`,
-    baseUrl: baseUrl || (paper ? 'https://paper-api.alpaca.markets' : 'https://api.alpaca.markets'),
-    paper: paper !== false,
+    baseUrl: mode.baseUrl,
+    paper: mode.paper,
     createdAt: new Date().toISOString(),
   };
   _config.accounts.push(account);
@@ -969,8 +1003,18 @@ export async function updateAccount(id, { name, baseUrl, paper, publicKey, secre
   const account = _config.accounts.find(a => a.id === id);
   if (!account) throw new Error('Account not found');
   if (name !== undefined && name.trim()) account.name = name.trim();
-  if (baseUrl !== undefined) account.baseUrl = baseUrl.trim() || (account.paper ? 'https://paper-api.alpaca.markets' : 'https://api.alpaca.markets');
-  if (paper !== undefined) account.paper = paper;
+
+  // Resolve baseUrl + paper together. Reading either in isolation is what let
+  // them drift apart: the old code defaulted baseUrl from the PREVIOUS paper
+  // value, then overwrote paper on the next line.
+  if (baseUrl !== undefined || paper !== undefined) {
+    const mode = resolveAccountMode({
+      baseUrl: baseUrl !== undefined ? baseUrl : account.baseUrl,
+      paper: paper !== undefined ? paper : account.paper,
+    });
+    account.baseUrl = mode.baseUrl;
+    account.paper = mode.paper;
+  }
 
   const hasPk = publicKey !== undefined && publicKey !== '';
   const hasSk = secretKey !== undefined && secretKey !== '';
