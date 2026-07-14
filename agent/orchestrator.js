@@ -194,9 +194,14 @@ export class AgentOrchestrator extends EventEmitter {
       ENABLE_PROPHET_DEFENSIVE: defensiveProphetEnabled ? 'true' : 'false',
       ...candidateWarmerFlags(resolvedAgent?.strategyId),
       // Bear-regime behavior is a per-strategy property, not a machine-wide one.
-      // Live Coil halts below SPY's 200-SMA; paper Coil half-sizes. Setting it
-      // explicitly stops either bot inheriting the other's mode from a shared .env.
-      MEANREV_BEAR_MODE: resolvedAgent?.strategyId === COIL_LIVE_STRATEGY_ID ? 'halt' : 'halfsize',
+      // Live Coil is PINNED to 'halt' below SPY's 200-SMA — deliberate, and not
+      // operator-overridable via a shared .env (real money; no case for "keep
+      // learning" in a sustained bear). Every other strategy (paper Coil, etc.)
+      // keeps the operator's own MEANREV_BEAR_MODE from .env if one is set —
+      // note env already carries it via the ...process.env spread above, so this
+      // branch just needs to NOT clobber it — falling back to 'halfsize' only
+      // when the operator hasn't set anything.
+      MEANREV_BEAR_MODE: resolvedAgent?.strategyId === COIL_LIVE_STRATEGY_ID ? 'halt' : (process.env.MEANREV_BEAR_MODE || 'halfsize'),
     };
 
     const binaryName = process.platform === 'win32' ? 'prophet_bot.exe' : 'prophet_bot';

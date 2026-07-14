@@ -65,3 +65,42 @@ test('live Coil description matches its rules file', () => {
 test('paper Coil rules are untouched', () => {
   assert.equal(byId['mean-rev-rsi2'].rulesFile, 'TRADING_RULES_MEANREV.md');
 });
+
+// The stale-literal test above forbids specific digits, not the underlying
+// CONCEPT — a regression that reworded the file back to "max 10 positions"
+// (a number that isn't the paper "14" the other test guards against) would
+// sail through undetected. Assert the actual live skip conditions the agent
+// is supposed to act on are present verbatim, not just that no wrong number
+// appears somewhere.
+test('live rules state the actual live position-count skip conditions', () => {
+  const rules = readFileSync('TRADING_RULES_MEANREV_LIVE.md', 'utf8');
+  assert.match(
+    rules,
+    /Total open Coil positions < 7\?/,
+    'live rules must retain the pre-trade checklist item enforcing the 7-position cap'
+  );
+  assert.match(
+    rules,
+    /`coil_open_position_count`\s*≥\s*7/,
+    'live rules must retain the Step 3 "≥ 7 open positions" entry-skip condition'
+  );
+});
+
+// Defect: Heartbeat Step 1.5 told the agent total_deployed_pct expands "into
+// capital other strategies leave idle" — false in a Coil-only live account,
+// and it reintroduces the exact shared-account courtesy-limit rationale the
+// Risk Management section explicitly disclaims ("None of that is true
+// here"). Guard against this framing creeping back in anywhere in the file.
+test('live rules do not reintroduce shared-account / idle-capital framing', () => {
+  const rules = readFileSync('TRADING_RULES_MEANREV_LIVE.md', 'utf8');
+  assert.doesNotMatch(
+    rules,
+    /other strategies leave idle/i,
+    'live rules must not imply Coil borrows idle capital from other strategies that do not exist in this account'
+  );
+  assert.doesNotMatch(
+    rules,
+    /deployment across all strategies/i,
+    'live rules must not frame total_deployed_pct as a cross-strategy figure'
+  );
+});
