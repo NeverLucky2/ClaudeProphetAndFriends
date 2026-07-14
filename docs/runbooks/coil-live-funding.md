@@ -51,37 +51,34 @@ unset or `<=0` blocks **every** entry, forever, with no drawdown having
 occurred at all. If you enable the halt and forget the baseline, Coil simply
 never buys anything — that is the guard working correctly, not a bug.
 
-### ⚠️ This flag is fleet-wide, not sandbox-scoped
+### `ENABLE_COIL_LIVE_HALT` is sandbox-scoped
 
-Unlike `TURTLE_SCHEDULER_ENABLED` / `ENABLE_PROPHET_DEFENSIVE`, which
-`agent/orchestrator.js` explicitly gates by `strategyId` before spawning each
-sandbox's Go bot, **`ENABLE_COIL_LIVE_HALT`, `COIL_LIVE_DRAWDOWN_PCT`, and
-`COIL_LIVE_BASELINE_USD` are not gated at all.** `startGoBackend()` builds
-each spawned bot's env as `{ ...process.env, ... }` — the whole shared root
-`.env` — with no per-strategy override for these three flags. Setting them
-in the shared `.env` arms `CoilLiveHaltGuard` in **every** sandbox's Go bot
-process (Prophet, Turtle, Drift, paper Coil, and live Coil alike), each one
-checked against **that bot's own account equity**.
+Like `TURTLE_SCHEDULER_ENABLED` / `ENABLE_PROPHET_DEFENSIVE`,
+`agent/orchestrator.js` gates `ENABLE_COIL_LIVE_HALT` by `strategyId` before
+spawning each sandbox's Go bot (`agent/coil-halt-flags.js`, unit-tested in
+`agent/coil-halt-flags.test.mjs`). `startGoBackend()` still builds each
+spawned bot's env as `{ ...process.env, ... }`, but `ENABLE_COIL_LIVE_HALT`
+is set explicitly afterward: only the bot whose resolved `strategyId` is
+`COIL_LIVE_STRATEGY_ID` (`mean-rev-rsi2-live`) receives the operator's own
+`.env` value; **every other bot — Prophet, Turtle, Drift, paper Coil —
+receives a hard `'false'`**, regardless of what the shared root `.env` says.
+Setting `ENABLE_COIL_LIVE_HALT=true` in the shared `.env` now arms
+`CoilLiveHaltGuard` **only** in the live-Coil sandbox's Go bot process; it
+cannot leak into any other bot.
 
-In practice this is bounded, not catastrophic:
-- `COIL_LIVE_STATE_DIR` defaults to that sandbox's own `DATABASE_PATH`
-  directory, so state files never collide across bots.
-- The baseline only **floors** the high-water mark; on a healthy paper
-  account well above $5,000 it will not fire immediately.
-
-But it is a real behavior change nobody asked for: **every other paper bot
-now also carries a silent −15% high-water halt on its own account** that
-did not exist before. If Prophet, Turtle, or Drift's paper equity genuinely
-drops 15% from its post-flip peak, its entries will block too — a rail
-those agents were never designed around. Know this before you flip the flag:
-you are not arming "just live Coil," you are arming a fleet-wide backstop
-that happens to also gate live Coil. There is no way in the current code to
-scope it to one sandbox.
+`COIL_LIVE_DRAWDOWN_PCT` and `COIL_LIVE_BASELINE_USD` still ride through via
+the `...process.env` spread for every bot, same as before — this is
+intentionally left alone because they're inert whenever
+`ENABLE_COIL_LIVE_HALT` is `'false'` (`CoilLiveHaltGuard` never activates,
+so the values are never read). `COIL_LIVE_STATE_DIR` likewise rides through
+unscoped and defaults to each sandbox's own `DATABASE_PATH` directory when
+unset, so state files still can't collide across bots even without explicit
+scoping.
 
 Practical upshot for the verification step below: **check the LIVE Coil
-sandbox's own Go console specifically** — every sandbox will show the ARMED
-line, so seeing it somewhere is not enough; seeing it for the live-Coil
-sandbox is what matters.
+sandbox's own Go console specifically** — the ARMED line will now appear
+there and nowhere else, but the check is still worth doing explicitly rather
+than assuming.
 
 ---
 
@@ -142,9 +139,9 @@ sub-$25k PDT rule does not bind.
   registered globally in `config-store.js` (`COIL_LIVE_STRATEGY_ID` from
   `agent/coil-strategy-ids.js`) — you're pointing at an existing strategy
   entry, not inventing one.
-- Set on this account (see the fleet-wide warning above — these three env
-  vars are not actually scoped to a single sandbox, but this is the
-  intent):
+- Set in the shared root `.env` (see above — `ENABLE_COIL_LIVE_HALT` is
+  sandbox-scoped by `agent/coil-halt-flags.js`, so this only arms the halt
+  in the live-Coil sandbox's bot):
   ```
   ENABLE_COIL_LIVE_HALT=true
   COIL_LIVE_BASELINE_USD=5000
@@ -173,10 +170,10 @@ restart the sandbox, and re-check before letting it place a single order.
 ## 4. Verify the halt is actually armed BEFORE funding
 
 Start the live sandbox's bot and read **its own** Go console in the
-dashboard (or its stdout, tagged `[go:<port>]` in the orchestrator log).
-Remember every sandbox will show similar lines once the flag is set
-fleet-wide (see above) — confirm it specifically for this sandbox. You are
-looking for exactly these two lines, in this order:
+dashboard (or its stdout, tagged `[go:<port>]` in the orchestrator log). The
+ARMED line will appear only for the live-Coil sandbox — confirm it
+specifically for this sandbox anyway rather than assuming. You are looking
+for exactly these two lines, in this order:
 
 ```
 level=warning msg="Alpaca trading mode resolved" alpaca_base_url=https://api.alpaca.markets alpaca_mode="LIVE — REAL MONEY"

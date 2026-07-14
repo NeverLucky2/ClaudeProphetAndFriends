@@ -8,6 +8,7 @@ import axios from 'axios';
 
 import { AgentHarness } from './harness.js';
 import { candidateWarmerFlags } from './candidate-warmer-flags.js';
+import { coilLiveHaltFlags } from './coil-halt-flags.js';
 import { goLog } from './go-log.js';
 import { COIL_LIVE_STRATEGY_ID } from './coil-strategy-ids.js';
 import {
@@ -193,6 +194,13 @@ export class AgentOrchestrator extends EventEmitter {
       TURTLE_SCHEDULER_ENABLED: turtleSchedulerEnabled ? 'true' : 'false',
       ENABLE_PROPHET_DEFENSIVE: defensiveProphetEnabled ? 'true' : 'false',
       ...candidateWarmerFlags(resolvedAgent?.strategyId),
+      // Coil-live drawdown halt: same per-sandbox gating as Turtle/defensive-
+      // Prophet above. Only live Coil may receive the operator's
+      // ENABLE_COIL_LIVE_HALT value; every other bot gets an explicit
+      // 'false' so it can't inherit a shared-.env 'true' and arm a
+      // real-money halt keyed to a baseline/state dir meant for a different
+      // account. See agent/coil-halt-flags.js (unit-tested in isolation).
+      ...coilLiveHaltFlags(resolvedAgent?.strategyId, process.env.ENABLE_COIL_LIVE_HALT),
       // Bear-regime behavior is a per-strategy property, not a machine-wide one.
       // Live Coil is PINNED to 'halt' below SPY's 200-SMA — deliberate, and not
       // operator-overridable via a shared .env (real money; no case for "keep
