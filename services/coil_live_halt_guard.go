@@ -90,7 +90,9 @@ type CoilLiveHaltConfig struct {
 // kill-file fallback), the flag is set under g.mu and EvaluateEntry checks
 // it FIRST, before anything else, and blocks every subsequent entry for the
 // life of the process. It is deliberately NOT auto-cleared — recovery is an
-// operator action (fix StateDir, restart the process) — and it is safe to be
+// operator action (fix StateDir, RECONCILE THE HIGH-WATER MARK against the
+// account's true peak — it stopped ratcheting while degraded — then restart
+// the process) — and it is safe to be
 // this aggressive because EvaluateEntry is only ever consulted for NEW
 // entries: a degraded guard cannot trap an already-open position, since
 // exits never route through it.
@@ -581,7 +583,7 @@ func (g *CoilLiveHaltGuard) EvaluateEntry(ctx context.Context) error {
 	// guarantee it could act on. This is sticky for the life of the process
 	// by design: recovery is an operator action (fix StateDir, restart).
 	if g.persistDegraded {
-		return g.block("cannot persist halt state — failing closed (a prior write to StateDir failed; fix StateDir and restart the process to clear this)")
+		return g.block("cannot persist halt state — failing closed (a prior write to StateDir failed; fix StateDir, RECONCILE THE HIGH-WATER MARK against the account's true peak, then restart the process to clear this)")
 	}
 
 	if g.cfg.BaselineUSD <= 0 {
@@ -676,7 +678,7 @@ func (g *CoilLiveHaltGuard) Status(ctx context.Context) CoilHaltStatus {
 	hwmMemSnapshot, degraded := g.snapshotMu()
 	var reasons []string
 	if degraded {
-		reasons = append(reasons, "cannot persist halt state — degraded (a prior write to StateDir failed; fix StateDir and restart the process)")
+		reasons = append(reasons, "cannot persist halt state — degraded (a prior write to StateDir failed; fix StateDir, RECONCILE THE HIGH-WATER MARK against the account's true peak, then restart the process)")
 	}
 	if g.cfg.BaselineUSD <= 0 {
 		reasons = append(reasons, "baseline not configured")
