@@ -74,7 +74,10 @@ export function renderMarkdown(digest) {
   return lines.join('\n') + '\n';
 }
 
-const STRATEGY_KIND = {
+// Exported (not just module-local) so agent/coil-strategy-registration.test.mjs
+// can assert every COIL_STRATEGY_IDS entry maps to 'coil' here — this is one of
+// the five strategy-id registries that test enforces conformance across.
+export const STRATEGY_KIND = {
   'trend': 'turtle',
   ...Object.fromEntries(COIL_STRATEGY_IDS.map(id => [id, 'coil'])),
 };
