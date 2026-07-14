@@ -45,7 +45,7 @@ func AgentForStrategy(strategyId string) AgentSource {
 	switch strategyId {
 	case "trend":
 		return AgentTrend
-	case "mean-rev-rsi2":
+	case "mean-rev-rsi2", "mean-rev-rsi2-live":
 		return AgentMeanRev
 	case "earnings-drift":
 		return AgentDrift

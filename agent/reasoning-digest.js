@@ -5,6 +5,7 @@
 
 import path from 'node:path';
 import nodeFs from 'node:fs/promises';
+import { COIL_STRATEGY_IDS } from './coil-strategy-ids.js';
 
 // parseTurtleReasoning normalizes /api/v1/turtle/status → array of
 // { ticker, line, qualified, taken, blockedBy }. Soft-empty on any missing shape.
@@ -73,7 +74,10 @@ export function renderMarkdown(digest) {
   return lines.join('\n') + '\n';
 }
 
-const STRATEGY_KIND = { 'trend': 'turtle', 'mean-rev-rsi2': 'coil' };
+const STRATEGY_KIND = {
+  'trend': 'turtle',
+  ...Object.fromEntries(COIL_STRATEGY_IDS.map(id => [id, 'coil'])),
+};
 
 // runReasoningDigestForSandbox pulls the right Go endpoint for the agent's
 // strategy, builds the per-agent digest, and writes

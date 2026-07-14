@@ -500,7 +500,8 @@ func TestGuard_NWayOverlap_BlocksAnyOtherAgent(t *testing.T) {
 func TestAgentForStrategy(t *testing.T) {
 	cases := map[string]AgentSource{
 		"v2-options": AgentMain, "unknown-strategy": AgentMain,
-		"trend": AgentTrend, "mean-rev-rsi2": AgentMeanRev, "earnings-drift": AgentDrift,
+		"trend": AgentTrend, "mean-rev-rsi2": AgentMeanRev, "mean-rev-rsi2-live": AgentMeanRev,
+		"earnings-drift": AgentDrift,
 		"": AgentMain, "unknown-xyz": AgentMain,
 	}
 	for strat, want := range cases {
