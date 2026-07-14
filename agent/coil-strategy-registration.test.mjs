@@ -5,6 +5,8 @@ import { resolveAllowedTools, STRATEGY_TOOL_ALLOWLISTS } from './tool-allowlists
 import { PREFLIGHT_REGISTRY } from './preflight.js';
 import { candidateWarmerFlags } from './candidate-warmer-flags.js';
 import { STRATEGY_KIND } from './reasoning-digest.js';
+import { AGENTS as TRADE_GRADES_AGENTS } from '../scripts/trade-grades.mjs';
+import { AGENTS as GRADUATION_REPORT_AGENTS } from '../scripts/graduation-report.mjs';
 
 // Guard against silent vacuous-pass: if COIL_STRATEGY_IDS were ever emptied
 // (or had an id renamed away), the `for` loop below would register ZERO
@@ -38,6 +40,29 @@ for (const id of COIL_STRATEGY_IDS) {
 
   test(`${id}: maps to 'coil' in the reasoning-digest STRATEGY_KIND registry`, () => {
     assert.equal(STRATEGY_KIND[id], 'coil', `${id} missing or wrong kind in reasoning-digest.js STRATEGY_KIND`);
+  });
+
+  // These two are the MEASUREMENT registries, not runtime ones — an id missing here
+  // doesn't unlock extra tools, it silently makes that id's trades invisible to
+  // grading/graduation. For a funded live account this is just as dangerous as a
+  // fail-open runtime registry: a real-money experiment that grades as zero trades.
+  test(`${id}: resolves in scripts/trade-grades.mjs's Coil AGENTS entry`, () => {
+    const coil = TRADE_GRADES_AGENTS.find((a) => a.agentName === 'Coil');
+    assert.ok(coil, "trade-grades.mjs AGENTS has no 'Coil' entry at all");
+    assert.ok(
+      Array.isArray(coil.strategyIds) && coil.strategyIds.includes(id),
+      `${id} missing from trade-grades.mjs's Coil strategyIds — its closed trades would never be graded`,
+    );
+  });
+
+  test(`${id}: resolves in scripts/graduation-report.mjs's Coil AGENTS entry`, () => {
+    const coil = GRADUATION_REPORT_AGENTS.find((a) => a.name === 'Coil');
+    assert.ok(coil, "graduation-report.mjs AGENTS has no 'Coil' entry at all");
+    const ids = Array.isArray(coil.strategyId) ? coil.strategyId : [coil.strategyId];
+    assert.ok(
+      ids.includes(id),
+      `${id} missing from graduation-report.mjs's Coil strategyId(s) — it would never graduate`,
+    );
   });
 }
 

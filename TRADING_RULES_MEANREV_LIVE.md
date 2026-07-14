@@ -212,6 +212,14 @@ For every entry:
 
 The −7% hard stop is set on the `place_managed_position` call itself; the agent does not need to compute stop_distance — risk is bounded at the broker.
 
+**Honest note on sizing fidelity at the $5k stage (fidelity caveat, not a safety one — do not "fix" this by changing the rule).** At $5,000, 12% of portfolio is $600, and the `floor()` in step 7 produces real distortions:
+
+- Any S&P name priced **above ~$600/share is permanently unenterable** at this account size — `floor(600 / price)` is 0 shares, skipped by step 8, every time, for as long as the account stays at $5k.
+- $300–600 names enter at exactly **1 share**, which is 6–12% of the account depending on price — "12% equal-weight" is not actually equal-weight in practice for pricier names; the higher the price, the further the realized weight falls below the 12% target.
+- Notably, **COST (~$1,005/share) — the single fat winner in the 26-trade paper record — cannot be traded at all at $5k.** The live sample this stage is measuring is therefore drawn from a cheaper-name subset of the universe than the paper record it exists to validate, not the full universe.
+
+This errs toward *less* risk (skipped entries, not oversized ones), so it is not a safety concern — it is a fidelity concern for interpreting the live results against the paper record. It self-corrects at the $10k ramp (12% of $10k = $1,200, so a $310 stock buys `floor(1200/310) = 3` shares ≈ 9.3%, much closer to target, and COST becomes enterable). Do not change the sizing rule to compensate for this at $5k — see the runbook's funding step 5 for the same note in the funding context.
+
 ---
 
 ## Risk Management — Portfolio Level

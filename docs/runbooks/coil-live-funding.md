@@ -240,6 +240,14 @@ Sizing is `shares = floor(position_dollars / last_close)`, with
   expected distortion at $5k, not a bug. It self-corrects at the $10k ramp
   (12% of $10k = $1,200, so the same $310 stock buys `floor(1200/310) = 3`
   shares ≈ 9.3%, much closer to target).
+- **This is a fidelity caveat, not a safety one — it errs toward less risk
+  (skipped entries), never more.** But it does mean the live sample is drawn
+  from a cheaper-name subset of the universe than the record it exists to
+  validate: **COST (~$1,005/share) — the single fat winner in the 26-trade
+  paper record — cannot be traded at all at the $5k stage.** Read the full
+  note in `TRADING_RULES_MEANREV_LIVE.md`'s Position Sizing section before
+  interpreting early live results against the paper baseline. Do not change
+  the sizing rule to compensate — this self-corrects at $10k.
 
 ### Bounded worst case
 
@@ -360,7 +368,11 @@ missed some peak." The fix is a procedure the operator owns:
 
 ---
 
-## Reconciliation covers opens only — do not let a green report create false comfort
+## ACCEPTED RISK: reconciliation does not cover the stuck-exit path
+
+**This is a known, deliberate gap, not an oversight — read this section
+before funding, and follow the daily mitigation checklist below for as long
+as the gap is open.**
 
 `agent/trade-reconciliation.js` runs per-sandbox; the live sandbox gets its
 own `data/reconciliation/<sandboxId>/` directory automatically, no wiring
@@ -371,20 +383,76 @@ required. But its own `SCOPE_NOTE`, stamped on every report (verbatim,
 > live position state — a logged-success close that did not execute will
 > not be caught here."
 
-A logged-success close that never actually executed at the broker is
-**exactly** the stuck-exit failure this whole live-funding effort is
-supposed to guard against, and the existing reconciliation **does not
-detect it.** A clean reconciliation report tells you entries matched the
-broker. It says nothing about whether a position you believe is closed
-actually is.
+**What reconciliation verifies:** order PLACEMENTS — opens and adds. **What
+it does NOT verify:** closes/exits, or live position state generally.
 
-This is **not a $5k blocker** — the −7% broker-side stop bounds any single
-stuck position, which is what makes the $5k stage survivable even with this
-gap open. It **is a blocker for scaling to $10k**, and it is real,
-unstarted work: extending reconciliation to compare the bot's believed
-closes against live broker position state. Track it as the top follow-up.
-Do not read a green reconciliation report as "exits are verified" — it
-verifies entries only.
+**Concrete failure this leaves open:** `CloseManagedPosition` cancels the
+−7% broker-side stop as part of closing out a position, the sell order
+itself then silently fails, and the bot marks the position CLOSED anyway.
+The result is a **real-money long with no stop and no manager** — the bot
+believes it is flat, the broker still holds the position, and nothing is
+watching it. A logged-success close that never actually executed at the
+broker is **exactly** this failure mode, and the existing reconciliation
+**does not detect it.** A clean reconciliation report tells you entries
+matched the broker. It says nothing about whether a position you believe is
+closed actually is.
+
+**The −15% drawdown halt does NOT help here.** The halt is an entry veto —
+it blocks *new* entries once equity falls 15% below its high-water mark. It
+is never consulted on a sell, and a stranded position (stopless, unmanaged)
+is not a new entry. This specific failure mode is entirely outside what the
+halt was built to catch.
+
+**Why this is accepted, not blocking, at this stage:** the live-funding
+design spec (`docs/superpowers/specs/2026-07-13-coil-live-funding-design.md`)
+names stuck-exit / failed-close detection **"the operator's primary
+objection to Alpaca, and the one risk that is actually engineerable,"** and
+lists **"the stuck-exit path is proven to work"** as one of three explicit
+success criteria for this stage — alongside positive live expectancy and an
+observed drawdown-halt trip. In other words: this stage exists partly to
+*exercise* this exact gap under real conditions, not to have already closed
+it. It is bounded by size: at $5k, a single stranded 12% position is ≈ a few
+hundred dollars — survivable, not catastrophic. **It IS a blocker for
+scaling to $10k** — extending reconciliation to compare the bot's believed
+closes against live broker position state is real, unstarted work, and is
+the top follow-up before any raise past $5k. Do not read a green
+reconciliation report as "exits are verified" — it verifies entries only.
+
+**Required mitigation until this is built:** a daily manual eyeball of the
+Alpaca positions page against the bot's open positions (see the Daily
+Operations Checklist below). This is not optional busywork — it is the only
+thing standing between a silently stranded position and it staying
+stranded, unmanaged, and un-stopped for days.
+
+---
+
+## Daily Operations Checklist (while the stuck-exit gap is open)
+
+Run this every trading day the live account is funded, until reconciliation
+is extended to cover closes (see the ACCEPTED RISK section above). This is
+the load-bearing mitigation for that gap, not a nice-to-have — skipping it
+means a silently stranded position could sit stopless and unmanaged for
+days before anyone notices.
+
+- [ ] **Open the Alpaca dashboard's live positions page directly** (not the
+      bot's dashboard, not the sandbox activity log — the broker's own
+      record of what it actually holds).
+- [ ] **Open the bot's own view of its live-Coil positions** (dashboard →
+      live sandbox → open positions, or `get_managed_positions` /
+      `get_positions` against the live account).
+- [ ] **Compare symbol-by-symbol.** Every symbol the bot believes it holds
+      must appear, at the same side and a consistent quantity, in the
+      broker's own list — and vice versa (a broker position the bot doesn't
+      know about is just as much a problem as one it wrongly closed).
+- [ ] **Any mismatch — broker holds something the bot thinks is closed, or
+      the bot holds something the broker doesn't — is exactly the failure
+      reconciliation cannot catch.** Treat it as the reconciliation rule's
+      own "reconciliation mismatch — operator review required" hard stop:
+      stop trusting the bot's position state for that symbol, and resolve it
+      by hand (manually place the missing stop, or manually close the
+      orphaned broker position) before the next scheduled 15:45 ET beat.
+- [ ] Note the check (clean or not) somewhere durable — even a one-line log
+      — so a gap in the daily habit itself is visible in hindsight.
 
 ---
 

@@ -284,9 +284,14 @@ func NewTradeGuard(positions positionLister, ts interfaces.TradingService, cfg T
 // allocationDollars is the intended spend; pass 0 when the dollar value is unknown
 // (capital-cap check is skipped).
 //
-// At most one tradingService.GetAccount() call is made per invocation: the result
-// is fetched lazily (only when daily-loss or sector-cap checks need it) and shared
-// between checks that need account context.
+// Account-fetch accounting: when the live-Coil halt is armed (g.halt != nil),
+// EvaluateEntry makes its own independent tradingService.GetAccount() call before
+// any other check runs. Separately, this method's own getAcct() closure fetches
+// the account at most ONCE per invocation — the result is cached lazily (only
+// fetched when daily-loss, sector-cap, or position-cap checks need it) and shared
+// between those checks. So an allowed buy makes at most two GetAccount() calls
+// total when the halt is armed (one from the halt, one from getAcct()), or at
+// most one when it isn't.
 func (g *TradeGuard) CheckBuy(ctx context.Context, agent AgentSource, symbol string, allocationDollars float64) error {
 	if agent == "" {
 		agent = AgentMain
