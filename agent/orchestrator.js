@@ -9,6 +9,7 @@ import axios from 'axios';
 import { AgentHarness } from './harness.js';
 import { candidateWarmerFlags } from './candidate-warmer-flags.js';
 import { goLog } from './go-log.js';
+import { COIL_LIVE_STRATEGY_ID } from './coil-strategy-ids.js';
 import {
   getSandbox,
   getSandboxes,
@@ -192,6 +193,10 @@ export class AgentOrchestrator extends EventEmitter {
       TURTLE_SCHEDULER_ENABLED: turtleSchedulerEnabled ? 'true' : 'false',
       ENABLE_PROPHET_DEFENSIVE: defensiveProphetEnabled ? 'true' : 'false',
       ...candidateWarmerFlags(resolvedAgent?.strategyId),
+      // Bear-regime behavior is a per-strategy property, not a machine-wide one.
+      // Live Coil halts below SPY's 200-SMA; paper Coil half-sizes. Setting it
+      // explicitly stops either bot inheriting the other's mode from a shared .env.
+      MEANREV_BEAR_MODE: resolvedAgent?.strategyId === COIL_LIVE_STRATEGY_ID ? 'halt' : 'halfsize',
     };
 
     const binaryName = process.platform === 'win32' ? 'prophet_bot.exe' : 'prophet_bot';

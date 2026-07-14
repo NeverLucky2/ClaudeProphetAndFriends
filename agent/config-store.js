@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 import { execSync } from 'child_process';
 import * as _credStore from './credential-store.js';
+import { COIL_LIVE_STRATEGY_ID } from './coil-strategy-ids.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -59,6 +60,10 @@ export function _setCredStoreForTests(mod) {
   _credStoreOverride = wrapper;
   return wrapper; // Return so tests can reassign their local credStore reference.
 }
+
+// Exposed for tests only.
+export const _internals = { defaultStrategies };
+
 function credStore() {
   return _credStoreOverride || _credStore;
 }
@@ -380,8 +385,16 @@ function defaultStrategies() {
     {
       id: 'mean-rev-rsi2',
       name: 'Mean Reversion (Connors RSI(2))',
-      description: 'RSI(2) oversold pullbacks within long-term uptrends. Curated S&P 500 large-cap universe; 5% per position; max 5 concurrent; 5-day timeout; -7% hard stop.',
+      description: 'RSI(2) oversold pullbacks within long-term uptrends. Curated S&P 500 large-cap universe; 6% per position; max 14 concurrent; 5-day timeout; -7% hard stop.',
       rulesFile: 'TRADING_RULES_MEANREV.md',
+      customRules: null,
+      createdAt: new Date().toISOString(),
+    },
+    {
+      id: COIL_LIVE_STRATEGY_ID,
+      name: 'Mean Reversion RSI(2) — LIVE',
+      description: 'REAL MONEY. Dedicated live Coil account. 12% per position; max 7 concurrent; 85% deploy ceiling; bear mode HALT; 5-day timeout; -7% hard stop; -15% high-water halt enforced in Go.',
+      rulesFile: 'TRADING_RULES_MEANREV_LIVE.md',
       customRules: null,
       createdAt: new Date().toISOString(),
     },
