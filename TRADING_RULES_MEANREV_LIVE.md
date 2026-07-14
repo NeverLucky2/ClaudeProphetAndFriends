@@ -246,7 +246,7 @@ The operator controls Coil's bear-regime behavior via the `MEANREV_BEAR_MODE` en
 | Mode | Behavior |
 |---|---|
 | `normal` | No adjustment — full size, normal entries |
-| `halfsize` (default) | Position size halved (effectively 3% per position). With the 14-position cap this is up to ~42% deployed. Agent keeps learning. |
+| `halfsize` | Position size halved (effectively 6% per position). With the 7-position cap this is up to ~42% deployed. Agent keeps learning. Not the live mode — see below. |
 | `halt` | Block all new entries. Existing positions continue to be managed by exit rules. |
 
 The live account runs `MEANREV_BEAR_MODE=halt`: **when SPY is below its 200-day
@@ -273,7 +273,7 @@ Before opening a new Coil entry, call `get_regime_gate_status` (or read from the
 | UNKNOWN | (no data) | fail-open 1.0× | Yes (less strict than Turtle — Coil is shorter-duration) |
 
 Application to Position Sizing:
-- The multiplier applies to `position_dollars` after the bear-regime multiplier but before the 6% hard cap clip.
+- The multiplier applies to `position_dollars` after the bear-regime multiplier but before the 12% hard cap clip.
 - If `block_new_entries=true`, skip the entry. Open Coil positions continue to be managed by exit rules.
 - Coil tolerates UNKNOWN regime data better than Turtle because positions are short-lived (max 5 trading days). Fail-open is acceptable.
 
@@ -331,7 +331,7 @@ For each open Coil position:
 
 Skip this step entirely if:
 - The Coil-segment circuit breaker tripped in Step 1
-- `coil_open_position_count` ≥ 14
+- `coil_open_position_count` ≥ 7
 - `total_deployed_pct` ≥ 85.0 (total account, per Step 1.5)
 - Econ blackout active
 - `MEANREV_BEAR_MODE=halt` and bear regime is active
@@ -342,9 +342,9 @@ Otherwise:
 1. Call `get_mean_reversion_candidates`. The response contains the pre-filtered, ranked candidate list sorted by `rsi_2` ascending (most oversold first).
 2. For each candidate where `entry_signal=true`:
    - Skip if Coil already holds this ticker (one position per ticker, no averaging down)
-   - Skip if total open Coil positions would exceed 14 after this entry
-   - Skip if **total account deployment** would exceed 85% after adding this entry's 6% (track your own just-placed entries within the beat: effective total = snapshot total + 6% × entries placed this beat)
-3. Compute position size per Position Sizing (apply bear-regime multiplier, then regime-gate multiplier, then 6% hard cap).
+   - Skip if total open Coil positions would exceed 7 after this entry
+   - Skip if **total account deployment** would exceed 85% after adding this entry's 12% (track your own just-placed entries within the beat: effective total = snapshot total + 12% × entries placed this beat)
+3. Compute position size per Position Sizing (apply bear-regime multiplier, then regime-gate multiplier, then 12% hard cap).
 4. Place the entry via `place_managed_position`:
    ```
    {
@@ -359,7 +359,7 @@ Otherwise:
    The take_profit at +10% is a backstop only. Primary exits are the RSI(2) > 70 / SMA-5 cross / 5-day timeout managed in Step 2.
 5. On fill: log entry with `entry_reason: "rsi2_oversold_within_uptrend"`, including `rsi_2`, `sma_200`, `sma_5`, `last_close`, and the computed `position_dollars`.
 
-Stop once 14 positions are open, or once adding another 6% would cross 85% total account deployment — whichever binds first — even if more candidates qualify.
+Stop once 7 positions are open, or once adding another 12% would cross 85% total account deployment — whichever binds first — even if more candidates qualify.
 
 ### Step 4: Heartbeat summary (always run)
 
@@ -380,7 +380,7 @@ Before every Coil entry:
 - [ ] `last_close` < `sma_5`?
 - [ ] `earnings_within_5d == false`?
 - [ ] No existing Coil position for this ticker?
-- [ ] Total open Coil positions < 14?
+- [ ] Total open Coil positions < 7?
 - [ ] Total account deployment < 85%?
 - [ ] Daily circuit breaker not triggered?
 - [ ] Regime gate not blocking new entries?
