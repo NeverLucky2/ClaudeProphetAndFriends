@@ -309,7 +309,7 @@ export async function writeDailyCostReport(projectRoot, date) {
 export class AnalysisScheduler extends EventEmitter {
   constructor(options = {}) {
     super();
-    this.model = options.model || 'anthropic/claude-sonnet-4-6';
+    this.model = options.model || 'anthropic/claude-sonnet-5';
     this.onEmergencyWake = options.onEmergencyWake || null;
     // Resolver for a live trading-bot URL — used to point analysis subagents
     // at a real Go bot port instead of the unbound TRADING_BOT_URL fallback.

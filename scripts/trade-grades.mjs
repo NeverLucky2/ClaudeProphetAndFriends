@@ -7,6 +7,7 @@ import {
 } from './managed-position-repair.mjs';
 import { toFrictionAction } from './trade-ledger.mjs';
 import { applyFriction, loadFrictionConfig } from './apply-friction.mjs';
+import { COIL_STRATEGY_IDS } from '../agent/coil-strategy-ids.js';
 import path from 'node:path';
 import nodeFs from 'node:fs/promises';
 
@@ -141,9 +142,17 @@ const ET_DAY = (s) => { const ms = parseManagedTimestamp(s); return Number.isFin
 
 // runForSandbox — build cards + deterministic report for one sandbox+agent and the given
 // ET date. frictionCfg is loaded once by the caller (null ⇒ fall back to stored realizedPnl).
-export async function runForSandbox({ projectRoot, sandboxId, dbPath, sandboxDir, agentId, agentName, date, frictionCfg, fs = nodeFs }) {
+export async function runForSandbox({ projectRoot, sandboxId, dbPath, sandboxDir, agentId, agentName, date, frictionCfg, strategyIds, fs = nodeFs }) {
   let positions; try { positions = readClosedManagedPositions(dbPath); } catch { return null; }
-  const closedToday = positions.filter((p) => ET_DAY(p.closedAt) === date);
+  let closedToday = positions.filter((p) => ET_DAY(p.closedAt) === date);
+  // strategyIds scopes a shared-account db (Prophet/Turtle/Coil/etc. can all tag
+  // rows via agent_strategy in the SAME managed_positions table when they share
+  // an Alpaca account) down to just this agent's own rows. Pass it when one
+  // logical agent trades under more than one agent_strategy value (Coil: paper
+  // 'mean-rev-rsi2' + live 'mean-rev-rsi2-live') so both are included and
+  // nothing else is. Omit it (undefined) for single-id agents — unchanged,
+  // unfiltered behavior, exactly as before this parameter existed.
+  if (strategyIds) closedToday = closedToday.filter((p) => strategyIds.includes(p.agentStrategy));
   if (!closedToday.length) return null;
   const decisive = agentId === 'default' ? await readDecisiveActions(sandboxDir, { fs }) : [];
   const grades = closedToday.map((p) => {
@@ -162,6 +171,21 @@ export async function runForSandbox({ projectRoot, sandboxId, dbPath, sandboxDir
   return report;
 }
 
+// AGENTS keys sandbox resolution by activeAgentId (resolveSandboxDbPaths matches on
+// it), NOT by strategyId — 'mean-rev-rsi2' (the strategyId) is never an activeAgentId
+// and previously resolved ZERO sandboxes here, silently dropping paper Coil grading
+// entirely (not just live). Coil's activeAgentId is 'mean-rev', shared by both the
+// paper and live sandboxes (docs/superpowers/specs/2026-07-13-coil-live-funding-design.md),
+// so 'mean-rev' resolves both DBs; strategyIds then scopes each DB's rows down to
+// Coil's own agent_strategy values via runForSandbox's filter above. Exported so
+// agent/coil-strategy-registration.test.mjs can assert COIL_LIVE_STRATEGY_ID is
+// present here and never silently dropped.
+export const AGENTS = [
+  { agentId: 'default', agentName: 'Prophet' },
+  { agentId: 'trend', agentName: 'Turtle' },
+  { agentId: 'mean-rev', agentName: 'Coil', strategyIds: COIL_STRATEGY_IDS },
+];
+
 // CLI: node scripts/trade-grades.mjs --date=YYYY-MM-DD  (defaults to today ET)
 if (process.argv[1] && process.argv[1].endsWith('trade-grades.mjs')) {
   const dateArg = (process.argv.find((a) => a.startsWith('--date=')) || '').split('=')[1];
@@ -169,18 +193,13 @@ if (process.argv[1] && process.argv[1].endsWith('trade-grades.mjs')) {
   const projectRoot = process.cwd();
   let frictionCfg = null;
   try { frictionCfg = loadFrictionConfig(path.join(projectRoot, 'config', 'friction.json')); } catch { /* fall back to stored pnl */ }
-  const AGENTS = [
-    { agentId: 'default', agentName: 'Prophet' },
-    { agentId: 'trend', agentName: 'Turtle' },
-    { agentId: 'mean-rev-rsi2', agentName: 'Coil' },
-  ];
   const all = [];
   for (const a of AGENTS) {
     let dbPaths; try { dbPaths = resolveSandboxDbPaths(projectRoot, a.agentId); } catch { dbPaths = []; }
     for (const dbPath of dbPaths) {
       const sandboxDir = path.dirname(dbPath);
       const sandboxId = path.basename(sandboxDir);
-      const r = await runForSandbox({ projectRoot, sandboxId, dbPath, sandboxDir, agentId: a.agentId, agentName: a.agentName, date, frictionCfg });
+      const r = await runForSandbox({ projectRoot, sandboxId, dbPath, sandboxDir, agentId: a.agentId, agentName: a.agentName, date, frictionCfg, strategyIds: a.strategyIds });
       if (r) all.push(...r.grades);
     }
   }

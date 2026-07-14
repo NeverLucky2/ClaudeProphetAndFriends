@@ -45,7 +45,7 @@ func AgentForStrategy(strategyId string) AgentSource {
 	switch strategyId {
 	case "trend":
 		return AgentTrend
-	case "mean-rev-rsi2":
+	case "mean-rev-rsi2", "mean-rev-rsi2-live":
 		return AgentMeanRev
 	case "earnings-drift":
 		return AgentDrift
@@ -225,6 +225,13 @@ type OptionsExposureProvider interface {
 	BucketExposureDollars() map[SectorBucket]float64
 }
 
+// EntryHalter is a veto on NEW ENTRIES consulted by CheckBuy. Implemented by
+// CoilLiveHaltGuard. Kept as an interface so the guard stays testable and so a
+// bot with no halt configured pays nothing.
+type EntryHalter interface {
+	EvaluateEntry(ctx context.Context) error
+}
+
 // TradeGuard enforces cross-agent trade rules:
 //   - Symbol non-overlap: a symbol held by one agent cannot be traded by the other.
 //   - Daily-loss circuit: intraday equity drop ≥ MaxDailyLossPct blocks new buys.
@@ -242,6 +249,10 @@ type TradeGuard struct {
 	// optionsProvider is optional. When non-nil, its per-bucket exposure is
 	// added to the sum computed from ManagedPositions during sector-cap checks.
 	optionsProvider OptionsExposureProvider
+
+	// halt is optional. When non-nil it can veto any new entry (drawdown halt on
+	// the live account). Never consulted on exits — CheckBuy is buys-only.
+	halt EntryHalter
 
 	// rawSymbols tracks symbols acquired via raw (non-managed) buy orders.
 	rawSymbols map[AgentSource]map[string]struct{}
@@ -273,12 +284,26 @@ func NewTradeGuard(positions positionLister, ts interfaces.TradingService, cfg T
 // allocationDollars is the intended spend; pass 0 when the dollar value is unknown
 // (capital-cap check is skipped).
 //
-// At most one tradingService.GetAccount() call is made per invocation: the result
-// is fetched lazily (only when daily-loss or sector-cap checks need it) and shared
-// between checks that need account context.
+// Account-fetch accounting: when the live-Coil halt is armed (g.halt != nil),
+// EvaluateEntry makes its own independent tradingService.GetAccount() call before
+// any other check runs. Separately, this method's own getAcct() closure fetches
+// the account at most ONCE per invocation — the result is cached lazily (only
+// fetched when daily-loss, sector-cap, or position-cap checks need it) and shared
+// between those checks. So an allowed buy makes at most two GetAccount() calls
+// total when the halt is armed (one from the halt, one from getAcct()), or at
+// most one when it isn't.
 func (g *TradeGuard) CheckBuy(ctx context.Context, agent AgentSource, symbol string, allocationDollars float64) error {
 	if agent == "" {
 		agent = AgentMain
+	}
+
+	// Entry halt (live drawdown backstop). Checked before anything else: when the
+	// account is halted no new entry is permissible for any reason, so there is
+	// no point spending a broker call to discover that.
+	if g.halt != nil {
+		if err := g.halt.EvaluateEntry(ctx); err != nil {
+			return err
+		}
 	}
 
 	// Per-agent equity universe allowlist. Cheap in-memory check, so run it
@@ -417,6 +442,9 @@ func (g *TradeGuard) CheckSell(_ context.Context, agent AgentSource, symbol stri
 
 	return nil
 }
+
+// SetHaltGuard wires the entry halt. nil disables it.
+func (g *TradeGuard) SetHaltGuard(h EntryHalter) { g.halt = h }
 
 // SetOptionsExposureProvider registers a provider for options-based exposure
 // Pass nil to clear. Safe to call at any time;

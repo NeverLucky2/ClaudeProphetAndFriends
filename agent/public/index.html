@@ -4231,7 +4231,7 @@ function refreshManagerDropdowns() {
   const models = config.models || [];
   if (models.length === 0) return;
   const mgr = config.manager || {};
-  const currentModel = mgr.model || config.activeModel || 'anthropic/claude-sonnet-4-6';
+  const currentModel = mgr.model || config.activeModel || 'anthropic/claude-sonnet-5';
   const currentProvider = currentModel.split('/')[0];
   const providers = [...new Set(models.map(m => m.id.split('/')[0]))].sort();
   // Only rebuild if options changed

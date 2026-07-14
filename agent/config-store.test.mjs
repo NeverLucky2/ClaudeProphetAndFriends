@@ -49,7 +49,7 @@ test('addAccount: writes metadata to config and creds to credential store', asyn
 test('getAccountById returns merged metadata + creds shape', async () => {
   await cfgStore.loadConfig();
   const a = await cfgStore.addAccount({
-    name: 'M', publicKey: 'PK', secretKey: 'SK', baseUrl: 'x', paper: true,
+    name: 'M', publicKey: 'PK', secretKey: 'SK', baseUrl: 'https://paper-api.alpaca.markets', paper: true,
   });
   const got = cfgStore.getAccountById(a.id);
   assert.equal(got.publicKey, 'PK');
@@ -65,7 +65,7 @@ test('addAccount rolls back metadata when credential write fails', async () => {
   cfgStore._setCredStoreForTests(credStore);
 
   await assert.rejects(
-    () => cfgStore.addAccount({ name: 'X', publicKey: 'PK', secretKey: 'SK', baseUrl: 'x', paper: true }),
+    () => cfgStore.addAccount({ name: 'X', publicKey: 'PK', secretKey: 'SK', baseUrl: 'https://paper-api.alpaca.markets', paper: true }),
     /disk full/
   );
 
@@ -77,14 +77,14 @@ test('addAccount rolls back metadata when credential write fails', async () => {
 
 test('updateAccount with both publicKey + secretKey rotates via credential store', async () => {
   await cfgStore.loadConfig();
-  const a = await cfgStore.addAccount({ name: 'X', publicKey: 'OLD_PK', secretKey: 'OLD_SK', baseUrl: 'x', paper: true });
+  const a = await cfgStore.addAccount({ name: 'X', publicKey: 'OLD_PK', secretKey: 'OLD_SK', baseUrl: 'https://paper-api.alpaca.markets', paper: true });
   await cfgStore.updateAccount(a.id, { publicKey: 'NEW_PK', secretKey: 'NEW_SK' });
   assert.deepEqual(credStore.getCredentials(a.id), { publicKey: 'NEW_PK', secretKey: 'NEW_SK' });
 });
 
 test('updateAccount with only publicKey throws (both-or-neither)', async () => {
   await cfgStore.loadConfig();
-  const a = await cfgStore.addAccount({ name: 'X', publicKey: 'PK', secretKey: 'SK', baseUrl: 'x', paper: true });
+  const a = await cfgStore.addAccount({ name: 'X', publicKey: 'PK', secretKey: 'SK', baseUrl: 'https://paper-api.alpaca.markets', paper: true });
   await assert.rejects(
     () => cfgStore.updateAccount(a.id, { publicKey: 'NEW_PK_ONLY' }),
     /both publicKey and secretKey/i
@@ -93,14 +93,14 @@ test('updateAccount with only publicKey throws (both-or-neither)', async () => {
 
 test('updateAccount with neither key leaves credentials untouched', async () => {
   await cfgStore.loadConfig();
-  const a = await cfgStore.addAccount({ name: 'X', publicKey: 'PK', secretKey: 'SK', baseUrl: 'x', paper: true });
+  const a = await cfgStore.addAccount({ name: 'X', publicKey: 'PK', secretKey: 'SK', baseUrl: 'https://paper-api.alpaca.markets', paper: true });
   await cfgStore.updateAccount(a.id, { name: 'Renamed' });
   assert.deepEqual(credStore.getCredentials(a.id), { publicKey: 'PK', secretKey: 'SK' });
 });
 
 test('removeAccount deletes both the metadata row and the credentials', async () => {
   await cfgStore.loadConfig();
-  const a = await cfgStore.addAccount({ name: 'X', publicKey: 'PK', secretKey: 'SK', baseUrl: 'x', paper: true });
+  const a = await cfgStore.addAccount({ name: 'X', publicKey: 'PK', secretKey: 'SK', baseUrl: 'https://paper-api.alpaca.markets', paper: true });
   await cfgStore.removeAccount(a.id);
   assert.equal(cfgStore.getAccountById(a.id), null);
   assert.equal(credStore.getCredentials(a.id), null);
@@ -110,7 +110,7 @@ test('getAccountById returns null creds when secrets are missing for that id', a
   await cfgStore.loadConfig();
   // Synthesize an orphan: write a metadata-only account directly
   const cfg = cfgStore.getConfig();
-  cfg.accounts.push({ id: 'orphan', name: 'O', baseUrl: 'x', paper: true, createdAt: new Date().toISOString() });
+  cfg.accounts.push({ id: 'orphan', name: 'O', baseUrl: 'https://paper-api.alpaca.markets', paper: true, createdAt: new Date().toISOString() });
   const got = cfgStore.getAccountById('orphan');
   assert.equal(got.publicKey, null);
   assert.equal(got.secretKey, null);
@@ -120,7 +120,7 @@ test('getAccountById returns null creds when secrets are missing for that id', a
 
 test('createSandboxForAccount: generates sbx_<uuid8> distinct from sbx_<accountId>', async () => {
   await cfgStore.loadConfig();
-  const a = await cfgStore.addAccount({ name: 'A', publicKey: 'PK', secretKey: 'SK', baseUrl: 'x', paper: true });
+  const a = await cfgStore.addAccount({ name: 'A', publicKey: 'PK', secretKey: 'SK', baseUrl: 'https://paper-api.alpaca.markets', paper: true });
   const sbx = await cfgStore.createSandboxForAccount(a.id, { name: 'First' });
   assert.equal(sbx.accountId, a.id);
   assert.notEqual(sbx.id, `sbx_${a.id}`, 'sandbox id is no longer derived from accountId');
@@ -130,7 +130,7 @@ test('createSandboxForAccount: generates sbx_<uuid8> distinct from sbx_<accountI
 
 test('createSandboxForAccount: two calls produce distinct sandboxes pointing at same account', async () => {
   await cfgStore.loadConfig();
-  const a = await cfgStore.addAccount({ name: 'A', publicKey: 'PK', secretKey: 'SK', baseUrl: 'x', paper: true });
+  const a = await cfgStore.addAccount({ name: 'A', publicKey: 'PK', secretKey: 'SK', baseUrl: 'https://paper-api.alpaca.markets', paper: true });
   const sbx1 = await cfgStore.createSandboxForAccount(a.id, { name: 'One' });
   const sbx2 = await cfgStore.createSandboxForAccount(a.id, { name: 'Two' });
   assert.notEqual(sbx1.id, sbx2.id);
@@ -148,7 +148,7 @@ test('createSandboxForAccount: throws if accountId unknown', async () => {
 
 test('createSandboxForAccount: applies agentId override when provided', async () => {
   await cfgStore.loadConfig();
-  const a = await cfgStore.addAccount({ name: 'A', publicKey: 'PK', secretKey: 'SK', baseUrl: 'x', paper: true });
+  const a = await cfgStore.addAccount({ name: 'A', publicKey: 'PK', secretKey: 'SK', baseUrl: 'https://paper-api.alpaca.markets', paper: true });
   const sbx = await cfgStore.createSandboxForAccount(a.id, { name: 'Harvest sbx', agentId: 'harvest' });
   assert.equal(sbx.agent.activeAgentId, 'harvest');
 });

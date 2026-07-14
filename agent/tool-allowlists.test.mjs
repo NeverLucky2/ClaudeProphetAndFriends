@@ -11,6 +11,7 @@ import {
   _internals,
 } from './tool-allowlists.js';
 import { regimeAndGuardTools } from '../mcp-tools/regime-and-guard.mjs';
+import { COIL_STRATEGY_IDS } from './coil-strategy-ids.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.join(__dirname, '..');
@@ -29,12 +30,20 @@ async function liveCatalog() {
 
 const STRATEGY_IDS = Object.keys(STRATEGY_TOOL_ALLOWLISTS);
 
-// Owner -> the signal/order endpoints that must appear on exactly that agent.
+// Owner -> the signal/order endpoints that must appear on exactly that agent
+// (or, for Coil, exactly its family of strategy ids — paper and live share one
+// hand-authored allowlist by design; see coil-strategy-ids.js).
 const EXCLUSIVE = {
   'trend': _internals.TREND_SIGNALS,
   'mean-rev-rsi2': _internals.MEANREV_SIGNALS,
   'earnings-drift': _internals.DRIFT_SIGNALS,
 };
+
+// The strategy ids permitted to expose a given EXCLUSIVE owner's tools.
+// Normally just [owner]; Coil's live id is the one deliberate exception.
+function ownersFor(owner) {
+  return owner === 'mean-rev-rsi2' ? COIL_STRATEGY_IDS : [owner];
+}
 
 test('ALL_TOOLS exactly matches the live mcp-server catalog', async () => {
   const live = await liveCatalog();
@@ -83,13 +92,14 @@ test('manager/orchestration tools are absent from every strategy list', () => {
   }
 });
 
-test('each exclusive signal endpoint appears on exactly its owning agent', () => {
+test('each exclusive signal endpoint appears on exactly its owning agent(s)', () => {
   for (const [owner, tools] of Object.entries(EXCLUSIVE)) {
+    const owners = new Set(ownersFor(owner));
     for (const tool of tools) {
       for (const strat of STRATEGY_IDS) {
         const has = new Set(STRATEGY_TOOL_ALLOWLISTS[strat]).has(tool);
-        if (strat === owner) {
-          assert.ok(has, `owner ${owner} should expose its tool "${tool}"`);
+        if (owners.has(strat)) {
+          assert.ok(has, `owner ${strat} should expose its tool "${tool}"`);
         } else {
           assert.ok(!has, `${strat} must NOT expose ${owner}'s exclusive tool "${tool}" (cross-strategy leak)`);
         }

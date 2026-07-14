@@ -278,7 +278,7 @@ Each heartbeat, the harness spawns:
 ```bash
 opencode run \
   --format json \
-  --model anthropic/claude-sonnet-4-6 \
+  --model anthropic/claude-sonnet-5 \
   --max-turns 25 \
   --session <session-id>
 ```
@@ -812,7 +812,7 @@ All runtime config is stored in `data/agent-config.json`. The dashboard provides
 {
   "activeAccountId": "abc123",
   "activeAgentId": "default",
-  "activeModel": "anthropic/claude-sonnet-4-6",
+  "activeModel": "anthropic/claude-sonnet-5",
 
   "heartbeat": {
     "pre_market": 900,     // seconds
@@ -868,6 +868,7 @@ All runtime config is stored in `data/agent-config.json`. The dashboard provides
 
 | Model | Cost (input/output per MTok) |
 |-------|-----|
+| `anthropic/claude-sonnet-5` | $3 / $15 ($2 / $10 intro thru 2026-08-31) |
 | `anthropic/claude-sonnet-4-6` | $3 / $15 |
 | `anthropic/claude-opus-4-6` | $5 / $25 |
 | `anthropic/claude-haiku-4-5` | $1 / $5 |

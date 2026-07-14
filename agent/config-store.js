@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 import { execSync } from 'child_process';
 import * as _credStore from './credential-store.js';
+import { COIL_LIVE_STRATEGY_ID } from './coil-strategy-ids.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -59,6 +60,10 @@ export function _setCredStoreForTests(mod) {
   _credStoreOverride = wrapper;
   return wrapper; // Return so tests can reassign their local credStore reference.
 }
+
+// Exposed for tests only.
+export const _internals = { defaultStrategies };
+
 function credStore() {
   return _credStoreOverride || _credStore;
 }
@@ -178,7 +183,7 @@ function defaultAgents() {
       description: 'Aggressive discretionary options trader with scalping overlay',
       systemPromptTemplate: 'default',
       strategyId: 'v2-options',
-      model: 'anthropic/claude-sonnet-4-6',
+      model: 'anthropic/claude-sonnet-5',
       // Pre-market: only fire the 09:15 scheduled wake + 09:30 phase-snap.
       // Cadence 86400 silences intra-phase ticks; suppressPhaseSnaps skips the
       // 04:00 boundary; scheduledBeats adds the 09:15 wake.
@@ -213,7 +218,7 @@ For existing positions, use get_mean_reversion_signal({ symbol }) to check the e
       // Mechanical RSI(2) mean-reversion — does not adjust on news or sector moves.
       // Exempt from emergency-alert wakes.
       respondsToEmergencyWakes: false,
-      model: 'anthropic/claude-sonnet-4-6',
+      model: 'anthropic/claude-sonnet-5',
       heartbeatOverrides: {
         pre_market: 86400,
         market_open: 86400,
@@ -254,7 +259,7 @@ For existing positions, use get_earnings_drift_signal({ symbol, earnings_date, t
       // news (its rules reject any beat outside the 16:55–17:15 ET window).
       // Exempt from emergency-alert wakes; same class as Coil/Trend/Harvest.
       respondsToEmergencyWakes: false,
-      model: 'anthropic/claude-sonnet-4-6',
+      model: 'anthropic/claude-sonnet-5',
       heartbeatOverrides: {
         pre_market: 86400,
         market_open: 86400,
@@ -294,7 +299,7 @@ Use get_trend_signal({ symbol }) to read the daily-bar Donchian-100 high, Donchi
       // Price-only, daily-bar trend follower — no provision to act on intraday
       // news. Exempt from emergency-alert wakes.
       respondsToEmergencyWakes: false,
-      model: 'anthropic/claude-sonnet-4-6',
+      model: 'anthropic/claude-sonnet-5',
       heartbeatOverrides: {
         pre_market: 86400,
         market_open: 86400,
@@ -380,8 +385,16 @@ function defaultStrategies() {
     {
       id: 'mean-rev-rsi2',
       name: 'Mean Reversion (Connors RSI(2))',
-      description: 'RSI(2) oversold pullbacks within long-term uptrends. Curated S&P 500 large-cap universe; 5% per position; max 5 concurrent; 5-day timeout; -7% hard stop.',
+      description: 'RSI(2) oversold pullbacks within long-term uptrends. Curated S&P 500 large-cap universe; 6% per position; max 14 concurrent; 5-day timeout; -7% hard stop.',
       rulesFile: 'TRADING_RULES_MEANREV.md',
+      customRules: null,
+      createdAt: new Date().toISOString(),
+    },
+    {
+      id: COIL_LIVE_STRATEGY_ID,
+      name: 'Mean Reversion RSI(2) — LIVE',
+      description: 'REAL MONEY. Dedicated live Coil account. 12% per position; max 7 concurrent; 85% deploy ceiling; bear mode HALT; 5-day timeout; -7% hard stop; -15% high-water halt enforced in Go.',
+      rulesFile: 'TRADING_RULES_MEANREV_LIVE.md',
       customRules: null,
       createdAt: new Date().toISOString(),
     },
@@ -452,7 +465,8 @@ function defaultModels() {
   }
   
   return [
-    { id: 'anthropic/claude-sonnet-4-6', name: 'Claude Sonnet 4.6', description: 'Best speed + intelligence, $3/$15 per MTok' },
+    { id: 'anthropic/claude-sonnet-5', name: 'Claude Sonnet 5', description: 'Newest Sonnet, near-Opus coding/agentic, $3/$15 ($2/$10 intro thru 2026-08-31) per MTok' },
+    { id: 'anthropic/claude-sonnet-4-6', name: 'Claude Sonnet 4.6', description: 'Prior-gen Sonnet, $3/$15 per MTok' },
     { id: 'anthropic/claude-opus-4-6', name: 'Claude Opus 4.6', description: 'Most intelligent, best for agents, $5/$25 per MTok' },
     { id: 'anthropic/claude-haiku-4-5', name: 'Claude Haiku 4.5', description: 'Fastest, near-frontier, $1/$5 per MTok' },
     { id: 'anthropic/claude-sonnet-4-5', name: 'Claude Sonnet 4.5 (Legacy)', description: 'Previous gen Sonnet, $3/$15 per MTok' },
@@ -470,7 +484,7 @@ function createSandbox(account, overrides = {}) {
     name: overrides.name || account.name || `Sandbox ${account.id}`,
     agent: {
       activeAgentId: overrides.agent?.activeAgentId || overrides.activeAgentId || 'default',
-      model: overrides.agent?.model || overrides.activeModel || 'anthropic/claude-sonnet-4-6',
+      model: overrides.agent?.model || overrides.activeModel || 'anthropic/claude-sonnet-5',
       overrides: {
         ...DEFAULT_AGENT_OVERRIDES,
         ...(overrides.agent?.overrides || {}),
@@ -492,7 +506,7 @@ function createDefaultConfig() {
 
     // Legacy compatibility aliases. Keep mirrored during migration.
     activeAgentId: 'default',
-    activeModel: 'anthropic/claude-sonnet-4-6',
+    activeModel: 'anthropic/claude-sonnet-5',
     heartbeat: { ...DEFAULT_HEARTBEAT },
     permissions: { ...DEFAULT_PERMISSIONS },
     plugins: mergePlugins(),
@@ -502,7 +516,7 @@ function createDefaultConfig() {
     agents: defaultAgents(),
     strategies: defaultStrategies(),
     manager: {
-      model: 'anthropic/claude-sonnet-4-6',
+      model: 'anthropic/claude-sonnet-5',
       customPrompt: '',
     },
     models: defaultModels(),
@@ -529,7 +543,7 @@ function mergeSandbox(sandbox, fallback = {}) {
     ...sandbox,
     agent: {
       activeAgentId: sandbox?.agent?.activeAgentId || fallback.activeAgentId || 'default',
-      model: sandbox?.agent?.model || fallback.activeModel || 'anthropic/claude-sonnet-4-6',
+      model: sandbox?.agent?.model || fallback.activeModel || 'anthropic/claude-sonnet-5',
       overrides: {
         ...DEFAULT_AGENT_OVERRIDES,
         ...(sandbox?.agent?.overrides || {}),
@@ -939,14 +953,48 @@ function updateSandbox(accountId, updater) {
 
 // ── Accounts ───────────────────────────────────────────────────────
 
+const ALPACA_PAPER_URL = 'https://paper-api.alpaca.markets';
+const ALPACA_LIVE_URL = 'https://api.alpaca.markets';
+
+// resolveAccountMode is the single source of truth for an account's
+// paper-vs-live identity. baseUrl and the paper boolean are two independent
+// claims about whether real money is at stake; if they contradict, we cannot
+// know which is right, and guessing wrong trades real money under a "paper"
+// label. Fails closed: contradiction or unknown host throws.
+export function resolveAccountMode({ baseUrl, paper }) {
+  const isPaper = paper !== false;
+  const raw = (baseUrl || '').trim();
+  if (!raw) return { baseUrl: isPaper ? ALPACA_PAPER_URL : ALPACA_LIVE_URL, paper: isPaper };
+
+  let host;
+  try {
+    host = new URL(raw).host.toLowerCase();
+  } catch {
+    throw new Error(`Account baseUrl is not a valid URL: ${raw}`);
+  }
+
+  const urlIsPaper = host === 'paper-api.alpaca.markets';
+  const urlIsLive = host === 'api.alpaca.markets';
+  if (!urlIsPaper && !urlIsLive) {
+    throw new Error(`Account baseUrl has an unrecognized host: ${host} (want paper-api.alpaca.markets or api.alpaca.markets)`);
+  }
+  if (urlIsPaper !== isPaper) {
+    throw new Error(
+      `Account mode mismatch: paper=${isPaper} but baseUrl ${raw} is ${urlIsPaper ? 'PAPER' : 'LIVE'}. ` +
+      `Refusing to save an account whose label contradicts its endpoint.`);
+  }
+  return { baseUrl: raw, paper: isPaper };
+}
+
 export async function addAccount({ name, publicKey, secretKey, baseUrl, paper }) {
   if (!publicKey || !secretKey) throw new Error('publicKey and secretKey are required');
+  const mode = resolveAccountMode({ baseUrl, paper });
   const id = crypto.randomUUID().slice(0, 8);
   const account = {
     id,
     name: name || `Account ${_config.accounts.length + 1}`,
-    baseUrl: baseUrl || (paper ? 'https://paper-api.alpaca.markets' : 'https://api.alpaca.markets'),
-    paper: paper !== false,
+    baseUrl: mode.baseUrl,
+    paper: mode.paper,
     createdAt: new Date().toISOString(),
   };
   _config.accounts.push(account);
@@ -968,8 +1016,18 @@ export async function updateAccount(id, { name, baseUrl, paper, publicKey, secre
   const account = _config.accounts.find(a => a.id === id);
   if (!account) throw new Error('Account not found');
   if (name !== undefined && name.trim()) account.name = name.trim();
-  if (baseUrl !== undefined) account.baseUrl = baseUrl.trim() || (account.paper ? 'https://paper-api.alpaca.markets' : 'https://api.alpaca.markets');
-  if (paper !== undefined) account.paper = paper;
+
+  // Resolve baseUrl + paper together. Reading either in isolation is what let
+  // them drift apart: the old code defaulted baseUrl from the PREVIOUS paper
+  // value, then overwrote paper on the next line.
+  if (baseUrl !== undefined || paper !== undefined) {
+    const mode = resolveAccountMode({
+      baseUrl: baseUrl !== undefined ? baseUrl : account.baseUrl,
+      paper: paper !== undefined ? paper : account.paper,
+    });
+    account.baseUrl = mode.baseUrl;
+    account.paper = mode.paper;
+  }
 
   const hasPk = publicKey !== undefined && publicKey !== '';
   const hasSk = secretKey !== undefined && secretKey !== '';

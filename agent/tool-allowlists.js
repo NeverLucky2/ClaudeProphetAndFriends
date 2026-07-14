@@ -20,6 +20,8 @@
 // asserts it exactly matches the tool names defined in mcp-server.js plus
 // regimeAndGuardTools — adding a server tool without updating this list fails CI.
 
+import { COIL_STRATEGY_IDS } from './coil-strategy-ids.js';
+
 export const ALL_TOOLS = [
   'aggregate_and_summarize_news',
   'analyze_stocks',
@@ -221,8 +223,12 @@ const NON_PROPHET = new Set([
   ...VERTICAL_TOOLS,
 ]);
 
+const COIL_TOOLS = uniq([...BASE, ...MEANREV_SIGNALS, ...MANAGED]);
+
 export const STRATEGY_TOOL_ALLOWLISTS = {
-  'mean-rev-rsi2': uniq([...BASE, ...MEANREV_SIGNALS, ...MANAGED]),
+  // Every Coil id (paper + live) gets the identical, restricted toolset. Live
+  // Coil must never have a broader surface than the paper record was built on.
+  ...Object.fromEntries(COIL_STRATEGY_IDS.map(id => [id, COIL_TOOLS])),
   'earnings-drift': uniq([...BASE, ...DRIFT_SIGNALS, ...MANAGED]),
   // analyze_stocks: trend reads its cross_asset block (5-day DXY/rate/credit
   // proxies) to confirm or pause a Donchian breakout (TRADING_RULES_TREND.md

@@ -56,7 +56,10 @@ func main() {
 	const alpacaDataBurst = 10
 	alpacaDataLimiter := services.NewAlpacaDataRateLimiter(cfg.AlpacaDataRatePerMin, alpacaDataBurst)
 
-	// Create trading service
+	// Create trading service. A mode mismatch (ALPACA_PAPER vs ALPACA_BASE_URL)
+	// is FATAL, not a warning: it is the one misconfiguration that can trade real
+	// money while every log line reports "paper". Other construction failures stay
+	// non-fatal (the service retries on request).
 	tradingService, err := services.NewAlpacaTradingService(
 		cfg.AlpacaAPIKey,
 		cfg.AlpacaSecretKey,
@@ -64,11 +67,22 @@ func main() {
 		cfg.AlpacaPaper,
 	)
 	if err != nil {
-		logger.Warn("Failed to create trading service (will retry on requests):", err)
+		logger.Fatalf("FATAL: Alpaca trading service refused to start: %v", err)
 	}
-	if tradingService != nil {
-		tradingService.SetRateLimiter(alpacaDataLimiter)
+
+	// Announce the resolved mode from the URL — the authoritative source — not
+	// from the flag.
+	urlIsPaper, _ := services.IsPaperBaseURL(cfg.AlpacaBaseURL)
+	mode := "LIVE — REAL MONEY"
+	if urlIsPaper {
+		mode = "paper"
 	}
+	logger.WithFields(logrus.Fields{
+		"alpaca_mode":     mode,
+		"alpaca_base_url": cfg.AlpacaBaseURL,
+	}).Warn("Alpaca trading mode resolved")
+
+	tradingService.SetRateLimiter(alpacaDataLimiter)
 
 	// Create the raw Alpaca data service + shared rate limiter, then wrap it in
 	// the cross-agent shared bar cache. Every non-intraday consumer reads through
@@ -247,6 +261,46 @@ func main() {
 	)
 	orderController.SetSleeveGuard(sleeveGuard)
 	sleeveController := controllers.NewSleeveController(sleeveGuard)
+
+	// Coil live drawdown halt. Default OFF; the live Coil bot sets
+	// ENABLE_COIL_LIVE_HALT=true. Shares the sleeve's state-dir convention.
+	coilHaltStateDir := cfg.CoilLiveStateDir
+	if coilHaltStateDir == "" {
+		coilHaltStateDir = filepath.Dir(cfg.DatabasePath)
+	}
+	if cfg.EnableCoilLiveHalt {
+		// Validate BEFORE constructing the guard: a non-default
+		// COIL_LIVE_STATE_DIR pointing at a directory that does not exist, or
+		// one that stats fine but is not actually writable (full disk,
+		// read-only remount, ACL change), would otherwise let the bot boot and
+		// either block 100% of live entries with nothing but a log line to
+		// explain it, or — worse, for the unwritable-but-statable case —
+		// silently resume measuring drawdown against a stale, no-longer-
+		// ratcheting high-water mark (see CoilStateDirWritable's doc comment
+		// for the exact restart failure loop this closes). Deliberately does
+		// NOT MkdirAll the directory here: see CoilStateDirWritable's doc
+		// comment for why that would resurrect a vanished dir and drop a
+		// latch across a restart.
+		if err := services.CoilStateDirWritable(coilHaltStateDir, logger); err != nil {
+			logger.Fatalf("Coil live drawdown halt: COIL_LIVE_STATE_DIR %q is not usable (fail closed at startup rather than booting into stale drawdown state): %v", coilHaltStateDir, err)
+		}
+		coilHalt := services.NewCoilLiveHaltGuard(
+			services.CoilLiveHaltConfig{
+				Enabled:     true,
+				DrawdownPct: cfg.CoilLiveDrawdownPct,
+				BaselineUSD: cfg.CoilLiveBaselineUSD,
+				StateDir:    coilHaltStateDir,
+			},
+			tradingService,
+		)
+		tradeGuard.SetHaltGuard(coilHalt)
+		logger.WithFields(logrus.Fields{
+			"coil_live_halt_enabled": true,
+			"drawdown_pct":           cfg.CoilLiveDrawdownPct,
+			"baseline_usd":           cfg.CoilLiveBaselineUSD,
+			"state_dir":              coilHaltStateDir,
+		}).Warn("Coil live drawdown halt ARMED")
+	}
 
 	logger.WithFields(logrus.Fields{
 		"max_daily_loss_pct":          cfg.MaxDailyLossPct,

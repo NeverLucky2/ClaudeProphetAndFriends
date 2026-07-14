@@ -15,6 +15,7 @@ import { isMarketHoliday } from './market-calendar.js';
 import {
   occUnderlying, normalizePnlPct, decideHoldingSkip, loadSkipConfig,
 } from './prophet-beat-decision.js';
+import { COIL_STRATEGY_IDS } from './coil-strategy-ids.js';
 
 // isEconomicBlackout queries /api/v1/econ/blackout for the shared US-release
 // blackout window (30 min before / 15 min after CPI, NFP, FOMC, PCE, PPI,
@@ -347,27 +348,32 @@ async function trendPreflight(runtime, agentConfig) {
   return { skip: false, reason: 'in window, entry signal available' };
 }
 
-// Coil predicate (mean-rev-rsi2). Coil fires once per trading day at 15:45 ET
-// via an exclusive scheduledBeats window, so this only runs once daily — it
-// skips the single beat on days with nothing to do.
+// Coil predicate. Coil fires once per trading day at 15:45 ET via an exclusive
+// scheduledBeats window, so this only runs once daily — it skips the single beat
+// on days with nothing to do.
 //
 // Skips when there are no strategy-attributed open positions AND no entry
-// candidates. When candidates exist but there are no positions, the regime
-// gate (RED block) and econ blackout still apply — TRADING_RULES_MEANREV.md
-// blocks new entries during a RED tier or an econ blackout, so with nothing to
-// manage the beat has no work either way.
+// candidates. When candidates exist but there are no positions, the regime gate
+// (RED block) and econ blackout still apply.
 //
-// Positions are read from /api/v1/positions?strategy=mean-rev-rsi2, which
-// returns a PLAIN ARRAY (order_controller.go HandleGetPositions) — hence the
-// Array.isArray check + .length, not a {count} object. An open position always
-// wins (exit-rule evaluation must run). Ambiguous shapes fail open.
-async function meanRevPreflight(runtime, agentConfig) {
-  return candidatesAndPositionsPreflight(runtime, {
-    candidatesUrl: '/api/v1/meanrev/candidates',
-    positionsUrl: '/api/v1/positions?strategy=mean-rev-rsi2',
-    noWorkReason: 'no positions and no RSI(2) entry candidates',
-    label: 'meanrev',
-  });
+// The positions query MUST carry the agent's own strategy id. Hardcoding the
+// paper id would make live Coil query a strategy it never trades under, get an
+// empty array back, and skip a beat while holding real positions — i.e. stop
+// managing exits on live money.
+//
+// Positions are read from /api/v1/positions?strategy=<id>, which returns a PLAIN
+// ARRAY (order_controller.go HandleGetPositions) — hence the Array.isArray check
+// + .length, not a {count} object. An open position always wins (exit-rule
+// evaluation must run). Ambiguous shapes fail open.
+function makeMeanRevPreflight(strategyId) {
+  return async function meanRevPreflight(runtime, _agentConfig) {
+    return candidatesAndPositionsPreflight(runtime, {
+      candidatesUrl: '/api/v1/meanrev/candidates',
+      positionsUrl: `/api/v1/positions?strategy=${encodeURIComponent(strategyId)}`,
+      noWorkReason: 'no positions and no RSI(2) entry candidates',
+      label: 'meanrev',
+    });
+  };
 }
 
 // Drift predicate (earnings-drift). Drift fires once per trading day at 17:00
@@ -438,7 +444,9 @@ async function defensiveProphetPreflight(_runtime, _agentConfig) {
 export const PREFLIGHT_REGISTRY = {
   'trend':            trendPreflight,
   'v2-options':       prophetPreflight,
-  'mean-rev-rsi2':    meanRevPreflight,
+  // Each Coil id gets a predicate bound to its OWN strategy id, so the positions
+  // query always matches the strategy the agent actually trades under.
+  ...Object.fromEntries(COIL_STRATEGY_IDS.map(id => [id, makeMeanRevPreflight(id)])),
   'earnings-drift':   driftPreflight,
   'prophet-defensive': defensiveProphetPreflight,
 };
