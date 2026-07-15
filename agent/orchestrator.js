@@ -200,7 +200,7 @@ export class AgentOrchestrator extends EventEmitter {
       // 'false' so it can't inherit a shared-.env 'true' and arm a
       // real-money halt keyed to a baseline/state dir meant for a different
       // account. See agent/coil-halt-flags.js (unit-tested in isolation).
-      ...coilLiveHaltFlags(resolvedAgent?.strategyId, process.env.ENABLE_COIL_LIVE_HALT),
+      ...coilLiveHaltFlags(resolvedAgent?.strategyId, process.env.ENABLE_COIL_LIVE_HALT, process.env.ENABLE_COIL_ORPHAN_AUTOFLATTEN, process.env.ORPHAN_AUTOFLATTEN_ACCOUNT_IS_DEDICATED),
       // Bear-regime behavior is a per-strategy property, not a machine-wide one.
       // Live Coil is PINNED to 'halt' below SPY's 200-SMA — deliberate, and not
       // operator-overridable via a shared .env (real money; no case for "keep

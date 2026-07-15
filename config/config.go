@@ -118,6 +118,14 @@ type Config struct {
 	CoilLiveDrawdownPct float64 // 0.15 = halt at -15% from high-water
 	CoilLiveBaselineUSD float64 // funded baseline; floors the high-water mark
 	CoilLiveStateDir    string  // dir for halt latch/kill/state files; empty => derive from DatabasePath dir
+
+	// Orphan auto-flatten (2026-07-14 spec). Layer B remediation. Both booleans
+	// default false. Acts only when BOTH are true (the second is the operator's
+	// affirmation that the account is single-agent — the action is unsafe on a
+	// shared account). OrphanAutoFlattenStreak defaults 3.
+	EnableOrphanAutoFlatten             bool
+	OrphanAutoFlattenAccountIsDedicated bool
+	OrphanAutoFlattenStreak             int
 }
 
 var AppConfig *Config
@@ -204,6 +212,10 @@ func Load() error {
 		CoilLiveDrawdownPct: parseFloat(getEnvOrDefault("COIL_LIVE_DRAWDOWN_PCT", "0.15")),
 		CoilLiveBaselineUSD: parseFloat(getEnvOrDefault("COIL_LIVE_BASELINE_USD", "0")),
 		CoilLiveStateDir:    os.Getenv("COIL_LIVE_STATE_DIR"),
+
+		EnableOrphanAutoFlatten:             getEnvOrDefault("ENABLE_COIL_ORPHAN_AUTOFLATTEN", "false") == "true",
+		OrphanAutoFlattenAccountIsDedicated: getEnvOrDefault("ORPHAN_AUTOFLATTEN_ACCOUNT_IS_DEDICATED", "false") == "true",
+		OrphanAutoFlattenStreak:             parseIntOrDefault("ORPHAN_AUTOFLATTEN_STREAK", 3),
 	}
 
 	return nil

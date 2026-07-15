@@ -260,3 +260,33 @@ func TestLoadConfig_ProphetSingleLegAttributionOn(t *testing.T) {
 		t.Fatal("ENABLE_PROPHET_SINGLELEG_ATTRIBUTION=true must set the flag")
 	}
 }
+
+func TestLoad_OrphanAutoFlattenFlags(t *testing.T) {
+	t.Setenv("ENABLE_COIL_ORPHAN_AUTOFLATTEN", "true")
+	t.Setenv("ORPHAN_AUTOFLATTEN_ACCOUNT_IS_DEDICATED", "true")
+	t.Setenv("ORPHAN_AUTOFLATTEN_STREAK", "5")
+	if err := Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !AppConfig.EnableOrphanAutoFlatten || !AppConfig.OrphanAutoFlattenAccountIsDedicated {
+		t.Fatal("flags not parsed true")
+	}
+	if AppConfig.OrphanAutoFlattenStreak != 5 {
+		t.Fatalf("streak = %d, want 5", AppConfig.OrphanAutoFlattenStreak)
+	}
+}
+
+func TestLoad_OrphanAutoFlattenDefaults(t *testing.T) {
+	t.Setenv("ENABLE_COIL_ORPHAN_AUTOFLATTEN", "")
+	t.Setenv("ORPHAN_AUTOFLATTEN_ACCOUNT_IS_DEDICATED", "")
+	t.Setenv("ORPHAN_AUTOFLATTEN_STREAK", "")
+	if err := Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if AppConfig.EnableOrphanAutoFlatten || AppConfig.OrphanAutoFlattenAccountIsDedicated {
+		t.Fatal("defaults must be false")
+	}
+	if AppConfig.OrphanAutoFlattenStreak != 3 {
+		t.Fatalf("default streak = %d, want 3", AppConfig.OrphanAutoFlattenStreak)
+	}
+}

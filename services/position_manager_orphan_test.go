@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"prophet-trader/interfaces"
+
+	"github.com/sirupsen/logrus"
 )
 
 func brokerPos(sym string, qty float64) *interfaces.Position {
@@ -145,5 +147,44 @@ func TestDetectOrphans_ResolvesWhenBrokerDropsSymbol(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Errorf("report = %+v, want empty after resolution", got)
+	}
+}
+
+func TestOrphanStatus_ReflectsLastOrphansAndConfig(t *testing.T) {
+	pm := &PositionManager{
+		positions:     map[string]*ManagedPosition{},
+		orphanAlerted: map[string]bool{},
+		logger:        logrus.New(),
+	}
+	pm.SetOrphanAutoFlatten(OrphanAutoFlattenConfig{
+		Enabled: true, AccountIsDedicated: true, Streak: 3,
+		MarketIsOpen: func() bool { return true },
+	})
+	// Seed a terminal record + broker still holding → one orphan.
+	pm.positions["p1"] = &ManagedPosition{ID: "p1", Symbol: "UNH", Status: "CLOSED"}
+	pm.detectOrphans([]*interfaces.Position{{Symbol: "UNH", Qty: 13, Side: "long"}})
+
+	s := pm.OrphanStatus()
+	if len(s.Orphans) != 1 || s.Orphans[0].Symbol != "UNH" {
+		t.Fatalf("expected 1 orphan UNH, got %+v", s.Orphans)
+	}
+	if !s.AutoFlattenEnabled || !s.AccountDedicatedAffirmed || s.Streak != 3 {
+		t.Fatalf("config not reflected: %+v", s)
+	}
+}
+
+func TestOrphanStatus_ReturnsIndependentCopies(t *testing.T) {
+	pm := &PositionManager{positions: map[string]*ManagedPosition{}, orphanAlerted: map[string]bool{}, logger: logrus.New()}
+	pm.SetOrphanAutoFlatten(OrphanAutoFlattenConfig{Enabled: true, AccountIsDedicated: true, Streak: 3, MarketIsOpen: func() bool { return true }})
+	pm.positions["p1"] = &ManagedPosition{ID: "p1", Symbol: "UNH", Status: "CLOSED"}
+	pm.detectOrphans([]*interfaces.Position{{Symbol: "UNH", Qty: 13, Side: "long"}})
+	s := pm.OrphanStatus()
+	// Mutating live state after the snapshot must not change the snapshot.
+	pm.mu.Lock()
+	pm.orphanStreak["UNH"] = 999
+	pm.lastOrphans = append(pm.lastOrphans, OrphanAlert{Symbol: "XXX"})
+	pm.mu.Unlock()
+	if len(s.Orphans) != 1 || s.StreakBySymbol["UNH"] == 999 {
+		t.Fatalf("OrphanStatus must return independent copies, got %+v", s)
 	}
 }

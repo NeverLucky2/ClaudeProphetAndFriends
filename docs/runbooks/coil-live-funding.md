@@ -368,71 +368,72 @@ missed some peak." The fix is a procedure the operator owns:
 
 ---
 
-## ACCEPTED RISK: reconciliation does not cover the stuck-exit path
+## ACCEPTED RISK: Node reconciliation covers opens only, not exits
 
-**This is a known, deliberate gap, not an oversight — read this section
-before funding, and follow the daily mitigation checklist below for as long
-as the gap is open.**
-
-`agent/trade-reconciliation.js` runs per-sandbox; the live sandbox gets its
-own `data/reconciliation/<sandboxId>/` directory automatically, no wiring
-required. But its own `SCOPE_NOTE`, stamped on every report (verbatim,
-`agent/trade-reconciliation.js:135`):
+**Read this section before funding.** `agent/trade-reconciliation.js` runs
+per-sandbox; the live sandbox gets its own `data/reconciliation/<sandboxId>/`
+directory automatically, no wiring required. But its own `SCOPE_NOTE`,
+stamped on every report (verbatim, `agent/trade-reconciliation.js:135`):
 
 > "Covers order placements (opens/adds). Does NOT verify closes/exits or
 > live position state — a logged-success close that did not execute will
 > not be caught here."
 
-**What reconciliation verifies:** order PLACEMENTS — opens and adds. **What
-it does NOT verify:** closes/exits, or live position state generally.
+**What Node reconciliation verifies:** order PLACEMENTS — opens and adds.
+**What it does NOT verify:** closes/exits, or live position state generally.
+That scope limit is real and permanent — a clean reconciliation report tells
+you entries matched the broker; it says nothing about whether a position you
+believe is closed actually is. Node reconciliation is not the layer that
+catches a stuck exit.
 
-**Concrete failure this leaves open:** `CloseManagedPosition` cancels the
+**The failure mode this describes:** `CloseManagedPosition` cancels the
 −7% broker-side stop as part of closing out a position, the sell order
-itself then silently fails, and the bot marks the position CLOSED anyway.
-The result is a **real-money long with no stop and no manager** — the bot
-believes it is flat, the broker still holds the position, and nothing is
-watching it. A logged-success close that never actually executed at the
-broker is **exactly** this failure mode, and the existing reconciliation
-**does not detect it.** A clean reconciliation report tells you entries
-matched the broker. It says nothing about whether a position you believe is
-closed actually is.
+itself then silently fails, and the bot marks the position CLOSED anyway —
+a **real-money long with no stop and no manager**, where the bot believes it
+is flat but the broker still holds the position. This is **exactly** the
+case the Go orphan detector is built to catch — see "Stuck exits: detection,
+surfacing, and auto-flatten" below. That detection has always run in the Go
+bot; this branch adds the Slack alert and `/api/orphans` surfacing on top of
+it, plus an opt-in auto-flatten remediation.
 
-**The −15% drawdown halt does NOT help here.** The halt is an entry veto —
-it blocks *new* entries once equity falls 15% below its high-water mark. It
-is never consulted on a sell, and a stranded position (stopless, unmanaged)
-is not a new entry. This specific failure mode is entirely outside what the
-halt was built to catch.
+**The −15% drawdown halt does NOT help here either.** The halt is an entry
+veto — it blocks *new* entries once equity falls 15% below its high-water
+mark. It is never consulted on a sell, and a stranded position (stopless,
+unmanaged) is not a new entry. This specific failure mode is entirely
+outside what the halt was built to catch; the orphan detector below is the
+layer that covers it, not the halt.
 
-**Why this is accepted, not blocking, at this stage:** the live-funding
-design spec (`docs/superpowers/specs/2026-07-13-coil-live-funding-design.md`)
-names stuck-exit / failed-close detection **"the operator's primary
-objection to Alpaca, and the one risk that is actually engineerable,"** and
-lists **"the stuck-exit path is proven to work"** as one of three explicit
-success criteria for this stage — alongside positive live expectancy and an
-observed drawdown-halt trip. In other words: this stage exists partly to
-*exercise* this exact gap under real conditions, not to have already closed
-it. It is bounded by size: at $5k, a single stranded 12% position is ≈ a few
-hundred dollars — survivable, not catastrophic. **It IS a blocker for
-scaling to $10k** — extending reconciliation to compare the bot's believed
-closes against live broker position state is real, unstarted work, and is
-the top follow-up before any raise past $5k. Do not read a green
-reconciliation report as "exits are verified" — it verifies entries only.
+**Accurate residual gap, now that detection and surfacing exist:**
+- **Auto-flatten is opt-in, default off, and dedicated-account-gated.**
+  Unless both `ENABLE_COIL_ORPHAN_AUTOFLATTEN=true` and
+  `ORPHAN_AUTOFLATTEN_ACCOUNT_IS_DEDICATED=true` are set for this account,
+  the bot alerts on a stuck exit but does not remediate it — the operator
+  still has to act on the Slack alert by hand.
+- **The orphan detector only flags cases where the broker still holds the
+  shares.** It compares broker holdings against the bot's ledger, so it
+  cannot catch a divergence that doesn't leave a broker-side position
+  behind.
 
-**Required mitigation until this is built:** a daily manual eyeball of the
-Alpaca positions page against the bot's open positions (see the Daily
-Operations Checklist below). This is not optional busywork — it is the only
-thing standing between a silently stranded position and it staying
-stranded, unmanaged, and un-stopped for days.
+**Operator mitigation:** the always-on Slack `orphanDetected` alert (enable
+it for the live account's sandbox, per the section below) is now the primary
+line of defense for this failure mode. The daily manual eyeball (see the
+Daily Operations Checklist below) is a backup on top of it — for catching
+anything the alert missed, and for confirming auto-flatten (if armed) fired
+cleanly rather than latching on a failed flatten.
 
 ---
 
-## Daily Operations Checklist (while the stuck-exit gap is open)
+## Daily Operations Checklist (backup to the Slack orphan alert)
 
-Run this every trading day the live account is funded, until reconciliation
-is extended to cover closes (see the ACCEPTED RISK section above). This is
-the load-bearing mitigation for that gap, not a nice-to-have — skipping it
-means a silently stranded position could sit stopless and unmanaged for
-days before anyone notices.
+Run this every trading day the live account is funded. Node reconciliation
+still only verifies opens (see the ACCEPTED RISK section above), and
+auto-flatten remediation is opt-in — so this daily eyeball remains real
+work, not a nice-to-have. But it is no longer the sole line of defense: the
+always-on Slack `orphanDetected` alert ("Stuck exits: detection, surfacing,
+and auto-flatten" below) now fires automatically when the Go orphan detector
+finds a stranded position. Treat this checklist as the backup that catches
+anything the alert missed, not the only thing standing between a silently
+stranded position and it staying stranded.
 
 - [ ] **Open the Alpaca dashboard's live positions page directly** (not the
       bot's dashboard, not the sandbox activity log — the broker's own
@@ -482,3 +483,39 @@ Success is:
 - and the drawdown behavior is finally **observed**, not assumed — this
   stage exists to watch the halt actually fire at least once under real
   conditions, not to avoid ever seeing it fire.
+
+---
+
+## Stuck exits: detection, surfacing, and auto-flatten
+
+Detection already runs in Go (`findOrphans`, every ~60s): a "orphan" is a symbol
+the broker still holds where this bot's ledger marked the position terminal — a
+close that did not flatten the broker side.
+
+**Surfacing (always on).** `GET /api/v1/orphans/status` on the bot; the harness
+aggregates it at `/api/orphans` and pushes Slack alerts (`orphanDetected`,
+`orphanFlattened`, `orphanFlattenFailed`) if you enable those events in the
+sandbox's Slack plugin `notifyOn`. Enable them for the live account.
+
+**Auto-flatten (opt-in, default off).** When armed it market-sells a long orphan
+that has persisted 3 reconcile passes (~3 min), once, then latches and alerts.
+
+**⚠ The one rule that matters:** auto-flatten is only safe on a **dedicated,
+single-agent account**. `GetPositions()` returns the whole Alpaca account, so on
+a shared account the bot could market-sell *another agent's* live position that
+happens to share a symbol with one of this bot's closed trades. The code cannot
+detect that on its own. To arm it you must set BOTH `ENABLE_COIL_ORPHAN_AUTOFLATTEN=true`
+and `ORPHAN_AUTOFLATTEN_ACCOUNT_IS_DEDICATED=true`; enabling without the
+affirmation is inert (the bot logs a refusal at startup). **Never set the
+dedicated flag on an account more than one bot trades.** The live Coil account
+is dedicated by construction, which is the only reason it is safe here.
+
+**When it fires:** confirm in the log (`orphan auto-flattened`), and note the
+audit trail — the terminal record gets an `orphan_autoflattened:<qty>@<orderID>`
+note. A **failed** flatten latches and alerts `operator_review_required`; resolve
+it manually (the latch clears once the broker no longer holds the shares).
+
+**Measurement caveat:** the ledger booked the position's P&L at its (phantom)
+close price; the flatten realizes a different market price, so a small real-money
+delta is uncaptured by segment P&L. Bounded at ~a few dollars per $600 position;
+the audit note records the actual fill.

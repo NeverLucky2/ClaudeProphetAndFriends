@@ -262,6 +262,9 @@ func main() {
 	orderController.SetSleeveGuard(sleeveGuard)
 	sleeveController := controllers.NewSleeveController(sleeveGuard)
 
+	// Orphan / auto-flatten read-only snapshot (Layer A surfacing).
+	orphanController := controllers.NewOrphanController(positionManager)
+
 	// Coil live drawdown halt. Default OFF; the live Coil bot sets
 	// ENABLE_COIL_LIVE_HALT=true. Shares the sleeve's state-dir convention.
 	coilHaltStateDir := cfg.CoilLiveStateDir
@@ -437,6 +440,21 @@ func main() {
 	// <db-dir>/reports/orphans.json next to this sandbox's database.
 	positionManager.SetOrphanReporter(services.NewOrphanReporter(filepath.Join(filepath.Dir(cfg.DatabasePath), "reports")))
 
+	// Orphan auto-flatten (Layer B). Default off; acts only when BOTH the enable
+	// flag and the dedicated-account affirmation are set.
+	nyLocOrphan, _ := time.LoadLocation("America/New_York")
+	positionManager.SetOrphanAutoFlatten(services.OrphanAutoFlattenConfig{
+		Enabled:            cfg.EnableOrphanAutoFlatten,
+		AccountIsDedicated: cfg.OrphanAutoFlattenAccountIsDedicated,
+		Streak:             cfg.OrphanAutoFlattenStreak,
+		MarketIsOpen:       func() bool { return services.StaticMarketPhase(time.Now().UTC(), nyLocOrphan) == "open" },
+	})
+	if cfg.EnableOrphanAutoFlatten && !cfg.OrphanAutoFlattenAccountIsDedicated {
+		logger.Warn("orphan auto-flatten ENABLED but account NOT affirmed dedicated (ORPHAN_AUTOFLATTEN_ACCOUNT_IS_DEDICATED) — refusing to act; Layer A detection/surfacing still runs")
+	} else if cfg.EnableOrphanAutoFlatten {
+		logger.WithField("streak", cfg.OrphanAutoFlattenStreak).Warn("orphan auto-flatten ARMED (account affirmed dedicated)")
+	}
+
 	// Turtle Go scheduler (TURTLE_SCHEDULER_ENABLED=false by default).
 	// When enabled, the daily 17:00 ET TRADING_RULES_TREND.md heartbeat
 	// sequence runs in this Go service instead of the LLM. The trend agent's
@@ -599,6 +617,7 @@ func main() {
 		economicFeedsController,
 		guardController,
 		sleeveController,
+		orphanController,
 		trendController,
 		meanRevController,
 		driftController,
@@ -668,6 +687,7 @@ func setupRouter(
 	economicFeedsController *controllers.EconomicFeedsController,
 	guardController *controllers.GuardController,
 	sleeveController *controllers.SleeveController,
+	orphanController *controllers.OrphanController,
 	trendController *controllers.TrendController,
 	meanRevController *controllers.MeanRevController,
 	driftController *controllers.DriftController,
@@ -785,6 +805,9 @@ func setupRouter(
 		// Prophet fun-sleeve gate: status + independent manual kill switch.
 		api.GET("/sleeve/status", sleeveController.HandleGetStatus)
 		api.POST("/sleeve/kill", sleeveController.HandleKill)
+
+		// Orphan / auto-flatten read-only snapshot (Layer A surfacing).
+		api.GET("/orphans/status", orphanController.HandleGetStatus)
 
 		// Regime gate endpoint (Item 2). Returns the daily-computed regime
 		// status; agents consume tier/sizing_multiplier/block_new_entries.

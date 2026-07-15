@@ -48,6 +48,7 @@ import { runReconciliationForSandbox, readReconciliationSummary } from './trade-
 import { runReasoningDigestForSandbox, readReasoningDigestSummary } from './reasoning-digest.js';
 import { readTradeGradesSummary } from '../scripts/trade-grades.mjs';
 import { readRange, buildCostsResponse, _etDate as _etDateCS } from './cost-store.js';
+import { makeOrphanPoller } from './orphan-poll.js';
 import nodeFs from 'node:fs/promises';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -278,6 +279,22 @@ async function notifySlack(text, sandboxId) {
 function slackEnabled(event, sandboxId) {
   const slack = sandboxId ? getPluginForSandbox(sandboxId, 'slack') : getPlugin('slack');
   return slack?.enabled && slack?.webhookUrl && slack?.notifyOn?.[event];
+}
+
+// ── Orphan Poller ───────────────────────────────────────────────────
+// Layer A surfacing for the Go-side orphan detector (Task 1-3): polls each
+// running bot's /api/v1/orphans/status, exposes an aggregate for the
+// dashboard, and pushes deduped Slack alerts. Dedup logic lives in
+// orphan-poll.js and is unit-tested there.
+const orphanPoller = makeOrphanPoller({
+  runtimes: () => orchestrator.runtimes.values(),
+  resolveAgent: (sandboxId) => getResolvedAgentForSandbox(sandboxId),
+  notify: (event, text, sandboxId) => { if (slackEnabled(event, sandboxId)) notifySlack(text, sandboxId); },
+  logger: (msg) => console.error(msg),
+});
+// Poll ~ every 60s (matches the Go reconcile cadence). Kill switch via env.
+if (process.env.ORPHAN_POLL_ENABLED !== 'false') {
+  setInterval(() => { orphanPoller.pollOnce().catch(() => {}); }, 60_000);
 }
 
 // Daily summary — schedule at 4:30 PM ET
@@ -1067,6 +1084,10 @@ app.get('/api/reconciliation', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// Aggregated orphan status across all polled sandboxes (Layer A surfacing).
+// { [sandboxId]: <latest /api/v1/orphans/status snapshot> }
+app.get('/api/orphans', (_req, res) => res.json(orphanPoller.getAggregate()));
 
 // GET /api/reasoning-digest?date=&sandboxId= — the day's Coil/Turtle teaching
 // digest. Silent (empty items) when no report exists. Report-only.

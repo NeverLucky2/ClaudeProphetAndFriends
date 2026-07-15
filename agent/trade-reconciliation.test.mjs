@@ -132,6 +132,11 @@ test('writeReconciliationReport: writes JSON (with mismatchCount + scope) and a 
   assert.match(md, /Covers order placements/);
 });
 
+test('SCOPE_NOTE no longer claims closes are unverified, and points to the orphan detector', () => {
+  assert.doesNotMatch(SCOPE_NOTE, /does not verify closes/i);
+  assert.match(SCOPE_NOTE, /orphan/i);
+});
+
 test('readReconciliationSummary: aggregates across sandbox dirs for the date', async () => {
   const fs = fakeFs();
   const mk = (sid, count) => ({ date: '2026-05-26', sandboxId: sid, agentName: sid, strategy: 'v2',

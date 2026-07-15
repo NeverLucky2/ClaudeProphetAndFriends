@@ -17,6 +17,14 @@ type reconcileStubTrading struct {
 	positions  []*interfaces.Position
 	getPosErr  error
 	placeCalls int
+	closeCalls []closeCall
+	closeErr   error
+}
+
+// closeCall records one ClosePosition invocation for auto-flatten assertions.
+type closeCall struct {
+	symbol string
+	qty    float64
 }
 
 func (s *reconcileStubTrading) GetPositions(_ context.Context) ([]*interfaces.Position, error) {
@@ -29,6 +37,16 @@ func (s *reconcileStubTrading) GetPositions(_ context.Context) ([]*interfaces.Po
 func (s *reconcileStubTrading) PlaceOrder(_ context.Context, _ *interfaces.Order) (*interfaces.OrderResult, error) {
 	s.placeCalls++
 	return &interfaces.OrderResult{OrderID: "should-not-be-placed", Status: "accepted"}, nil
+}
+
+// ClosePosition shadows the embedded stubTrading's no-op implementation so
+// auto-flatten tests can assert exactly what was submitted and script failures.
+func (s *reconcileStubTrading) ClosePosition(_ context.Context, symbol string, qty float64) (*interfaces.OrderResult, error) {
+	s.closeCalls = append(s.closeCalls, closeCall{symbol: symbol, qty: qty})
+	if s.closeErr != nil {
+		return nil, s.closeErr
+	}
+	return &interfaces.OrderResult{OrderID: "flatten-order-id", Status: "accepted"}, nil
 }
 
 func newReconcilePM(t *testing.T, trading interfaces.TradingService) *PositionManager {

@@ -132,7 +132,7 @@ export function assessCoverage(rawOrders, dayStartIso, limit = 500) {
 
 // Stated on every report and the banner so a clean result is not misread as
 // "my positions match the broker." v1 checks opens, not closes/positions.
-export const SCOPE_NOTE = 'Covers order placements (opens/adds). Does NOT verify closes/exits or live position state — a logged-success close that did not execute will not be caught here.';
+export const SCOPE_NOTE = 'Covers order placements (opens/adds). Closes/exits are covered separately by the Go-side orphan detector (GET /api/v1/orphans/status) — a logged-success close that did not flatten the broker surfaces there as an orphan, not here.';
 
 function mismatchCountOf(counts) {
   return (counts?.phantomSuccess || 0) + (counts?.falseFailure || 0) + (counts?.statusDivergence || 0);

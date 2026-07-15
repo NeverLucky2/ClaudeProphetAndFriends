@@ -149,6 +149,21 @@ type PositionManager struct {
 	// installed, detection still logs but writes no file.
 	orphanReporter *OrphanReporter
 
+	// Orphan auto-flatten (Layer B) config + state. All guarded by mu. Zero-value
+	// = disabled (Layer A detection still runs regardless).
+	orphanAutoFlatten OrphanAutoFlattenConfig
+	// orphanStreak counts consecutive reconcile passes a symbol has been an
+	// orphan; flattenLatched marks symbols already auto-flattened this process.
+	// Both in-memory (reset on restart — deliberate, see the 2026-07-14 spec).
+	orphanStreak   map[string]int
+	flattenLatched map[string]bool
+	// lastOrphans is the orphan set from the most recent detectOrphans pass, so
+	// OrphanStatus can report it without an HTTP-path broker read.
+	lastOrphans []OrphanAlert
+	// lastFlattenActions is a small ring of recent auto-flatten attempts for
+	// operator observability via OrphanStatus.
+	lastFlattenActions []OrphanFlattenAction
+
 	// pendingTimeout bounds how long a managed entry may sit PENDING before it
 	// is force-terminalized (cancel + flatten any stray fill). Without it a
 	// broker order stuck "new"/"accepted" with no fill hangs forever — the
@@ -191,6 +206,8 @@ func NewPositionManager(
 		positions:          make(map[string]*ManagedPosition),
 		reconcileMissCount: make(map[string]int),
 		orphanAlerted:      make(map[string]bool),
+		orphanStreak:       make(map[string]int),
+		flattenLatched:     make(map[string]bool),
 		pendingTimeout:     pendingEntryTimeout(),
 		cancelSettlePoll:   200 * time.Millisecond,
 		cancelSettleMax:    15,
@@ -528,6 +545,9 @@ func (pm *PositionManager) reconcileWithBroker(ctx context.Context) (int, error)
 
 	// Report-only orphan detection reuses the broker positions read above.
 	pm.detectOrphans(brokerPositions)
+	// Layer B: auto-flatten a confirmed, stable orphan (both gates required;
+	// inert otherwise). Runs AFTER detectOrphans so lastOrphans is populated.
+	pm.autoFlattenOrphans(ctx, brokerPositions)
 
 	return closed, nil
 }
@@ -1491,6 +1511,7 @@ func (pm *PositionManager) detectOrphans(brokerPositions []*interfaces.Position)
 	}
 
 	pm.mu.Lock()
+	pm.lastOrphans = orphans // snapshot for OrphanStatus (Layer A)
 	var newly []OrphanAlert
 	changed := false
 	for _, o := range orphans {
@@ -1522,6 +1543,227 @@ func (pm *PositionManager) detectOrphans(brokerPositions []*interfaces.Position)
 		if err := pm.orphanReporter.Report(orphans); err != nil {
 			pm.logger.WithError(err).Warn("Failed to write orphans report")
 		}
+	}
+}
+
+// OrphanAutoFlattenConfig parameterizes Layer B. Enabled AND AccountIsDedicated
+// must BOTH be true for any flatten to fire (see the 2026-07-14 spec's
+// shared-account constraint). MarketIsOpen gates liquidation to RTH.
+type OrphanAutoFlattenConfig struct {
+	Enabled            bool
+	AccountIsDedicated bool
+	Streak             int
+	MarketIsOpen       func() bool
+}
+
+// OrphanFlattenAction records one auto-flatten attempt for observability.
+type OrphanFlattenAction struct {
+	Symbol  string    `json:"symbol"`
+	Qty     float64   `json:"qty"`
+	OrderID string    `json:"order_id,omitempty"`
+	Success bool      `json:"success"`
+	Error   string    `json:"error,omitempty"`
+	At      time.Time `json:"at"`
+}
+
+// OrphanStatusSnapshot is the read-only Layer A view.
+type OrphanStatusSnapshot struct {
+	Orphans                  []OrphanAlert         `json:"orphans"`
+	AutoFlattenEnabled       bool                  `json:"auto_flatten_enabled"`
+	AccountDedicatedAffirmed bool                  `json:"account_dedicated_affirmed"`
+	Streak                   int                   `json:"streak"`
+	StreakBySymbol           map[string]int        `json:"streak_by_symbol"`
+	LatchedSymbols           []string              `json:"latched_symbols"`
+	LastActions              []OrphanFlattenAction `json:"last_actions"`
+}
+
+// SetOrphanAutoFlatten installs the Layer B config and initializes its state
+// maps. Called once at wiring time.
+func (pm *PositionManager) SetOrphanAutoFlatten(cfg OrphanAutoFlattenConfig) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.orphanAutoFlatten = cfg
+	if pm.orphanStreak == nil {
+		pm.orphanStreak = map[string]int{}
+	}
+	if pm.flattenLatched == nil {
+		pm.flattenLatched = map[string]bool{}
+	}
+}
+
+// OrphanStatus returns a race-free snapshot of the current orphan set and the
+// auto-flatten state. Snapshots under mu — the reconcile loop mutates these
+// fields under the same lock.
+func (pm *PositionManager) OrphanStatus() OrphanStatusSnapshot {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	streaks := make(map[string]int, len(pm.orphanStreak))
+	for k, v := range pm.orphanStreak {
+		streaks[k] = v
+	}
+	var latched []string
+	for k, v := range pm.flattenLatched {
+		if v {
+			latched = append(latched, k)
+		}
+	}
+	orphans := make([]OrphanAlert, len(pm.lastOrphans))
+	copy(orphans, pm.lastOrphans)
+	actions := make([]OrphanFlattenAction, len(pm.lastFlattenActions))
+	copy(actions, pm.lastFlattenActions)
+	return OrphanStatusSnapshot{
+		Orphans:                  orphans,
+		AutoFlattenEnabled:       pm.orphanAutoFlatten.Enabled,
+		AccountDedicatedAffirmed: pm.orphanAutoFlatten.AccountIsDedicated,
+		Streak:                   pm.orphanAutoFlatten.Streak,
+		StreakBySymbol:           streaks,
+		LatchedSymbols:           latched,
+		LastActions:              actions,
+	}
+}
+
+// orphanFlattenActionRing bounds lastFlattenActions.
+const orphanFlattenActionRing = 20
+
+// autoFlattenOrphans is Layer B: after detectOrphans has run this pass, advance
+// each orphan's streak and, for a long orphan that has been stable for the
+// configured number of passes, market-flatten it — ONCE, then latch. Behind two
+// gates (Enabled AND AccountIsDedicated) so it is inert unless the operator has
+// both turned it on and affirmed the account is single-agent (see the
+// 2026-07-14 spec's shared-account constraint). Reuses this pass's broker
+// positions; re-reads fresh right before any sell. Never blocks or touches an
+// exit — ClosePosition does not pass through the trade guard.
+func (pm *PositionManager) autoFlattenOrphans(ctx context.Context, brokerPositions []*interfaces.Position) {
+	pm.mu.RLock()
+	cfg := pm.orphanAutoFlatten
+	pm.mu.RUnlock()
+	if !cfg.Enabled || !cfg.AccountIsDedicated {
+		return // both gates required; fail-closed
+	}
+
+	pm.mu.Lock()
+	managed := make([]*ManagedPosition, 0, len(pm.positions))
+	for _, p := range pm.positions {
+		managed = append(managed, p)
+	}
+	pm.mu.Unlock()
+
+	orphans := findOrphans(brokerPositions, managed)
+	current := make(map[string]bool, len(orphans))
+	for _, o := range orphans {
+		current[o.Symbol] = true
+	}
+
+	pm.mu.Lock()
+	// Advance streaks; drop resolved symbols (streak + latch cleared).
+	for _, o := range orphans {
+		pm.orphanStreak[o.Symbol]++
+	}
+	for sym := range pm.orphanStreak {
+		if !current[sym] {
+			delete(pm.orphanStreak, sym)
+			delete(pm.flattenLatched, sym)
+		}
+	}
+	// Decide who to fire on, under the lock, but ACT (network) outside it.
+	// OrphanAlert already carries the exact terminal record's PositionID, so use
+	// it directly — no Symbol→position map (which would be nondeterministic when
+	// a symbol has more than one terminal record).
+	type target struct {
+		symbol string
+		qty    float64
+		posID  string
+	}
+	var toFire []target
+	for _, o := range orphans {
+		if pm.flattenLatched[o.Symbol] {
+			continue
+		}
+		if pm.orphanStreak[o.Symbol] < cfg.Streak {
+			continue
+		}
+		if o.BrokerQty <= 0 {
+			continue // long-only; short orphan handled by the Layer-A alert only
+		}
+		toFire = append(toFire, target{symbol: o.Symbol, qty: o.BrokerQty, posID: o.PositionID})
+	}
+	pm.mu.Unlock()
+
+	if len(toFire) == 0 {
+		return
+	}
+	if cfg.MarketIsOpen != nil && !cfg.MarketIsOpen() {
+		return // hold the streak; fire when the market opens
+	}
+
+	// Fresh re-read: confirm the shares are still held long before any sell.
+	fresh, err := pm.tradingService.GetPositions(ctx)
+	if err != nil {
+		pm.logger.WithError(err).Warn("orphan auto-flatten: broker re-read failed — skipping this pass (fail-closed)")
+		return
+	}
+	// Re-run the detector on FRESH state so "still an orphan" means exactly what
+	// detection means: broker still holds it, this ledger has a terminal record,
+	// and NO live record has appeared. A same-symbol re-entry that created a live
+	// record in the window since selection is excluded here and never sold.
+	pm.mu.Lock()
+	managedNow := make([]*ManagedPosition, 0, len(pm.positions))
+	for _, p := range pm.positions {
+		managedNow = append(managedNow, p)
+	}
+	pm.mu.Unlock()
+	freshOrphanQty := map[string]float64{}
+	for _, o := range findOrphans(fresh, managedNow) {
+		freshOrphanQty[o.Symbol] = o.BrokerQty
+	}
+
+	for _, tg := range toFire {
+		fq, ok := freshOrphanQty[tg.symbol]
+		if !ok || fq <= 0 {
+			continue // no longer a confirmed long orphan (resolved, went live, or short) — do not sell
+		}
+		sellQty := tg.qty
+		if fq < sellQty {
+			sellQty = fq // never sell more than the currently-confirmed orphan qty
+		}
+		// Latch BEFORE the call so a mid-flight retry can never double-submit.
+		pm.mu.Lock()
+		pm.flattenLatched[tg.symbol] = true
+		pm.mu.Unlock()
+
+		res, ferr := pm.tradingService.ClosePosition(ctx, tg.symbol, sellQty)
+		if ferr != nil {
+			pm.recordFlattenAction(OrphanFlattenAction{Symbol: tg.symbol, Qty: sellQty, Success: false, Error: ferr.Error(), At: time.Now()})
+			pm.logger.WithError(ferr).WithFields(logrus.Fields{
+				"symbol": tg.symbol, "qty": sellQty, "operator_review_required": true,
+			}).Error("orphan auto-flatten FAILED — latched, will not retry; operator must resolve")
+			continue
+		}
+		orderID := ""
+		if res != nil {
+			orderID = res.OrderID
+		}
+		pm.recordFlattenAction(OrphanFlattenAction{Symbol: tg.symbol, Qty: sellQty, OrderID: orderID, Success: true, At: time.Now()})
+		// Audit note on the terminal record (mirror reconciled_closed:broker_flat).
+		pm.mu.Lock()
+		if p, ok := pm.positions[tg.posID]; ok {
+			p.Notes = strings.TrimSpace(p.Notes + fmt.Sprintf(" orphan_autoflattened:%v@%s", sellQty, orderID))
+			_ = pm.savePositionToDB(p)
+		}
+		pm.mu.Unlock()
+		pm.logger.WithFields(logrus.Fields{
+			"symbol": tg.symbol, "qty": sellQty, "order_id": orderID, "operator_review_required": true,
+		}).Warn("orphan auto-flattened — broker shares liquidated for a ledger-terminal position")
+	}
+}
+
+// recordFlattenAction appends to the bounded observability ring under mu.
+func (pm *PositionManager) recordFlattenAction(a OrphanFlattenAction) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.lastFlattenActions = append(pm.lastFlattenActions, a)
+	if len(pm.lastFlattenActions) > orphanFlattenActionRing {
+		pm.lastFlattenActions = pm.lastFlattenActions[len(pm.lastFlattenActions)-orphanFlattenActionRing:]
 	}
 }
 
@@ -1670,8 +1912,14 @@ func (pm *PositionManager) loadPositionsFromDB() error {
 	return nil
 }
 
-// savePositionToDB saves a managed position to database
+// savePositionToDB saves a managed position to database. nil-safe: PMs built
+// without a storageService (unit tests constructing *PositionManager literals
+// directly, bypassing NewPositionManager) no-op rather than panic, matching
+// the nil-guard pattern already used for storageService elsewhere in this file.
 func (pm *PositionManager) savePositionToDB(position *ManagedPosition) error {
+	if pm.storageService == nil {
+		return nil
+	}
 	dbPosition := pm.managedPositionToDB(position)
 	return pm.storageService.SaveManagedPosition(dbPosition)
 }
