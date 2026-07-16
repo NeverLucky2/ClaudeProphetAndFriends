@@ -130,6 +130,40 @@ func (s *MeanRevSignalService) GetSignal(ctx context.Context, symbol string) (*M
 	return ComputeMeanRevSignal(symbol, bars), nil
 }
 
+// GetSignalSeries returns the per-day MeanRevSignal for the most recent `days`
+// trading bars, each computed AS-OF that day by re-slicing the bar history into
+// ComputeMeanRevSignal — so the RSI/SMA math is byte-for-byte the single-day
+// path, never re-derived. Order is oldest→newest. Only days whose inclusive
+// prefix has >= meanRevMinBars bars are returned, so SMA-200/SMA-5/RSI are always
+// valid (never the meanRevSMA "0 on short prefix" sentinel); if fewer valid days
+// exist than requested, fewer are returned. The last element equals GetSignal for
+// the same bars (latest-day parity).
+func (s *MeanRevSignalService) GetSignalSeries(ctx context.Context, symbol string, days int) ([]*MeanRevSignal, error) {
+	if days <= 0 {
+		return nil, fmt.Errorf("days must be positive, got %d", days)
+	}
+	end := time.Now()
+	start := end.AddDate(0, 0, -meanRevBarLookback)
+	bars, err := s.dataSvc.GetHistoricalBars(ctx, symbol, start, end, "1Day")
+	if err != nil {
+		return nil, fmt.Errorf("fetch bars for %s: %w", symbol, err)
+	}
+	if len(bars) < meanRevMinBars {
+		return nil, ErrInsufficientMeanRevHistory
+	}
+	// Inclusive prefix bars[:idx+1] first reaches meanRevMinBars bars at idx = meanRevMinBars-1.
+	firstValid := meanRevMinBars - 1
+	startIdx := len(bars) - days
+	if startIdx < firstValid {
+		startIdx = firstValid
+	}
+	out := make([]*MeanRevSignal, 0, len(bars)-startIdx)
+	for k := startIdx; k < len(bars); k++ {
+		out = append(out, ComputeMeanRevSignal(symbol, bars[:k+1]))
+	}
+	return out, nil
+}
+
 // ComputeMeanRevSignal is the pure-function form of signal computation.
 // Exposed so tests can drive it with synthetic bars without going through
 // Alpaca. earnings_within_5d defaults to false; the candidates service is
@@ -406,6 +440,15 @@ func (s *MeanRevCandidatesService) GetSignalForTicker(ctx context.Context, ticke
 	}
 	sig.Explanation = ExplainMeanRevEntry(*sig)
 	return sig, nil
+}
+
+// GetSignalSeriesForTicker backs GET /api/v1/meanrev/signal-series/:symbol. It is
+// a thin pass-through to the signal service; earnings enrichment is intentionally
+// NOT applied — the shadow-eval scorer consumes only price/RSI/SMA, and a per-day
+// earnings recompute would be both wrong (the earnings flag is as-of "now", not
+// as-of each historical day) and unnecessary.
+func (s *MeanRevCandidatesService) GetSignalSeriesForTicker(ctx context.Context, ticker string, days int) ([]*MeanRevSignal, error) {
+	return s.signalSvc.GetSignalSeries(ctx, ticker, days)
 }
 
 // Universe returns a defensive copy of the configured universe.

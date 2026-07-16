@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -72,6 +73,43 @@ func (mc *MeanRevController) HandleGetSignal(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, sig)
+}
+
+// HandleGetSignalSeries returns the per-day signal series for the most recent N
+// trading days. GET /api/v1/meanrev/signal-series/:symbol?days=N (default 7,
+// range 1..14). Fewer than N days are returned when the name lacks enough
+// history for N full-prefix days; `count` reports the actual number.
+func (mc *MeanRevController) HandleGetSignalSeries(c *gin.Context) {
+	symbol := strings.ToUpper(c.Param("symbol"))
+	if symbol == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "symbol path param required"})
+		return
+	}
+	days := 7
+	if q := c.Query("days"); q != "" {
+		n, err := strconv.Atoi(q)
+		if err != nil || n < 1 || n > 14 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "days must be an integer in 1..14"})
+			return
+		}
+		days = n
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+	defer cancel()
+
+	series, err := mc.candidatesSvc.GetSignalSeriesForTicker(ctx, symbol, days)
+	if errors.Is(err, services.ErrInsufficientMeanRevHistory) {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error":            fmt.Sprintf("insufficient history for %s", symbol),
+			"minimum_required": 210,
+		})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"symbol": symbol, "count": len(series), "series": series})
 }
 
 // HandleGetUniverse returns the configured universe — operator visibility only.

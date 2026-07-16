@@ -159,3 +159,62 @@ func TestMeanRevController_HandleGetUniverse(t *testing.T) {
 		t.Fatalf("expected universe=[AAA]; got %+v", resp)
 	}
 }
+
+func TestMeanRevController_HandleGetSignalSeries_OK(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	mc := newTestMeanRevController()
+	router := gin.New()
+	router.GET("/signal-series/:symbol", mc.HandleGetSignalSeries)
+
+	req := httptest.NewRequest(http.MethodGet, "/signal-series/aaa?days=5", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Symbol string                    `json:"symbol"`
+		Count  int                       `json:"count"`
+		Series []services.MeanRevSignal  `json:"series"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v; body=%s", err, w.Body.String())
+	}
+	if resp.Symbol != "AAA" || resp.Count != 5 || len(resp.Series) != 5 {
+		t.Fatalf("symbol=%q count=%d len=%d, want AAA/5/5", resp.Symbol, resp.Count, len(resp.Series))
+	}
+	if resp.Series[4].Ticker != "AAA" {
+		t.Errorf("last series Ticker = %q, want AAA", resp.Series[4].Ticker)
+	}
+}
+
+func TestMeanRevController_HandleGetSignalSeries_BadDays(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	mc := newTestMeanRevController()
+	router := gin.New()
+	router.GET("/signal-series/:symbol", mc.HandleGetSignalSeries)
+
+	for _, q := range []string{"days=0", "days=99", "days=abc"} {
+		req := httptest.NewRequest(http.MethodGet, "/signal-series/aaa?"+q, nil)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s → status %d, want 400", q, w.Code)
+		}
+	}
+}
+
+func TestMeanRevController_HandleGetSignalSeries_InsufficientHistory(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	mc := newTestMeanRevController()
+	router := gin.New()
+	router.GET("/signal-series/:symbol", mc.HandleGetSignalSeries)
+
+	req := httptest.NewRequest(http.MethodGet, "/signal-series/MISSING?days=5", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", w.Code, w.Body.String())
+	}
+}

@@ -342,6 +342,7 @@ export class AnalysisScheduler extends EventEmitter {
     this._lastTradeReconcileDate = null; // YYYY-MM-DD (daily after-close reconciliation)
     this._lastReasoningDigestDate = null; // YYYY-MM-DD (daily after-close reasoning digest)
     this._lastTradeGradingDate = null; // YYYY-MM-DD (daily after-close trade grading)
+    this._lastCoilShadowDate = null; // YYYY-MM-DD (daily after-close coil shadow-eval; default-OFF via COIL_SHADOW_ENABLED)
     this._lastDailyCostReportDate = null; // YYYY-MM-DD (daily cost report)
   }
 
@@ -394,6 +395,7 @@ export class AnalysisScheduler extends EventEmitter {
       'trade_reconciliation',
       'reasoning_digest',
       'trade_grading',
+      'coil_shadow',
     ];
     if (!validJobs.includes(jobName)) {
       return { error: `Unknown job: ${jobName}. Valid: ${validJobs.join(', ')}` };
@@ -471,6 +473,9 @@ export class AnalysisScheduler extends EventEmitter {
       } else if (jobName === 'trade_grading') {
         this._lastTradeGradingDate = isoDate;
         await this._runTradeGrading(isoDate);
+      } else if (jobName === 'coil_shadow') {
+        this._lastCoilShadowDate = isoDate;
+        await this._runCoilShadow(isoDate);
       } else if (jobName === 'trend_parameter_review') {
         this._lastTrendParamReviewQuarter = this._getQuarter(isoDate);
         await this._runSkill('trend-parameter-review', isoDate, null, 15 * 60 * 1000, this._automatedRunAppendix({
@@ -1131,6 +1136,15 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
       await this.triggerJob('trade_grading').catch(() => {});
     }
 
+    // Coil shadow eval — daily snapshot+tag then score, 16:56 ET (after the 16:55
+    // reasoning digest). Default-OFF: fires only when COIL_SHADOW_ENABLED === 'true'.
+    // The spawned scripts + _runCoilShadow also self-gate; idempotent per ET day.
+    if (isWeekday && hour === 16 && minute === 56 &&
+        process.env.COIL_SHADOW_ENABLED === 'true' &&
+        this._lastCoilShadowDate !== isoDate) {
+      await this.triggerJob('coil_shadow').catch(() => {});
+    }
+
     if (autoAnalyses && isSunday && hour === 18 && minute === 0 && this._lastWeeklyScreenDate !== isoDate) {
       await this.triggerJob('weekly_screeners').catch(() => {});
     }
@@ -1223,6 +1237,25 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
       await this._runSkill('trade-grader', isoDate, null, 10 * 60 * 1000, null, false, HAIKU_MODEL);
     }
     this._log(`trade_grading complete for ${isoDate} (prophet_closes=${prophetCloses}).`, 'success');
+  }
+
+  // coil_shadow: default-OFF forward shadow-eval of the Coil RSI-boundary near-misses.
+  // Spawns the daily snapshot+tag job then the retrospective scorer; both self-gate on
+  // COIL_SHADOW_ENABLED and write only under data/coil-shadow/. Never trades. Mirrors
+  // _runTradeGrading's spawn shape. Idempotent per ET day (the daily job guards on its
+  // own per-day file), so a restart re-fire is a harmless no-op.
+  async _runCoilShadow(isoDate) {
+    if (process.env.COIL_SHADOW_ENABLED !== 'true') return; // default OFF (belt-and-suspenders; the tick also gates)
+    this._log(`Starting coil_shadow for ${isoDate}...`, 'info');
+    this.emit('scheduler_job_start', { job: 'coil_shadow', date: isoDate });
+    for (const script of ['scripts/coil-shadow.mjs', 'scripts/coil-shadow-score.mjs']) {
+      await new Promise((resolve) => {
+        const child = spawn(process.execPath, [script], { stdio: 'ignore' });
+        child.on('error', () => resolve());
+        child.on('close', () => resolve());
+      });
+    }
+    this._log(`coil_shadow complete for ${isoDate}.`, 'success');
   }
 
   // breadth_skill: pure-python (no LLM). fetch_breadth_csv.py is fully autonomous

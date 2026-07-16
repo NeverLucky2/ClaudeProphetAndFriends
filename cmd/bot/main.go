@@ -826,6 +826,7 @@ func setupRouter(
 		{
 			meanrev.GET("/candidates", meanRevController.HandleGetCandidates)
 			meanrev.GET("/signal/:symbol", meanRevController.HandleGetSignal)
+			meanrev.GET("/signal-series/:symbol", meanRevController.HandleGetSignalSeries)
 			meanrev.GET("/universe", meanRevController.HandleGetUniverse)
 		}
 

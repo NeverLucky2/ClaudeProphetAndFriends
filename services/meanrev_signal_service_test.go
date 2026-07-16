@@ -443,6 +443,83 @@ func TestCandidatesService_CachingHonored(t *testing.T) {
 	}
 }
 
+// ascendingCloses returns L closes rising by `step` from `base` — enough history
+// (>= meanRevMinBars) for a valid multi-day signal series.
+func ascendingCloses(L int, base, step float64) []float64 {
+	closes := make([]float64, L)
+	for i := range closes {
+		closes[i] = base + step*float64(i)
+	}
+	return closes
+}
+
+// seriesStubFetcher returns a fixed bar slice for any symbol/date range.
+type seriesStubFetcher struct{ bars []*interfaces.Bar }
+
+func (f *seriesStubFetcher) GetHistoricalBars(ctx context.Context, symbol string, start, end time.Time, timeframe string) ([]*interfaces.Bar, error) {
+	return f.bars, nil
+}
+
+func TestGetSignalSeries_LengthOrderingAndParity(t *testing.T) {
+	bars := makeMeanRevBars(ascendingCloses(220, 100.0, 0.1))
+	svc := NewMeanRevSignalService(&seriesStubFetcher{bars: bars})
+
+	series, err := svc.GetSignalSeries(context.Background(), "aaa", 7)
+	if err != nil {
+		t.Fatalf("GetSignalSeries error: %v", err)
+	}
+	if len(series) != 7 {
+		t.Fatalf("len(series) = %d, want 7", len(series))
+	}
+	// Oldest→newest, strictly increasing as_of; every day has a valid (nonzero) SMA-200.
+	for i, p := range series {
+		if p.SMA200 == 0 {
+			t.Errorf("series[%d].SMA200 == 0 (short-prefix sentinel leaked)", i)
+		}
+		if i > 0 && series[i].AsOf <= series[i-1].AsOf {
+			t.Errorf("series not strictly oldest→newest at %d: %q <= %q", i, series[i].AsOf, series[i-1].AsOf)
+		}
+	}
+	// Latest-day parity: last series element equals GetSignal for the same bars.
+	single, err := svc.GetSignal(context.Background(), "aaa")
+	if err != nil {
+		t.Fatalf("GetSignal error: %v", err)
+	}
+	last := series[len(series)-1]
+	if last.AsOf != single.AsOf || last.LastClose != single.LastClose ||
+		last.RSI2 != single.RSI2 || last.SMA5 != single.SMA5 || last.SMA200 != single.SMA200 {
+		t.Fatalf("latest-day parity failed:\n series=%+v\n single=%+v", last, single)
+	}
+}
+
+func TestGetSignalSeries_InsufficientHistory(t *testing.T) {
+	bars := makeMeanRevBars(constCloses(100, 100.0)) // < meanRevMinBars
+	svc := NewMeanRevSignalService(&seriesStubFetcher{bars: bars})
+	if _, err := svc.GetSignalSeries(context.Background(), "aaa", 5); !errors.Is(err, ErrInsufficientMeanRevHistory) {
+		t.Fatalf("err = %v, want ErrInsufficientMeanRevHistory", err)
+	}
+}
+
+func TestGetSignalSeries_ClampsToAvailableValidDays(t *testing.T) {
+	// 212 bars → only 212-(meanRevMinBars-1) = 3 days have a full 210-bar prefix.
+	bars := makeMeanRevBars(ascendingCloses(212, 100.0, 0.1))
+	svc := NewMeanRevSignalService(&seriesStubFetcher{bars: bars})
+	series, err := svc.GetSignalSeries(context.Background(), "aaa", 10)
+	if err != nil {
+		t.Fatalf("error: %v", err)
+	}
+	if len(series) != 3 {
+		t.Fatalf("len(series) = %d, want 3 (clamped to valid-prefix days)", len(series))
+	}
+}
+
+func TestGetSignalSeries_RejectsNonPositiveDays(t *testing.T) {
+	svc := NewMeanRevSignalService(&seriesStubFetcher{bars: makeMeanRevBars(ascendingCloses(220, 100.0, 0.1))})
+	if _, err := svc.GetSignalSeries(context.Background(), "aaa", 0); err == nil {
+		t.Fatal("expected error for days=0")
+	}
+}
+
 func TestCandidatesService_RefreshBypassesTTL(t *testing.T) {
 	// Refresh must recompute and overwrite the cache even when the cached entry
 	// is still within its TTL. That's what lets the background warmer keep the
