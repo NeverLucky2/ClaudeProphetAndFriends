@@ -3301,9 +3301,17 @@ async function refreshPortfolio() {
       const pv = '$' + Number(acc.PortfolioValue||acc.portfolio_value||0).toLocaleString('en-US',{minimumFractionDigits:2});
       const cv = '$' + Number(acc.Cash||acc.cash||0).toLocaleString('en-US',{minimumFractionDigits:2});
       const bv = '$' + Number(acc.BuyingPower||acc.buying_power||0).toLocaleString('en-US',{minimumFractionDigits:2});
-      const pnl = Number(acc.PortfolioValue||acc.portfolio_value||acc.Equity||acc.equity||0) - Number(acc.LastEquity||acc.last_equity||0);
-      const pnlStr = (pnl>=0?'+':'') + '$' + pnl.toLocaleString('en-US',{minimumFractionDigits:2});
-      const cls = pnl>=0? 'positive' : 'negative';
+      // Day P&L needs a prior-session close to measure against. Alpaca returns
+      // last_equity=0 when it has none (e.g. a freshly-reset paper account),
+      // and equity - 0 would display the FULL PORTFOLIO VALUE as if it were
+      // today's gain. Show a placeholder ("—") instead when unavailable.
+      // Canonical rule + tests: agent/day-pnl.js / agent/day-pnl.test.mjs.
+      const lastEquity = Number(acc.LastEquity||acc.last_equity||0);
+      const equity = Number(acc.PortfolioValue||acc.portfolio_value||acc.Equity||acc.equity||0);
+      const pnlAvailable = lastEquity > 0;
+      const pnl = equity - lastEquity;
+      const pnlStr = pnlAvailable ? ((pnl>=0?'+':'') + '$' + pnl.toLocaleString('en-US',{minimumFractionDigits:2})) : '—';
+      const cls = pnlAvailable ? (pnl>=0? 'positive' : 'negative') : '';
       // Update legacy static IDs
       ['portfolio-value','m-portfolio'].forEach(id => { const e = document.getElementById(id); if(e) e.textContent = pv; });
       ['cash-value','m-cash'].forEach(id => { const e = document.getElementById(id); if(e) e.textContent = cv; });

@@ -13,6 +13,7 @@ const OPENCODE_WIN_PREFIX = process.platform === 'win32' ? ['/c', 'opencode.cmd'
 import axios from 'axios';
 import { buildSystemPrompt } from './harness.js';
 import { formatHeartbeatLine } from './heartbeat-line.js';
+import { computeDayPnl } from './day-pnl.js';
 import { AnalysisScheduler } from './analysis-scheduler.js';
 import ChatStore from './chat-store.js';
 import AgentOrchestrator from './orchestrator.js';
@@ -314,12 +315,16 @@ function scheduleDailySummaryForHarness(targetHarness) {
         const client = getGoClientForSandbox(sandboxId);
         if (!client) return;
         const { data: acc } = await client.get('/api/v1/account');
-        const equity = Number(acc.PortfolioValue || acc.portfolio_value || acc.Equity || acc.equity || 0);
-        const lastEquity = Number(acc.LastEquity || acc.last_equity || 0);
-        const pnl = equity - lastEquity;
-        const pnlPct = lastEquity ? ((pnl / lastEquity) * 100).toFixed(2) : '0.00';
-        const emoji = pnl >= 0 ? ':chart_with_upwards_trend:' : ':chart_with_downwards_trend:';
-        notifySlack(`${emoji} *Daily Summary*\nP&L: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} (${pnlPct}%)\nPortfolio: $${equity.toFixed(2)}\nBeats: ${targetHarness.state.stats.totalBeats} | Trades: ${targetHarness.state.stats.trades} | Errors: ${targetHarness.state.stats.errors}`, sandboxId);
+        const day = computeDayPnl(acc);
+        // When there's no prior-close baseline (last_equity<=0), report P&L as
+        // unavailable rather than equity - 0, which would post the full
+        // portfolio value as if it were the day's gain. See day-pnl.js.
+        const pnlLine = day.available
+          ? `${day.pnl >= 0 ? '+' : ''}$${day.pnl.toFixed(2)} (${day.pnlPct.toFixed(2)}%)`
+          : 'N/A (no prior-close baseline)';
+        const emoji = !day.available ? ':bar_chart:'
+          : day.pnl >= 0 ? ':chart_with_upwards_trend:' : ':chart_with_downwards_trend:';
+        notifySlack(`${emoji} *Daily Summary*\nP&L: ${pnlLine}\nPortfolio: $${day.equity.toFixed(2)}\nBeats: ${targetHarness.state.stats.totalBeats} | Trades: ${targetHarness.state.stats.trades} | Errors: ${targetHarness.state.stats.errors}`, sandboxId);
       } catch {}
     }
     scheduleDailySummaryForHarness(targetHarness);
