@@ -491,7 +491,7 @@ func main() {
 	// beat like Turtle. When the flag is off, nothing is constructed.
 	if cfg.EnableProphetDefensive && tradingService != nil {
 		hedgeLedger := services.NewProphetHedgeLedger(storageService)
-		hedgeOptionsData := services.NewAlpacaOptionsDataService(cfg.AlpacaAPIKey, cfg.AlpacaSecretKey)
+		hedgeOptionsData := services.NewAlpacaOptionsDataService(cfg.AlpacaAPIKey, cfg.AlpacaSecretKey, cfg.AlpacaBaseURL)
 		hedgeExecutor := services.NewProphetHedgeExecutor(
 			hedgeLedger,
 			regimeGate,
@@ -519,7 +519,7 @@ func main() {
 	var verticalProposer *services.VerticalProposer
 	if tradingService != nil {
 		verticalLedger := services.NewProphetVerticalLedger(storageService)
-		verticalOptionsData := services.NewAlpacaOptionsDataService(cfg.AlpacaAPIKey, cfg.AlpacaSecretKey)
+		verticalOptionsData := services.NewAlpacaOptionsDataService(cfg.AlpacaAPIKey, cfg.AlpacaSecretKey, cfg.AlpacaBaseURL)
 		verticalExecutor = services.NewProphetVerticalExecutor(
 			verticalLedger,
 			verticalOptionsData,
@@ -564,7 +564,7 @@ func main() {
 	if cfg.EnableProphetOptionsStop {
 		prophetBeatObserver := services.NewProphetBeatObserver()
 		beatCtxController.SetProphetBeatRecorder(prophetBeatObserver)
-		optDataSvc := services.NewAlpacaOptionsDataService(cfg.AlpacaAPIKey, cfg.AlpacaSecretKey)
+		optDataSvc := services.NewAlpacaOptionsDataService(cfg.AlpacaAPIKey, cfg.AlpacaSecretKey, cfg.AlpacaBaseURL)
 		stopMonitor := services.NewProphetOptionsStopMonitor(
 			tradingService, // ListOptionsPositions
 			optDataSvc,     // GetOptionSnapshot

@@ -22,6 +22,7 @@ var usMarketHolidays2026 = map[string]bool{
 type hedgeRegimeFetcher interface{ GetStatus() RegimeGateStatus }
 type hedgeChainFetcher interface {
 	GetOptionChain(ctx context.Context, underlying string, exp time.Time) (map[string]*interfaces.OptionContract, error)
+	GetOptionChainRange(ctx context.Context, underlying string, gte, lte time.Time) (map[string]*interfaces.OptionContract, error)
 	GetOptionSnapshot(ctx context.Context, optionSymbol string) (*interfaces.OptionContract, error)
 }
 type hedgeMlegTrader interface {
@@ -378,24 +379,51 @@ func (e *ProphetHedgeExecutor) openNew(ctx context.Context, open []*models.DBPro
 
 // pickExpiry returns the nearest contract expiration whose DTE ∈ [DTEMin,DTEMax].
 // Probes a chain near the band midpoint; the broker returns listed monthlies.
+// pickExpiry finds the expiry the hedge should trade inside [DTEMin, DTEMax].
+//
+// It queries the whole band, not a single date. The previous implementation
+// probed one exact date (now + midpoint days) and asked GetOptionChain for it,
+// but that endpoint matches an EXACT expiration_date — so the returned chain
+// only ever held that one date and the band loop below could never scan. At
+// 45-60 DTE only monthlies are listed, so the probe date almost never matched
+// a real expiry and the hedge skipped every day.
+//
+// Monthlies (third Fridays) are preferred over an earlier in-band weekly:
+// they carry the open interest at this horizon, and the trade guard only
+// checks the LONG leg's spread, so a thin short leg would go unchecked.
 func (e *ProphetHedgeExecutor) pickExpiry(ctx context.Context, p SpreadProfile, now time.Time) (time.Time, bool) {
-	probe := now.Add(time.Duration((p.DTEMin+p.DTEMax)/2) * 24 * time.Hour)
-	chain, err := e.chain.GetOptionChain(ctx, "QQQ", probe)
+	gte := now.AddDate(0, 0, p.DTEMin)
+	lte := now.AddDate(0, 0, p.DTEMax)
+	chain, err := e.chain.GetOptionChainRange(ctx, "QQQ", gte, lte)
 	if err != nil || len(chain) == 0 {
 		return time.Time{}, false
 	}
-	var best time.Time
-	bestDTE := -1
+
+	// Calendar-day DTE: contract expirations land on midnight UTC while `now`
+	// carries a time of day, so an instant-based subtraction truncates a
+	// boundary expiry out of the band.
+	today := now.UTC().Truncate(24 * time.Hour)
+
+	var bestMonthly, bestAny time.Time
+	bestMonthlyDTE, bestAnyDTE := -1, -1
 	for _, c := range chain {
-		dte := int(c.ExpirationDate.Sub(now).Hours() / 24)
-		if dte >= p.DTEMin && dte <= p.DTEMax {
-			if bestDTE == -1 || dte < bestDTE {
-				bestDTE, best = dte, c.ExpirationDate
-			}
+		dte := int(c.ExpirationDate.UTC().Truncate(24*time.Hour).Sub(today).Hours() / 24)
+		if dte < p.DTEMin || dte > p.DTEMax {
+			continue
+		}
+		if bestAnyDTE == -1 || dte < bestAnyDTE {
+			bestAnyDTE, bestAny = dte, c.ExpirationDate
+		}
+		if isThirdFriday(c.ExpirationDate) && (bestMonthlyDTE == -1 || dte < bestMonthlyDTE) {
+			bestMonthlyDTE, bestMonthly = dte, c.ExpirationDate
 		}
 	}
-	if bestDTE == -1 {
-		return time.Time{}, false
+
+	if bestMonthlyDTE != -1 {
+		return bestMonthly, true
 	}
-	return best, true
+	if bestAnyDTE != -1 {
+		return bestAny, true
+	}
+	return time.Time{}, false
 }

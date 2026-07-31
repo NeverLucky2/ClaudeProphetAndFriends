@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -15,11 +16,21 @@ type hedgeStubRegime struct{ st RegimeGateStatus }
 func (s hedgeStubRegime) GetStatus() RegimeGateStatus { return s.st }
 
 type hedgeStubChain struct {
-	chain map[string]*interfaces.OptionContract
-	snaps map[string]*interfaces.OptionContract
+	chain      map[string]*interfaces.OptionContract
+	rangeChain map[string]*interfaces.OptionContract
+	snaps      map[string]*interfaces.OptionContract
 }
 
 func (s hedgeStubChain) GetOptionChain(_ context.Context, _ string, _ time.Time) (map[string]*interfaces.OptionContract, error) {
+	return s.chain, nil
+}
+
+// GetOptionChainRange defaults to `chain` when no explicit rangeChain is set,
+// so existing fixtures keep working unchanged.
+func (s hedgeStubChain) GetOptionChainRange(_ context.Context, _ string, _, _ time.Time) (map[string]*interfaces.OptionContract, error) {
+	if s.rangeChain != nil {
+		return s.rangeChain, nil
+	}
 	return s.chain, nil
 }
 func (s hedgeStubChain) GetOptionSnapshot(_ context.Context, sym string) (*interfaces.OptionContract, error) {
@@ -238,5 +249,93 @@ func TestRunHeartbeat_HolidaySkips(t *testing.T) {
 	}
 	if res.Skipped == "" || !strings.Contains(res.Skipped, "holiday") {
 		t.Fatalf("expected a holiday skip, got Skipped=%q", res.Skipped)
+	}
+}
+
+// hedgeExpiryFixture builds a chain of puts at the given expiries, all priced
+// identically — only the expiration dates matter to pickExpiry.
+func hedgeExpiryFixture(exps ...time.Time) map[string]*interfaces.OptionContract {
+	chain := map[string]*interfaces.OptionContract{}
+	for i, e := range exps {
+		sym := fmt.Sprintf("QQQ_P475_%d", i)
+		chain[sym] = &interfaces.OptionContract{
+			Symbol: sym, ContractType: "put", StrikePrice: 475, ExpirationDate: e,
+		}
+	}
+	return chain
+}
+
+// TestPickExpiry_PrefersMonthlyOverEarlierWeekly: the band query can surface
+// both a weekly and a monthly. The monthly carries the open interest, and the
+// short leg's liquidity is not covered by the spread guard, so the monthly
+// wins even though the weekly has a lower DTE.
+func TestPickExpiry_PrefersMonthlyOverEarlierWeekly(t *testing.T) {
+	now := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
+	weekly := time.Date(2026, 9, 16, 0, 0, 0, 0, time.UTC)  // Wed, DTE 47
+	monthly := time.Date(2026, 9, 18, 0, 0, 0, 0, time.UTC) // 3rd Fri, DTE 49
+
+	ex := NewProphetHedgeExecutor(nil, hedgeStubRegime{},
+		hedgeStubChain{rangeChain: hedgeExpiryFixture(weekly, monthly)},
+		nil, nil, nil, nil)
+
+	got, ok := ex.pickExpiry(context.Background(), selectStructure(RegimeGateStatus{}, 0), now)
+	if !ok {
+		t.Fatal("pickExpiry returned ok=false, want a monthly expiry")
+	}
+	if !got.Equal(monthly) {
+		t.Errorf("picked %s, want the monthly %s", got.Format("2006-01-02"), monthly.Format("2006-01-02"))
+	}
+}
+
+// TestPickExpiry_FallsBackToNearestWhenNoMonthly keeps the hedge tradable in a
+// band that happens to contain no third Friday.
+func TestPickExpiry_FallsBackToNearestWhenNoMonthly(t *testing.T) {
+	now := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
+	early := time.Date(2026, 9, 16, 0, 0, 0, 0, time.UTC) // DTE 47
+	late := time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)  // DTE 54
+
+	ex := NewProphetHedgeExecutor(nil, hedgeStubRegime{},
+		hedgeStubChain{rangeChain: hedgeExpiryFixture(early, late)},
+		nil, nil, nil, nil)
+
+	got, ok := ex.pickExpiry(context.Background(), selectStructure(RegimeGateStatus{}, 0), now)
+	if !ok {
+		t.Fatal("pickExpiry returned ok=false, want the nearest in-band expiry")
+	}
+	if !got.Equal(early) {
+		t.Errorf("picked %s, want the nearest in-band %s", got.Format("2006-01-02"), early.Format("2006-01-02"))
+	}
+}
+
+// TestPickExpiry_EmptyBandSkipsCleanly: the real-world case that produced 52
+// days of silent skips — no listed expiry in the band.
+func TestPickExpiry_EmptyBandSkipsCleanly(t *testing.T) {
+	now := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
+	ex := NewProphetHedgeExecutor(nil, hedgeStubRegime{},
+		hedgeStubChain{rangeChain: map[string]*interfaces.OptionContract{}},
+		nil, nil, nil, nil)
+
+	if _, ok := ex.pickExpiry(context.Background(), selectStructure(RegimeGateStatus{}, 0), now); ok {
+		t.Error("pickExpiry returned ok=true on an empty band, want false")
+	}
+}
+
+// TestPickExpiry_IgnoresOutOfBandExpiries: the API range is inclusive by date,
+// so the DTE filter must still reject anything outside [DTEMin, DTEMax].
+func TestPickExpiry_IgnoresOutOfBandExpiries(t *testing.T) {
+	now := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
+	tooSoon := time.Date(2026, 8, 21, 0, 0, 0, 0, time.UTC) // 3rd Fri, DTE 21
+	inBand := time.Date(2026, 9, 18, 0, 0, 0, 0, time.UTC)  // 3rd Fri, DTE 49
+
+	ex := NewProphetHedgeExecutor(nil, hedgeStubRegime{},
+		hedgeStubChain{rangeChain: hedgeExpiryFixture(tooSoon, inBand)},
+		nil, nil, nil, nil)
+
+	got, ok := ex.pickExpiry(context.Background(), selectStructure(RegimeGateStatus{}, 0), now)
+	if !ok {
+		t.Fatal("pickExpiry returned ok=false, want the in-band monthly")
+	}
+	if !got.Equal(inBand) {
+		t.Errorf("picked %s, want %s", got.Format("2006-01-02"), inBand.Format("2006-01-02"))
 	}
 }

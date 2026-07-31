@@ -2,10 +2,33 @@ package services
 
 import (
 	"testing"
+	"time"
 
 	"prophet-trader/interfaces"
 	"prophet-trader/models"
 )
+
+func TestIsThirdFriday(t *testing.T) {
+	cases := []struct {
+		name string
+		date time.Time
+		want bool
+	}{
+		{"2026-09-18 monthly", time.Date(2026, 9, 18, 0, 0, 0, 0, time.UTC), true},
+		{"2026-10-16 monthly", time.Date(2026, 10, 16, 0, 0, 0, 0, time.UTC), true},
+		{"2026-09-11 second Friday", time.Date(2026, 9, 11, 0, 0, 0, 0, time.UTC), false},
+		{"2026-09-25 fourth Friday", time.Date(2026, 9, 25, 0, 0, 0, 0, time.UTC), false},
+		{"2026-09-16 Wednesday weekly", time.Date(2026, 9, 16, 0, 0, 0, 0, time.UTC), false},
+		{"2026-09-21 Monday weekly", time.Date(2026, 9, 21, 0, 0, 0, 0, time.UTC), false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isThirdFriday(c.date); got != c.want {
+				t.Errorf("isThirdFriday(%s) = %v, want %v", c.date.Format("2006-01-02"), got, c.want)
+			}
+		})
+	}
+}
 
 func TestSelectStructure_FixedV1(t *testing.T) {
 	// v1 ignores regime/iv and always returns the fixed tail-targeted profile.

@@ -2,6 +2,7 @@ package services
 
 import (
 	"math"
+	"time"
 
 	"prophet-trader/interfaces"
 	"prophet-trader/models"
@@ -121,4 +122,12 @@ func syntheticStressPayoff(sp *models.DBProphetHedgeSpread, spot, shockFrac floa
 	}
 	perShare := longIntrinsic - shortIntrinsic - sp.NetDebitPerContract
 	return perShare * 100 * float64(sp.Contracts)
+}
+
+// isThirdFriday reports whether t is the third Friday of its month — the
+// standard US monthly option expiration. The third Friday is always in the
+// 15th-21st window. Monthlies carry the open interest in the 45-60 DTE band
+// the hedge trades; weeklies that far out are thin or unlisted.
+func isThirdFriday(t time.Time) bool {
+	return t.Weekday() == time.Friday && t.Day() >= 15 && t.Day() <= 21
 }
